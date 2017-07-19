@@ -1,0 +1,33 @@
+package demo;
+import java.util.Scanner;
+
+public class 打印菱形 {
+
+	public static void main(String[] args) {
+		System.out.println("请输入要打印的菱形的行数（需为奇数）");
+		Scanner input = new Scanner(System.in);
+		int TotalLine = input.nextInt();
+		int MaxLine = (TotalLine+1)/2;
+		for(int i=1;i<=MaxLine;i++) {
+			for(int space=1;space<=MaxLine-i;space++) {
+				System.out.print("  ");
+			}
+			for(int star = 1;star<=2*i-1;star++) {
+				System.out.print("* ");
+			}
+			System.out.println();
+		}
+		int DecLine = TotalLine - MaxLine;
+		for(int i=1;i<=DecLine;i++) {
+			for(int space=1;space<=i;space++) {
+				System.out.print("  ");
+			}
+			for(int star=1;star<=(DecLine-i+1)*2-1; star++){
+				System.out.print("* ");
+			}
+			System.out.println();
+		}
+
+	}
+
+}
