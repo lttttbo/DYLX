@@ -1,0 +1,1544 @@
+下面按你提供的两份源文件范围（vmm_scheduler.c + vmm_schedalgo_prr.c），把所有函数（含 static 内部函数与 #ifdef 条件函数）逐个做“设计/接口级”分析，并为每个函数给出 PlantUML 活动图（流程图）。
+约定（便于文档一致性）
+	•	输入参数：函数调用者提供（IN）
+	•	输出参数：通过指针由函数写回（OUT），或通过返回值返回
+	•	常见返回码（仅列本模块出现的）：
+	•	VMM_OK：成功
+	•	VMM_EFAIL：一般性失败（空指针/内部失败）
+	•	VMM_EINVALID：参数/状态不合法
+	•	VMM_ENOTAVAIL：资源/条件不可用（如队列空、CPU不在线等）
+	•	VMM_ENOMEM：内存不足（只在 PRR setup/create 场景出现）
+	•	VMM_VCPU_STATE_* 属于 vCPU 状态机常量（定义在头文件中），本文件直接使用：UNKNOWN/RESET/READY/RUNNING/PAUSED/HALTED 等。
+
+一、vmm_schedalgo_prr.c（PRR 调度算法）全部函数
+1.1 vmm_schedalgo_vcpu_setup
+功能 为一个 vCPU 分配并初始化 PRR 就绪队列节点 struct vmm_schedalgo_rq_entry，并绑定到 vcpu->sched_priv，使后续 enqueue/detach 成为 O(1) 链表操作。
+声明
+int vmm_schedalgo_vcpu_setup(struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	取值/约束	说明
+vcpu	struct vmm_vcpu *	非空	需要纳入 PRR 调度管理的 vCPU
+输出参数（OUT） 无（通过 vcpu->sched_priv 产生副作用）
+返回值
+返回值	含义
+VMM_OK	成功，vcpu->sched_priv 已指向新建的 rq_entry
+VMM_EFAIL	vcpu==NULL 或内存分配失败
+流程图（PlantUML）
+@startuml
+title vmm_schedalgo_vcpu_setup 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:分配 rq_entry 内存;
+if (分配失败?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:初始化 rq_entry->head;
+:rq_entry->vcpu = vcpu;
+:vcpu->sched_priv = rq_entry;
+:返回 VMM_OK;
+stop
+@enduml
+
+1.2 vmm_schedalgo_vcpu_cleanup
+功能 释放 vCPU 绑定的 PRR 私有队列节点（vcpu->sched_priv），并置空指针，避免内存泄漏。
+声明
+int vmm_schedalgo_vcpu_cleanup(struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	取值/约束	说明
+vcpu	struct vmm_vcpu *	非空	待清理的 vCPU
+输出参数（OUT） 无（清理 vcpu->sched_priv）
+返回值
+返回值	含义
+VMM_OK	成功（即使 sched_priv 为空也视为成功处理）
+VMM_EFAIL	vcpu==NULL
+流程图
+@startuml
+title vmm_schedalgo_vcpu_cleanup 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+if (vcpu->sched_priv 是否非空?) then (是)
+  :释放 vcpu->sched_priv;
+  :vcpu->sched_priv = NULL;
+endif
+:返回 VMM_OK;
+stop
+@enduml
+
+1.3 vmm_schedalgo_rq_length
+功能 统计指定优先级队列长度（遍历链表计数）。
+声明
+int vmm_schedalgo_rq_length(void *rq, u8 priority);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	非空（期望指向 struct vmm_schedalgo_rq）	PRR ready queue
+priority	u8	建议在 [VMM_VCPU_MIN_PRIORITY, VMM_VCPU_MAX_PRIORITY]	目标优先级桶
+输出参数（OUT） 无
+返回值
+返回值	含义
+>=0	指定优先级链表中的节点数
+-1	rq==NULL（注意：这是计数函数的特殊约定，不是 VMM_E*）
+流程图
+@startuml
+title vmm_schedalgo_rq_length 流程
+start
+if (rq 是否为空?) then (是)
+  :返回 -1;
+  stop
+endif
+:遍历 list[priority] 计数;
+:返回 count;
+stop
+@enduml
+
+1.4 vmm_schedalgo_rq_enqueue
+功能 将 vCPU 对应的 rq_entry 按其 vcpu->priority 插入到对应优先级桶的队尾，形成同优先级 FIFO。
+声明
+int vmm_schedalgo_rq_enqueue(void *rq, struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	非空	PRR 就绪队列
+vcpu	struct vmm_vcpu *	非空，且 vcpu->sched_priv 非空	待入队 vCPU（必须先 setup）
+输出参数（OUT） 无
+返回值
+返回值	含义
+VMM_OK	入队成功
+VMM_EFAIL	rq==NULL / vcpu==NULL / vcpu->sched_priv==NULL
+流程图
+@startuml
+title vmm_schedalgo_rq_enqueue 流程
+start
+if (rq 或 vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:rq_entry = vcpu->sched_priv;
+if (rq_entry 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:插入到 list[vcpu->priority] 队尾;
+:返回 VMM_OK;
+stop
+@enduml
+
+1.5 vmm_schedalgo_rq_dequeue
+功能 从最高优先级向下扫描，找到第一个非空队列，取队首节点作为 next，并返回其 time_slice。
+声明
+int vmm_schedalgo_rq_dequeue(void *rq,
+                            struct vmm_vcpu **next,
+                            u64 *next_time_slice);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	非空	PRR 就绪队列
+next	struct vmm_vcpu **	允许为空	非空时写回选中的 vCPU 指针
+next_time_slice	u64 *	允许为空	非空时写回选中 vCPU 的 time_slice
+输出参数（OUT）
+参数	写入条件	输出含义
+*next	next!=NULL 且成功	指向被选中的 vCPU
+*next_time_slice	next_time_slice!=NULL 且成功	下一时间片长度（ns）
+返回值
+返回值	含义
+VMM_OK	成功出队并返回 next
+VMM_EFAIL	rq==NULL
+VMM_ENOTAVAIL	所有优先级队列都为空
+流程图
+@startuml
+title vmm_schedalgo_rq_dequeue 流程
+start
+if (rq 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:从最高优先级向下扫描\n寻找第一个非空队列;
+if (找到非空队列?) then (是)
+  :取队首 rq_entry 并从链表删除;
+  if (next 非空?) then (是)
+    :*next = rq_entry->vcpu;
+  endif
+  if (next_time_slice 非空?) then (是)
+    :*next_time_slice = rq_entry->vcpu->time_slice;
+  endif
+  :返回 VMM_OK;
+  stop
+else (否)
+  :返回 VMM_ENOTAVAIL;
+  stop
+endif
+@enduml
+
+1.6 vmm_schedalgo_rq_detach
+功能 将 vCPU 对应的 rq_entry 从其所在链表中剥离（删除并重新初始化节点），用于 READY→非 READY 的移除。
+声明
+int vmm_schedalgo_rq_detach(void *rq, struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	允许为空（实现未用它做校验）	保留接口一致性
+vcpu	struct vmm_vcpu *	非空且 sched_priv 非空	待剥离 vCPU
+输出参数（OUT） 无
+返回值
+返回值	含义
+VMM_OK	剥离成功
+VMM_EFAIL	vcpu==NULL 或 vcpu->sched_priv==NULL
+流程图
+@startuml
+title vmm_schedalgo_rq_detach 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:rq_entry = vcpu->sched_priv;
+if (rq_entry 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:从链表删除并初始化节点(list_del_init);
+:返回 VMM_OK;
+stop
+@enduml
+
+1.7 vmm_schedalgo_rq_prempt_needed
+功能 判断是否需要抢占：只要存在任何更高优先级的非空队列，则返回 TRUE。
+声明
+bool vmm_schedalgo_rq_prempt_needed(void *rq, struct vmm_vcpu *current);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	非空	PRR 就绪队列
+current	struct vmm_vcpu *	非空	当前运行的 vCPU
+输出参数（OUT） 无
+返回值
+返回值	含义
+TRUE	有更高优先级 READY 存在，建议抢占
+FALSE	否则（或 rq/current 为空）
+流程图
+@startuml
+title vmm_schedalgo_rq_prempt_needed 流程
+start
+if (rq 或 current 是否为空?) then (是)
+  :返回 FALSE;
+  stop
+endif
+:从最高优先级向下检查\n是否存在 p > current->priority 的非空队列;
+if (存在?) then (是)
+  :返回 TRUE;
+else (否)
+  :返回 FALSE;
+endif
+stop
+@enduml
+
+1.8 vmm_schedalgo_rq_create
+功能 创建并初始化 PRR ready queue（每个优先级桶链表头初始化）。
+声明
+void *vmm_schedalgo_rq_create(void);
+输入参数（IN） 无
+输出参数（OUT） 返回值为新建队列对象指针（成功时）
+返回值
+返回值	含义
+非空指针	成功，指向 struct vmm_schedalgo_rq
+NULL	失败（内存不足）
+流程图
+@startuml
+title vmm_schedalgo_rq_create 流程
+start
+:分配 rq 内存;
+if (分配失败?) then (是)
+  :返回 NULL;
+  stop
+endif
+:对每个优先级桶初始化链表头;
+:返回 rq 指针;
+stop
+@enduml
+
+1.9 vmm_schedalgo_rq_destroy
+功能 释放 PRR ready queue 对象。
+声明
+int vmm_schedalgo_rq_destroy(void *rq);
+输入参数（IN）
+参数	类型	取值/约束	说明
+rq	void *	允许为空	待释放对象
+输出参数（OUT） 无
+返回值
+返回值	含义
+VMM_OK	rq 非空且释放成功
+VMM_EFAIL	rq==NULL
+流程图
+@startuml
+title vmm_schedalgo_rq_destroy 流程
+start
+if (rq 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:释放 rq 内存;
+:返回 VMM_OK;
+stop
+@enduml
+
+二、vmm_scheduler.c（调度管理核心）全部函数
+2.1 rq_dequeue（static）
+功能 对 PRR 的 vmm_schedalgo_rq_dequeue() 做一层 rq_lock 加锁保护封装（Per-CPU runqueue 并发安全）。
+声明
+static int rq_dequeue(struct vmm_scheduler_ctrl *schedp,
+                      struct vmm_vcpu **next,
+                      u64 *next_time_slice);
+输入参数（IN）
+参数	类型	取值/约束	说明
+schedp	struct vmm_scheduler_ctrl *	非空	本核调度控制块
+next	struct vmm_vcpu **	允许为空	返回 next
+next_time_slice	u64 *	允许为空	返回 next 时间片
+输出参数（OUT） 同 PRR dequeue
+返回值 透传 vmm_schedalgo_rq_dequeue() 返回：VMM_OK / VMM_EFAIL / VMM_ENOTAVAIL
+流程图
+@startuml
+title rq_dequeue(封装) 流程
+start
+:加 rq_lock;
+:调用 vmm_schedalgo_rq_dequeue(rq, next, next_time_slice);
+:解 rq_lock;
+:返回 ret;
+stop
+@enduml
+
+2.2 rq_enqueue（static）
+功能 封装 vmm_schedalgo_rq_enqueue()，并用 rq_lock 保护。
+声明
+static int rq_enqueue(struct vmm_scheduler_ctrl *schedp,
+                      struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	约束	说明
+schedp	struct vmm_scheduler_ctrl *	非空	本核调度控制块
+vcpu	struct vmm_vcpu *	非空	入队 vCPU
+输出参数（OUT） 无
+返回值 透传 vmm_schedalgo_rq_enqueue()：VMM_OK / VMM_EFAIL
+流程图
+@startuml
+title rq_enqueue(封装) 流程
+start
+:加 rq_lock;
+:调用 vmm_schedalgo_rq_enqueue(rq, vcpu);
+:解 rq_lock;
+:返回 ret;
+stop
+@enduml
+
+2.3 rq_detach（static）
+功能 封装 vmm_schedalgo_rq_detach()，并用 rq_lock 保护。
+声明
+static int rq_detach(struct vmm_scheduler_ctrl *schedp,
+                     struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	约束
+schedp	struct vmm_scheduler_ctrl *	非空
+vcpu	struct vmm_vcpu *	非空
+输出参数（OUT） 无
+返回值 透传 vmm_schedalgo_rq_detach()：VMM_OK / VMM_EFAIL
+流程图
+@startuml
+title rq_detach(封装) 流程
+start
+:加 rq_lock;
+:调用 vmm_schedalgo_rq_detach(rq, vcpu);
+:解 rq_lock;
+:返回 ret;
+stop
+@enduml
+
+2.4 rq_prempt_needed（static）
+功能 封装 PRR 抢占判断，并用 rq_lock 保护。
+声明
+static bool rq_prempt_needed(struct vmm_scheduler_ctrl *schedp);
+输入参数（IN）
+参数	类型	约束
+schedp	struct vmm_scheduler_ctrl *	非空
+输出参数（OUT） 无
+返回值
+返回值	含义
+TRUE/FALSE	透传 vmm_schedalgo_rq_prempt_needed(rq, current_vcpu)
+流程图
+@startuml
+title rq_prempt_needed(封装) 流程
+start
+:加 rq_lock;
+:ret = vmm_schedalgo_rq_prempt_needed(rq, current_vcpu);
+:解 rq_lock;
+:返回 ret;
+stop
+@enduml
+
+2.5 rq_length（static）
+功能 封装 vmm_schedalgo_rq_length()，并用 rq_lock 保护。
+声明
+static u32 rq_length(struct vmm_scheduler_ctrl *schedp, u32 priority);
+输入参数（IN）
+参数	类型	取值/约束
+schedp	struct vmm_scheduler_ctrl *	非空
+priority	u32	应落在有效优先级范围
+输出参数（OUT） 无
+返回值
+返回值	含义
+u32	返回该优先级队列长度（注意算法侧为 int，正常路径不会出现 -1）
+流程图
+@startuml
+title rq_length(封装) 流程
+start
+:加 rq_lock;
+:ret = vmm_schedalgo_rq_length(rq, priority);
+:解 rq_lock;
+:返回 ret;
+stop
+@enduml
+
+2.6 __vmm_scheduler_next1（static）
+功能 首次进入调度（本核还没有 current_vcpu）时，从 runqueue 取出 next，完成一次“无 current 的切换”，并启动 next 的时间片事件。
+声明
+static struct vmm_vcpu *__vmm_scheduler_next1(struct vmm_scheduler_ctrl *schedp,
+                                              arch_regs_t *regs);
+输入参数（IN）
+参数	类型	约束	说明
+schedp	struct vmm_scheduler_ctrl *	非空	本核调度控制块
+regs	arch_regs_t *	非空	当前上下文寄存器（用于切换到 next）
+输出参数（OUT）
+输出	含义
+返回值	返回被选中并切换到的 next vCPU 指针
+返回值（指针）
+返回值	含义
+非空	正常返回 next
+（不会返回 NULL）	若 dequeue 失败，代码会 panic
+流程图
+@startuml
+title __vmm_scheduler_next1 流程
+start
+:从就绪队列出队 next 与 time_slice;
+if (出队失败?) then (是)
+  :触发 panic(不应发生);
+  stop
+endif
+:加 next->sched_lock(写锁);
+:arch_vcpu_switch(NULL, next, regs);
+:更新 next 统计与状态(READY->RUNNING);
+:设置 schedp->current_vcpu = next;
+:启动时间片事件 ev(time_slice);
+:解 next->sched_lock;
+:返回 next;
+stop
+@enduml
+
+2.7 __vmm_scheduler_sync_system_time（static）
+功能 把本次 vCPU 运行期间发生的 IRQ/异常处理耗时差分出来，累加进 current->system_nsecs，并刷新基线值。
+声明
+static void __vmm_scheduler_sync_system_time(struct vmm_scheduler_ctrl *schedp,
+                                             struct vmm_vcpu *current);
+输入参数（IN）
+参数	类型	约束
+schedp	struct vmm_scheduler_ctrl *	非空
+current	struct vmm_vcpu *	非空
+输出参数（OUT）
+输出	含义
+current->system_nsecs	被累加更新
+schedp->current_vcpu_irq_ns / exp_ns	被刷新更新
+返回值 void
+流程图
+@startuml
+title __vmm_scheduler_sync_system_time 流程
+start
+:system = (irq_process_ns - current_vcpu_irq_ns)\n       + (exp_process_ns - current_vcpu_exp_ns);
+:current->system_nsecs += system;
+:刷新 current_vcpu_irq_ns 与 current_vcpu_exp_ns 基线;
+stop
+@enduml
+
+2.8 __vmm_scheduler_next2（static）
+功能 常规调度路径：在已有 current 的情况下，按“当前是否可保存/是否仍 RUNNING”决定是否将 current 重新入队，然后从队列中选出 next，必要时执行上下文切换，并启动 next 的时间片。
+声明
+static struct vmm_vcpu *__vmm_scheduler_next2(struct vmm_scheduler_ctrl *schedp,
+                                              struct vmm_vcpu *current,
+                                              arch_regs_t *regs);
+输入参数（IN）
+参数	类型	约束
+schedp	struct vmm_scheduler_ctrl *	非空
+current	struct vmm_vcpu *	非空
+regs	arch_regs_t *	非空
+输出参数（OUT）
+输出	含义
+返回值	若发生切换，返回 next；若未切换（next==current），返回 NULL（这是本函数的约定）
+返回值（指针）
+返回值	含义
+NULL	next == current，本次不需要切换
+非空	next != current，本次发生切换
+流程图
+@startuml
+title __vmm_scheduler_next2 流程
+start
+:读取 current_state;
+if (current_state 可保存?) then (是)
+  if (current_state == RUNNING?) then (是)
+    :同步系统时间到 current->system_nsecs;
+    :RUNNING 时间累加;
+    :设置 current 状态为 READY;
+    :将 current 入队到就绪队列;
+  endif
+  :tcurrent = current(作为切换源);
+endif
+
+repeat
+  :从就绪队列出队 next 与 time_slice;
+  if (出队失败?) then (是)
+    :触发 panic(不应发生);
+    stop
+  endif
+
+  if (next != current?) then (是)
+    :加 next->sched_lock(写锁);
+    if (next 当前仍为 READY?) then (是)
+      :arch_vcpu_switch(tcurrent, next, regs);
+      :解 next->sched_lock(切换后再解);
+      break
+    else (否)
+      :解 next->sched_lock;
+      :继续重新出队选择 next;
+    endif
+  else (否)
+    :next==current，无需切换;
+    break
+  endif
+repeat while (需要重新选择?)
+
+:更新 next 统计与状态(READY->RUNNING);
+:设置 schedp->current_vcpu = next;
+:启动时间片事件 ev(time_slice);
+if (next != current?) then (是)
+  :返回 next;
+else (否)
+  :返回 NULL;
+endif
+stop
+@enduml
+
+2.9 trace_ctx_switch（static，#ifdef CONFIG_CMD_LAT_CTX）
+功能 在开启 CONFIG_CMD_LAT_CTX 时记录一次上下文切换耗时及相关信息到 trace 系统，用于性能测量。
+声明
+static void trace_ctx_switch(u64 diff,
+                             struct vmm_vcpu *current,
+                             struct vmm_vcpu *next);
+输入参数（IN）
+参数	类型	说明
+diff	u64	本次切换耗时（ns）
+current	struct vmm_vcpu *	被切出的 vCPU
+next	struct vmm_vcpu *	被切入的 vCPU
+输出参数（OUT） 无（向 trace 系统输出）
+返回值 void
+流程图
+@startuml
+title trace_ctx_switch(可选编译) 流程
+start
+if (TRACE 组未使能?) then (是)
+  :直接返回;
+  stop
+endif
+:组织 a/b/c/d 字段(包含 vcpuid/hcpu/priority/diff);
+:调用 trace(...) 输出打点;
+stop
+@enduml
+
+2.10 vmm_scheduler_switch（static）
+功能 调度器核心“切换入口”：根据当前是否存在 current_vcpu、是否允许抢占（preempt_count 等），决定调用 __next1 或 __next2，并在需要时做切换后的收尾（arch_vcpu_post_switch / trace）。
+声明
+static void vmm_scheduler_switch(struct vmm_scheduler_ctrl *schedp,
+                                 arch_regs_t *regs);
+输入参数（IN）
+参数	类型	约束
+schedp	struct vmm_scheduler_ctrl *	非空
+regs	arch_regs_t *	非空（否则 panic）
+输出参数（OUT） 无（更新 per-cpu 当前 vCPU、启动定时器事件等）
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_switch 流程
+start
+if (regs 是否为空?) then (是)
+  :panic(不应发生);
+  stop
+endif
+
+:current = schedp->current_vcpu;
+if (current 是否存在?) then (是)
+  :计算 preempt_min(若持 wq_lock 则为 1 否则 0);
+  if (current->preempt_count == preempt_min?) then (是)
+    :加 current->sched_lock(写锁);
+    :next = __vmm_scheduler_next2(schedp, current, regs);
+    :解 current->sched_lock;
+    if (发生切换且 current 持 wq_lock?) then (是)
+      :释放 wq_lock 并调整 preempt_count;
+    endif
+  else (否)
+    :重启时间片事件(ev);
+    :next = NULL;
+  endif
+else (否)
+  :next = __vmm_scheduler_next1(schedp, regs);
+endif
+
+if (next 是否非空?) then (是)
+  :arch_vcpu_post_switch(next, regs);
+  :可选 trace 记录切换耗时;
+endif
+stop
+@enduml
+
+2.11 scheduler_timer_event（static）
+功能 时间片事件回调：如果处于 IRQ 路径（irq_regs 已保存），则直接触发一次 vmm_scheduler_switch。
+声明
+static void scheduler_timer_event(struct vmm_timer_event *ev);
+输入参数（IN）
+参数	类型	说明
+ev	struct vmm_timer_event *	事件对象（本函数主要使用 per-cpu sched）
+输出参数（OUT） 无
+返回值 void
+流程图
+@startuml
+title scheduler_timer_event 流程
+start
+:schedp = 本CPU sched;
+if (schedp->irq_regs 是否存在?) then (是)
+  :调用 vmm_scheduler_switch(schedp, irq_regs);
+endif
+stop
+@enduml
+
+2.12 vmm_scheduler_preempt_disable
+功能 在非 IRQ 上下文中，对当前 vCPU 的 preempt_count++，禁止被抢占。
+声明
+void vmm_scheduler_preempt_disable(void);
+输入参数（IN） 无
+输出参数（OUT） 修改当前 vCPU 的 preempt_count
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_preempt_disable 流程
+start
+:关本地中断(保存 flags);
+if (当前不在 IRQ 上下文?) then (是)
+  :vcpu = current_vcpu;
+  if (vcpu 存在?) then (是)
+    :vcpu->preempt_count++;
+  endif
+endif
+:恢复本地中断;
+stop
+@enduml
+
+2.13 vmm_scheduler_preempt_enable
+功能 在非 IRQ 上下文中，对当前 vCPU 的 preempt_count--（若非 0），恢复可抢占。
+声明
+void vmm_scheduler_preempt_enable(void);
+流程图
+@startuml
+title vmm_scheduler_preempt_enable 流程
+start
+:关本地中断(保存 flags);
+if (当前不在 IRQ 上下文?) then (是)
+  :vcpu = current_vcpu;
+  if (vcpu 存在 且 preempt_count>0?) then (是)
+    :vcpu->preempt_count--;
+  endif
+endif
+:恢复本地中断;
+stop
+@enduml
+
+2.14 vmm_scheduler_preempt_orphan
+功能 在 orphan 上下文下触发一次调度切换（直接调用 vmm_scheduler_switch）。
+声明
+void vmm_scheduler_preempt_orphan(arch_regs_t *regs);
+输入参数（IN）
+参数	类型	约束
+regs	arch_regs_t *	非空（来自软中断/陷入现场）
+输出参数（OUT） 无
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_preempt_orphan 流程
+start
+:schedp = 本CPU sched;
+:调用 vmm_scheduler_switch(schedp, regs);
+stop
+@enduml
+
+2.15 scheduler_ipi_resched（static）
+功能 resched 同步 IPI 的处理函数：复位 rq_resched_state，并在 IRQ 现场存在且确需抢占时触发切换。
+声明
+static void scheduler_ipi_resched(void *arg0, void *arg1, void *arg2);
+输入参数（IN） arg0/arg1/arg2：未使用（保留接口一致性）
+输出参数（OUT）
+输出	说明
+rq_resched_state	写回为 IDLE
+可能触发调度切换	若满足条件
+返回值 void
+流程图
+@startuml
+title scheduler_ipi_resched 流程
+start
+:schedp = 本CPU sched;
+:rq_resched_state = IDLE;
+if (irq_regs 存在 且 需要抢占?) then (是)
+  :调用 vmm_scheduler_switch(schedp, irq_regs);
+endif
+stop
+@enduml
+
+2.16 vmm_scheduler_force_resched
+功能 对目标 CPU 触发一次“尽快重调度”：
+	•	参数检查（CPU 合法、在线、非本 CPU）
+	•	rq_resched_state 原子去重
+	•	发送同步 IPI，在目标核执行 scheduler_ipi_resched
+声明
+int vmm_scheduler_force_resched(u32 hcpu);
+输入参数（IN）
+参数	类型	取值/约束
+hcpu	u32	< CONFIG_CPU_COUNT 且必须在线；若等于当前 CPU 则直接成功
+输出参数（OUT） 无
+返回值
+返回值	含义
+VMM_OK	成功（包括“无需处理”的情况）
+VMM_EINVALID	hcpu 越界
+VMM_ENOTAVAIL	目标 CPU 不在线
+流程图
+@startuml
+title vmm_scheduler_force_resched 流程
+start
+if (hcpu 越界?) then (是)
+  :返回 VMM_EINVALID;
+  stop
+endif
+if (目标CPU不在线?) then (是)
+  :返回 VMM_ENOTAVAIL;
+  stop
+endif
+if (hcpu == 当前CPU?) then (是)
+  :返回 VMM_OK;
+  stop
+endif
+:schedp = 目标CPU sched;
+if (rq_resched_state 从 IDLE 成功置为 TRIGGERED?) then (是)
+  :发送同步 IPI 到目标CPU\n执行 scheduler_ipi_resched;
+endif
+:返回 VMM_OK;
+stop
+@enduml
+
+2.17 scheduler_system_time_sync（static）
+功能 为 vmm_scheduler_stats() 提供的同步 IPI 回调：在目标 CPU 上把当前 vCPU 的 system 时间基线同步到 vcpu->system_nsecs。
+声明
+static void scheduler_system_time_sync(void *arg0, void *arg1, void *arg2);
+输入参数（IN） 未使用（回调只依赖本CPU sched）
+输出参数（OUT） 更新 current->system_nsecs（若 current 存在）
+返回值 void
+流程图
+@startuml
+title scheduler_system_time_sync 流程
+start
+:关本地中断;
+:current = 本CPU current_vcpu;
+if (current 存在?) then (是)
+  :加 current->sched_lock(写锁);
+  :同步 system 时间到 current->system_nsecs;
+  :解 current->sched_lock;
+endif
+:恢复本地中断;
+stop
+@enduml
+
+2.18 vmm_scheduler_stats
+功能 获取一个 vCPU 的调度统计（状态、优先级、归属 CPU、各状态耗时、system_nsecs 等）。 关键点：先确定该 vCPU 归属的 host CPU，然后通过同步 IPI 在目标 CPU 上同步 system 时间，确保统计一致。
+声明
+int vmm_scheduler_stats(struct vmm_vcpu *vcpu,
+                        u32 *state, u8 *priority, u32 *hcpu,
+                        u32 *reset_count, u64 *last_reset_nsecs,
+                        u64 *ready_nsecs, u64 *running_nsecs,
+                        u64 *paused_nsecs, u64 *halted_nsecs,
+                        u64 *system_nsecs);
+输入参数（IN）
+参数	类型	约束	说明
+vcpu	struct vmm_vcpu *	非空	目标 vCPU
+其余指针	u32*/u8*/u64*	允许为空	为空则表示调用者不关心该字段
+输出参数（OUT）
+输出指针	写入内容
+*state	当前状态（如 READY/RUNNING/PAUSED/HALTED 等）
+*priority	vcpu->priority
+*hcpu	vcpu->hcpu
+*reset_count	reset 次数
+*last_reset_nsecs	距离上次 reset 的时间
+*ready_nsecs 等	各状态累计耗时
+*system_nsecs	系统处理耗时累计
+返回值
+返回值	含义
+VMM_OK	成功
+VMM_EFAIL	vcpu==NULL
+其他错误码	来自 vmm_scheduler_get_hcpu() 或同步 IPI 调用失败
+流程图
+@startuml
+title vmm_scheduler_stats 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:查询 vcpu 归属 hcpu;
+if (查询失败?) then (是)
+  :返回错误码;
+  stop
+endif
+:同步 IPI 到归属CPU\n执行 scheduler_system_time_sync;
+if (IPI 失败?) then (是)
+  :返回错误码;
+  stop
+endif
+:获取当前时间戳;
+:加 vcpu->sched_lock(写锁);
+:读取 state/priority/hcpu 等;
+:按当前 state 对应的累计耗时做一次“到当前时刻”的补账;
+:将统计写入各输出指针(若非空);
+:解 vcpu->sched_lock;
+:返回 VMM_OK;
+stop
+@enduml
+
+2.19 vmm_scheduler_state_change
+功能 调度模块的核心状态变更接口：将目标 vCPU 切换到指定 new_state，并负责：
+	•	与 runqueue 的关系维护（enqueue/detach）
+	•	RUNNING/READY 等场景触发抢占（本核或跨核）
+	•	RESET 场景做 arch/vcpu irq 初始化
+	•	统计时间补账与状态时间戳维护
+	•	SMP 场景下通过 IPI 触发对端重调度/迁移
+	•	你的扩展逻辑：halt_flag 在特定条件下触发二次进入 begin
+声明
+int vmm_scheduler_state_change(struct vmm_vcpu *vcpu, u32 new_state);
+输入参数（IN）
+参数	类型	取值/约束
+vcpu	struct vmm_vcpu *	非空
+new_state	u32	典型取值：VMM_VCPU_STATE_UNKNOWN/RESET/READY/PAUSED/HALTED（RUNNING 不允许外部直接设置）
+输出参数（OUT）
+输出	说明
+vcpu->state	被更新为 new_state（若成功）
+runqueue	可能 enqueue/detach
+可能触发调度切换/跨核 resched	依据 preempt 判定
+返回值（关键取值）
+返回值	含义
+VMM_OK	状态变更成功（或 skip_state_change）
+VMM_EFAIL	vcpu==NULL
+VMM_EINVALID	请求的状态转换不合法（比如外部请求 RUNNING）
+其他错误码	来自 vmm_schedalgo_vcpu_setup/cleanup、arch_vcpu_init、vmm_vcpu_irq_init、rq_detach/enqueue 等下层透传
+流程图（抽象但覆盖关键分支）
+@startuml
+title vmm_scheduler_state_change 主流程(抽象覆盖关键分支)
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+
+repeat
+  :保存/关中断，写锁 vcpu->sched_lock;
+  :读取 vhcpu=vcpu->hcpu 与 current_state;
+  :根据 new_state 进入分支处理;
+
+  if (new_state==UNKNOWN?) then (是)
+    :调用 schedalgo_vcpu_cleanup;
+  elseif (new_state==RESET?) then (是)
+    :新建或重置路径\nsetup/清队列/arch_vcpu_init/vcpu_irq_init;
+  elseif (new_state==READY?) then (是)
+    :从 RESET/PAUSED 入队 ready queue;\n必要时设置 preempt;
+  elseif (new_state==RUNNING?) then (是)
+    :直接返回 VMM_EINVALID;
+  elseif (new_state==PAUSED 或 HALTED?) then (是)
+    :若从 READY/RUNNING 进入\n则 detach 或触发 preempt;
+  else (其他)
+    :rc=VMM_EINVALID;
+  endif
+
+  :若 rc==OK\n则对旧状态做时间补账\n写入新状态与 state_tstamp;
+  :解锁 vcpu->sched_lock，按需触发本核/跨核抢占(resched);
+  :若 rc!=OK 则打印失败日志;
+
+  if (满足 halt_flag 二次进入条件?) then (是)
+    :清除 halt_flag;
+    :new_state = HALTED;
+  else (否)
+    break
+  endif
+repeat while (需要二次执行?)
+
+:返回 rc;
+stop
+@enduml
+备注（你写文档时建议写清的“契约”）
+	•	RUNNING 状态只能由 context switch 设置，外部请求 RUNNING 会返回 VMM_EINVALID（代码已明确）。
+	•	READY/HALTED/PAUSED 的合法性与队列操作强绑定：READY 会 enqueue；离开 READY 会 detach；RUNNING→PAUSED/HALTED 会触发抢占。
+
+2.20 vmm_scheduler_get_hcpu
+功能 读取 vcpu->hcpu（带读锁保护）。
+声明
+int vmm_scheduler_get_hcpu(struct vmm_vcpu *vcpu, u32 *hcpu);
+输入参数（IN）
+参数	类型	约束
+vcpu	struct vmm_vcpu *	非空
+hcpu	u32 *	非空
+输出参数（OUT）
+参数	输出
+*hcpu	vCPU 当前归属 host CPU id
+返回值
+返回值	含义
+VMM_OK	成功
+VMM_EFAIL	任一参数为空
+流程图
+@startuml
+title vmm_scheduler_get_hcpu 流程
+start
+if (vcpu 或 hcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:读锁 vcpu->sched_lock;
+:*hcpu = vcpu->hcpu;
+:解锁;
+:返回 VMM_OK;
+stop
+@enduml
+
+2.21 vmm_scheduler_check_current_hcpu
+功能 判断 vcpu->hcpu 是否等于当前处理器 id（带读锁保护）。
+声明
+bool vmm_scheduler_check_current_hcpu(struct vmm_vcpu *vcpu);
+输入参数（IN）
+参数	类型	约束
+vcpu	struct vmm_vcpu *	允许为空（为空返回 FALSE）
+返回值
+返回值	含义
+TRUE	vCPU 归属本核
+FALSE	否则或参数为空
+流程图
+@startuml
+title vmm_scheduler_check_current_hcpu 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 FALSE;
+  stop
+endif
+:读锁 vcpu->sched_lock;
+:比较 vcpu->hcpu 与 当前CPU id;
+:解锁;
+:返回比较结果;
+stop
+@enduml
+
+2.22 scheduler_ipi_migrate_vcpu（static）
+功能 运行在 old_hcpu 上的异步 IPI 回调：把一个 READY vCPU 从 old_hcpu 的 runqueue 迁移到 new_hcpu 的 runqueue，并触发 new_hcpu resched。
+声明
+static void scheduler_ipi_migrate_vcpu(void *arg0, void *arg1, void *arg2);
+输入参数（IN）
+参数	约定	含义
+arg0	struct vmm_vcpu *	待迁移 vCPU
+arg1	转换为 u32	new_hcpu
+arg2	未用	保留
+输出参数（OUT）
+输出	说明
+vCPU 队列归属	detach old + enqueue new
+vcpu->hcpu	更新为 new_hcpu
+返回值 void
+流程图
+@startuml
+title scheduler_ipi_migrate_vcpu 流程
+start
+:old_hcpu = 当前CPU;
+:vcpu = arg0, new_hcpu = arg1;
+:写锁 vcpu->sched_lock;
+:读取 vcpu->state;
+if (state!=READY 或 vcpu->hcpu!=old_hcpu 或 old==new?) then (是)
+  :解锁并退出;
+  stop
+endif
+:从 old_hcpu 队列 detach vcpu;
+:vcpu->hcpu = new_hcpu;
+:入队到 new_hcpu 队列;
+:触发 new_hcpu force_resched;
+:解锁;
+stop
+@enduml
+
+2.23 vmm_scheduler_set_hcpu
+功能 “任务核绑定/迁移”的核心 API：设置 vCPU 的目标 host CPU。
+	•	若 vCPU 在 READY/RUNNING，则通过异步 IPI 在 old_hcpu 上执行迁移（保证队列操作在正确 CPU 上完成）。
+	•	若 vCPU 不在 READY/RUNNING，则直接改 vcpu->hcpu。
+声明
+int vmm_scheduler_set_hcpu(struct vmm_vcpu *vcpu, u32 hcpu);
+输入参数（IN）
+参数	类型	取值/约束
+vcpu	struct vmm_vcpu *	非空
+hcpu	u32	必须满足 hcpu ∈ vcpu->cpu_affinity
+输出参数（OUT）
+输出	说明
+vcpu->hcpu	更新（立即或迁移后更新）
+可能触发 IPI 迁移	READY/RUNNING 时
+返回值
+返回值	含义
+VMM_OK	成功或无需迁移
+VMM_EFAIL	vcpu==NULL
+VMM_EINVALID	新 hcpu 不在 affinity 中
+流程图
+@startuml
+title vmm_scheduler_set_hcpu 流程
+start
+if (vcpu 是否为空?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:写锁 vcpu->sched_lock;
+:old_hcpu = vcpu->hcpu;
+if (old_hcpu == hcpu?) then (是)
+  :解锁; :返回 VMM_OK; stop
+endif
+if (hcpu 不在 cpu_affinity?) then (是)
+  :解锁; :返回 VMM_EINVALID; stop
+endif
+:读取 state;
+if (state 为 READY 或 RUNNING?) then (是)
+  :migrate_vcpu = TRUE;
+else (否)
+  :vcpu->hcpu = hcpu;
+endif
+:解锁;
+
+if (migrate_vcpu?) then (是)
+  :向 old_hcpu 发送异步 IPI\n执行 scheduler_ipi_migrate_vcpu(vcpu,new_hcpu);
+endif
+:返回 VMM_OK;
+stop
+@enduml
+
+2.24 vmm_scheduler_irq_enter
+功能 IRQ 入口记录：保存进入时间戳、标记 IRQ 上下文属性、保存 irq_regs，并清除 yield_on_irq_exit。
+声明
+void vmm_scheduler_irq_enter(arch_regs_t *regs, bool vcpu_context);
+输入参数（IN）
+参数	类型	取值/约束	说明
+regs	arch_regs_t *	非空	IRQ 现场寄存器
+vcpu_context	bool	TRUE/FALSE	表示本次 IRQ 是否发生在 vCPU 上下文中（影响 irq_context 标记）
+输出参数（OUT）
+输出	说明
+schedp->irq_regs	保存 regs
+schedp->irq_context	根据 vcpu_context 设置
+schedp->irq_enter_tstamp	记录时间戳
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_irq_enter 流程
+start
+:schedp = 本CPU sched;
+:记录 irq_enter_tstamp = 当前时间;
+if (vcpu_context 为 TRUE?) then (是)
+  :irq_context = FALSE;
+else (否)
+  :irq_context = TRUE;
+endif
+:irq_regs = regs;
+:yield_on_irq_exit = FALSE;
+stop
+@enduml
+
+2.25 vmm_scheduler_irq_regs
+功能 返回当前 CPU 保存的 irq_regs 指针。
+声明
+arch_regs_t *vmm_scheduler_irq_regs(void);
+返回值
+返回值	含义
+arch_regs_t *	当前保存的 IRQ regs（可能为 NULL）
+流程图
+@startuml
+title vmm_scheduler_irq_regs 流程
+start
+:返回 本CPU sched.irq_regs;
+stop
+@enduml
+
+2.26 vmm_scheduler_irq_exit
+功能 IRQ 退出处理：
+	•	若 current vCPU 非 RUNNING 或 yield_on_irq_exit 置位，则先做一次 vCPU IRQ 处理并切换
+	•	无论是否切换，都会处理当前 vCPU 的虚拟 IRQ 并累计 IRQ/异常耗时
+	•	清理 irq_regs 与 irq_context
+声明
+void vmm_scheduler_irq_exit(arch_regs_t *regs);
+输入参数（IN）
+参数	类型	说明
+regs	arch_regs_t *	IRQ 现场
+输出参数（OUT） 更新统计量与可能触发切换
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_irq_exit 流程
+start
+:schedp = 本CPU sched;
+:vcpu = current_vcpu;
+if (vcpu 不存在?) then (是)
+  :直接返回;
+  stop
+endif
+
+if (vcpu 状态不是 RUNNING 或 yield_on_irq_exit 为 TRUE?) then (是)
+  :处理 vCPU 虚拟IRQ(vmm_vcpu_irq_process);
+  :执行一次调度切换(vmm_scheduler_switch);
+  :yield_on_irq_exit = FALSE;
+endif
+
+:vcpu = current_vcpu(可能已变化);
+:处理 vCPU 虚拟IRQ(vmm_vcpu_irq_process);
+
+if (irq_context 为 TRUE?) then (是)
+  :irq_process_ns += 当前时间 - irq_enter_tstamp;
+else (否)
+  :exp_process_ns += 当前时间 - irq_enter_tstamp;
+endif
+
+:irq_context = FALSE;
+:irq_regs = NULL;
+stop
+@enduml
+
+2.27 vmm_scheduler_irq_context
+功能 查询本 CPU 当前是否在 IRQ 上下文。
+声明
+bool vmm_scheduler_irq_context(void);
+返回值
+返回值	含义
+TRUE/FALSE	直接返回 this_cpu(sched).irq_context
+流程图
+@startuml
+title vmm_scheduler_irq_context 流程
+start
+:返回 本CPU sched.irq_context;
+stop
+@enduml
+
+2.28 vmm_scheduler_orphan_context
+功能 判断当前是否处于 orphan vCPU 上下文（非 IRQ 且 current_vcpu 存在且 is_normal==FALSE）。
+声明
+bool vmm_scheduler_orphan_context(void);
+返回值
+返回值	含义
+TRUE	当前在 orphan vCPU 上下文
+FALSE	否则
+流程图
+@startuml
+title vmm_scheduler_orphan_context 流程
+start
+:关本地中断(保存 flags);
+if (current_vcpu 存在 且 不在 IRQ?) then (是)
+  if (current_vcpu->is_normal 为 FALSE?) then (是)
+    :ret=TRUE;
+  else
+    :ret=FALSE;
+  endif
+else
+  :ret=FALSE;
+endif
+:恢复本地中断;
+:返回 ret;
+stop
+@enduml
+
+2.29 vmm_scheduler_normal_context
+功能 判断当前是否处于 normal vCPU 上下文（非 IRQ 且 current_vcpu 存在且 is_normal==TRUE）。
+声明
+bool vmm_scheduler_normal_context(void);
+流程图
+@startuml
+title vmm_scheduler_normal_context 流程
+start
+:关本地中断(保存 flags);
+if (current_vcpu 存在 且 不在 IRQ?) then (是)
+  if (current_vcpu->is_normal 为 TRUE?) then (是)
+    :ret=TRUE;
+  else
+    :ret=FALSE;
+  endif
+else
+  :ret=FALSE;
+endif
+:恢复本地中断;
+:返回 ret;
+stop
+@enduml
+
+2.30 vmm_scheduler_current_ready_vcpu_count
+功能 统计当前 CPU 的所有 READY vCPU 数量（跨优先级累加），用于例如 WFI/WFE 等策略判断（你在其他文件里用到了）。
+声明
+u32 vmm_scheduler_current_ready_vcpu_count(void);
+返回值
+返回值	含义
+u32	从 VMM_VCPU_MIN_PRIORITY 到 VMM_VCPU_MAX_PRIORITY 的 ready count 总和
+流程图
+@startuml
+title vmm_scheduler_current_ready_vcpu_count 流程
+start
+:ready_count = 0;
+:遍历所有优先级 prio;
+:ready_count += vmm_scheduler_ready_count(当前CPU, prio);
+:返回 ready_count;
+stop
+@enduml
+
+2.31 vmm_scheduler_ready_count
+功能 统计指定 host CPU、指定优先级的 ready queue 长度（带参数检查）。
+声明
+u32 vmm_scheduler_ready_count(u32 hcpu, u8 priority);
+输入参数（IN）
+参数	类型	取值/约束
+hcpu	u32	< CONFIG_CPU_COUNT 且在线
+priority	u8	在 [VMM_VCPU_MIN_PRIORITY, VMM_VCPU_MAX_PRIORITY]
+返回值
+返回值	含义
+0	参数不合法或 CPU 不在线
+>0	对应优先级队列长度
+流程图
+@startuml
+title vmm_scheduler_ready_count 流程
+start
+if (hcpu 越界 或 CPU不在线 或 priority 越界?) then (是)
+  :返回 0;
+  stop
+endif
+:ret = rq_length(per_cpu(sched,hcpu), priority);
+:返回 ret;
+stop
+@enduml
+
+2.32 scheduler_sample_event（static）
+功能 采样事件回调：周期性计算本核 idle 时间增量与 IRQ 时间增量，并重启下一周期采样事件。
+声明
+static void scheduler_sample_event(struct vmm_timer_event *ev);
+输入参数（IN） ev 未直接使用（通过 per-cpu sched）
+输出参数（OUT） 更新 sample_* 字段
+流程图
+@startuml
+title scheduler_sample_event 流程
+start
+:schedp = 本CPU sched;
+:读取 idle_vcpu 的 running_nsecs 作为 idle_ns;
+:读取 irq_process_ns 作为 irq_ns;
+:写锁 sample_lock;
+:sample_idle_ns = idle_ns - sample_idle_last_ns;
+:sample_idle_last_ns = idle_ns;
+:sample_irq_ns = irq_ns - sample_irq_last_ns;
+:sample_irq_last_ns = irq_ns;
+:next_period = sample_period_ns;
+:解锁 sample_lock;
+:启动 sample_ev(next_period);
+stop
+@enduml
+
+2.33 vmm_scheduler_get_sample_period
+功能 读取指定 CPU 的采样周期（带参数检查）。
+声明
+u64 vmm_scheduler_get_sample_period(u32 hcpu);
+返回值
+返回值	含义
+SAMPLE_EVENT_PERIOD	CPU 不合法或不在线时的默认值
+其他	读取到的 schedp->sample_period_ns
+流程图
+@startuml
+title vmm_scheduler_get_sample_period 流程
+start
+if (hcpu 越界 或 CPU不在线?) then (是)
+  :返回 默认采样周期;
+  stop
+endif
+:读锁 sample_lock;
+:ret = sample_period_ns;
+:解锁;
+:返回 ret;
+stop
+@enduml
+
+2.34 vmm_scheduler_set_sample_period
+功能 设置指定 CPU 的采样周期（带参数检查）。
+声明
+void vmm_scheduler_set_sample_period(u32 hcpu, u64 period);
+输入参数（IN）
+参数	类型	约束
+hcpu	u32	合法且在线
+period	u64	ns；由调用者给定
+返回值 void
+流程图
+@startuml
+title vmm_scheduler_set_sample_period 流程
+start
+if (hcpu 越界 或 CPU不在线?) then (是)
+  :直接返回;
+  stop
+endif
+:写锁 sample_lock;
+:sample_period_ns = period;
+:解锁;
+stop
+@enduml
+
+2.35 vmm_scheduler_irq_time
+功能 读取指定 CPU 的本周期 IRQ 时间增量（采样值）。
+声明
+u64 vmm_scheduler_irq_time(u32 hcpu);
+返回值
+返回值	含义
+0	CPU 不合法或不在线
+其他	sample_irq_ns
+流程图
+@startuml
+title vmm_scheduler_irq_time 流程
+start
+if (hcpu 越界 或 CPU不在线?) then (是)
+  :返回 0;
+  stop
+endif
+:读锁 sample_lock;
+:ret = sample_irq_ns;
+:解锁;
+:返回 ret;
+stop
+@enduml
+
+2.36 vmm_scheduler_idle_time
+功能 读取指定 CPU 的本周期 idle 时间增量（采样值）。
+声明
+u64 vmm_scheduler_idle_time(u32 hcpu);
+流程图
+@startuml
+title vmm_scheduler_idle_time 流程
+start
+if (hcpu 越界 或 CPU不在线?) then (是)
+  :返回 0;
+  stop
+endif
+:读锁 sample_lock;
+:ret = sample_idle_ns;
+:解锁;
+:返回 ret;
+stop
+@enduml
+
+2.37 vmm_scheduler_idle_vcpu
+功能 获取指定 CPU 的 idle vCPU 指针。
+声明
+struct vmm_vcpu *vmm_scheduler_idle_vcpu(u32 hcpu);
+返回值
+返回值	含义
+NULL	CPU 不合法或不在线
+非空	per_cpu(sched,hcpu).idle_vcpu
+流程图
+@startuml
+title vmm_scheduler_idle_vcpu 流程
+start
+if (hcpu 越界 或 CPU不在线?) then (是)
+  :返回 NULL;
+  stop
+endif
+:返回 per_cpu(sched,hcpu).idle_vcpu;
+stop
+@enduml
+
+2.38 vmm_scheduler_current_vcpu
+功能 获取当前 CPU 的 current_vcpu 指针。
+声明
+struct vmm_vcpu *vmm_scheduler_current_vcpu(void);
+流程图
+@startuml
+title vmm_scheduler_current_vcpu 流程
+start
+:返回 this_cpu(sched).current_vcpu;
+stop
+@enduml
+
+2.39 vmm_scheduler_current_priority
+功能 获取当前 vCPU 的优先级；若不存在 current vCPU，则返回 VMM_VCPU_MAX_PRIORITY（实现约定的保守值）。
+声明
+u8 vmm_scheduler_current_priority(void);
+流程图
+@startuml
+title vmm_scheduler_current_priority 流程
+start
+:cvcpu = current_vcpu;
+if (cvcpu 是否存在?) then (是)
+  :返回 cvcpu->priority;
+else (否)
+  :返回 VMM_VCPU_MAX_PRIORITY;
+endif
+stop
+@enduml
+
+2.40 vmm_scheduler_current_guest
+功能 返回当前 vCPU 所属 guest 指针（可能为 NULL）。
+声明
+struct vmm_guest *vmm_scheduler_current_guest(void);
+流程图
+@startuml
+title vmm_scheduler_current_guest 流程
+start
+:vcpu = current_vcpu;
+if (vcpu 存在?) then (是)
+  :返回 vcpu->guest;
+else (否)
+  :返回 NULL;
+endif
+stop
+@enduml
+
+2.41 vmm_scheduler_yield
+功能 当前 vCPU 主动让出 CPU：将 RUNNING 的 vCPU 切换为 READY（通过 vmm_scheduler_state_change 完成队列维护与抢占触发）。 并且：禁止在 IRQ 上下文调用（会 panic）。
+声明
+void vmm_scheduler_yield(void);
+流程图
+@startuml
+title vmm_scheduler_yield 流程
+start
+:schedp = 本CPU sched;
+:vcpu = current_vcpu;
+if (在 IRQ 上下文?) then (是)
+  :panic(IRQ 中不允许 yield);
+  stop
+endif
+if (vcpu 是否为空?) then (是)
+  :panic(不应发生);
+  stop
+endif
+if (vcpu 状态为 RUNNING?) then (是)
+  :调用 vmm_scheduler_state_change(vcpu, READY);
+endif
+stop
+@enduml
+
+2.42 idle_orphan（static）
+功能 idle vCPU 的执行体：
+	•	若本核 ready queue 在 IDLE_VCPU_PRIORITY 上没有其他实体，则进入 arch_cpu_wait_for_irq() 省电等待
+	•	否则 yield() 把 CPU 让给更需要运行的 vCPU 循环永久运行。
+声明
+static void idle_orphan(void);
+流程图
+@startuml
+title idle_orphan 流程
+start
+while (永远循环) is (是)
+  if (IDLE优先级队列长度 == 0?) then (是)
+    :等待中断 arch_cpu_wait_for_irq();
+  endif
+  :调用 vmm_scheduler_yield();
+endwhile (否)
+stop
+@enduml
+
+2.43 scheduler_startup（static，cpuhp 启动回调）
+功能 在 CPU 上线阶段初始化该 CPU 的调度器资源：
+	•	清零 schedp
+	•	创建 runqueue、初始化锁与原子变量
+	•	标记 CPU online（重要：在创建 idle vCPU 前完成）
+	•	创建并 kick idle vCPU
+	•	启动时间片事件与采样事件
+声明
+static int scheduler_startup(struct vmm_cpuhp_notify *cpuhp, u32 cpu);
+输入参数（IN）
+参数	类型	说明
+cpuhp	struct vmm_cpuhp_notify *	notifier（本函数不直接使用其字段）
+cpu	u32	当前上线的 CPU id
+输出参数（OUT） 初始化 per_cpu(sched,cpu)、创建 idle_vcpu、启动事件
+返回值
+返回值	含义
+VMM_OK	成功
+VMM_EFAIL	runqueue 创建失败 / idle vCPU 创建失败
+其他错误码	idle vCPU kick 失败透传
+流程图
+@startuml
+title scheduler_startup 流程
+start
+:schedp = per_cpu(sched,cpu);
+:清零 schedp;
+:创建 runqueue (vmm_schedalgo_rq_create);
+if (创建失败?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:初始化 rq_lock 与 rq_resched_state;
+:初始化 current/idle/IRQ/事件/采样字段;
+:标记 CPU online(vmm_set_cpu_online TRUE);
+
+:创建 idle vCPU(名称 idle/cpu);
+if (创建失败?) then (是)
+  :返回 VMM_EFAIL;
+  stop
+endif
+:Kick idle vCPU;
+if (kick 失败?) then (是)
+  :返回错误码;
+  stop
+endif
+:启动时间片事件 ev(0);
+:启动采样事件 sample_ev(默认周期);
+:返回 VMM_OK;
+stop
+@enduml
+
+2.44 scheduler_teardown（static，cpuhp 下线回调）
+功能 CPU 下线阶段释放该 CPU 的调度器资源：
+	•	停止事件
+	•	销毁 idle vCPU
+	•	标记 CPU offline
+	•	销毁 runqueue
+	•	清零 schedp
+声明
+static int scheduler_teardown(struct vmm_cpuhp_notify *cpuhp, u32 cpu);
+输入参数（IN）
+参数	类型	说明
+cpuhp	struct vmm_cpuhp_notify *	未使用
+cpu	u32	下线 CPU id
+返回值
+返回值	含义
+rc	主要来自 idle vCPU destroy 或 rq_destroy 的返回值
+流程图
+@startuml
+title scheduler_teardown 流程
+start
+:schedp = per_cpu(sched,cpu);
+:停止 ev 与 sample_ev;
+:销毁 idle_vcpu;
+:idle_vcpu = NULL;
+:标记 CPU offline(vmm_set_cpu_online FALSE);
+:销毁 runqueue;
+:rq = NULL;
+:清零 schedp;
+:返回 rc;
+stop
+@enduml
+
+2.45 vmm_scheduler_init
+功能 模块初始化入口：把 scheduler_cpuhp notifier 注册到 cpuhp 框架，使调度器按 CPU 热插拔状态机自动启动/销毁。
+声明
+int __init vmm_scheduler_init(void);
+输入参数（IN） 无 输出参数（OUT） 注册 cpuhp 回调 返回值 透传 vmm_cpuhp_register(&scheduler_cpuhp, TRUE)
+流程图
+@startuml
+title vmm_scheduler_init 流程
+start
+:调用 vmm_cpuhp_register(&scheduler_cpuhp, TRUE);
+:返回注册结果;
+stop
+@enduml
+
+三、你可能希望我补齐的两点
+你这次要求“所有函数都要”，我已经按你贴出的两份源码把函数逐个列完并给出流程图。后续你写认证/设计文档时通常还会需要两类“跨函数契约”材料：
+	1.	调度器对 PRR 算法的调用契约（何时 enqueue、何时 detach、dequeue 的失败视为 panic 等）
+	2.	vCPU 状态机转换表（state_change 中每种 new_state 的合法来源、队列动作、是否触发抢占/跨核 IPI）
+如果你希望我把这两部分也整理成表格/状态图（PlantUML），我可以在你现有章节结构下直接补成“调度管理模块设计说明”可引用内容。
