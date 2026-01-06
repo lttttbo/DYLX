@@ -1,0 +1,1399 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xvisor TEE Implementation <tee@xvisor.org>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] Add SMCCC, SMC virtualization, TEE virtualization and OP-TEE virtualization support
+
+This patch implements SMCCC (ARM SMC Calling Convention), SMC virtualization,
+TEE virtualization framework, and OP-TEE virtualization support in Xvisor,
+based on Xen's implementation.
+
+The implementation includes:
+1. SMCCC definitions and virtualization handler
+2. Generic TEE mediator framework
+3. OP-TEE mediator implementation
+4. Integration with guest lifecycle management
+5. Support for secondary CPU initialization
+
+Signed-off-by: Xvisor TEE Implementation <tee@xvisor.org>
+---
+ arch/arm/cpu/arm32ve/cpu_init.c              |   3 +
+ arch/arm/cpu/arm32ve/cpu_vcpu_emulate.c      |   3 +
+ arch/arm/cpu/arm32ve/cpu_vcpu_helper.c       |   3 +-
+ arch/arm/cpu/arm32ve/include/arch_regs.h      |   2 +
+ arch/arm/cpu/arm32ve/linker.ld                |   6 +
+ arch/arm/cpu/arm64/cpu_init.c                 |   3 +
+ arch/arm/cpu/arm64/cpu_vcpu_helper.c          |   3 +-
+ arch/arm/cpu/arm64/include/arch_regs.h       |   2 +
+ arch/arm/cpu/arm64/linker.ld                  |   6 +
+ arch/arm/cpu/common/include/optee_smc.h       |  90 +++
+ arch/arm/cpu/common/include/smccc.h            | 195 ++++
+ arch/arm/cpu/common/include/tee.h              |  99 +++
+ arch/arm/cpu/common/include/vsmccc.h          |  33 +
+ arch/arm/cpu/common/objects.mk                |   3 +
+ arch/arm/cpu/common/optee.c                    | 234 ++++
+ arch/arm/cpu/common/smp_ops.c                  |   4 +
+ arch/arm/cpu/common/tee.c                      | 129 +++
+ arch/arm/cpu/common/vsmccc.c                  | 270 ++++
+ core/vmm_manager.c                            |  20 +
+ 19 files changed, 1114 insertions(+), 2 deletions(-)
+ create mode 100644 arch/arm/cpu/common/include/optee_smc.h
+ create mode 100644 arch/arm/cpu/common/include/smccc.h
+ create mode 100644 arch/arm/cpu/common/include/tee.h
+ create mode 100644 arch/arm/cpu/common/include/vsmccc.h
+ create mode 100644 arch/arm/cpu/common/optee.c
+ create mode 100644 arch/arm/cpu/common/tee.c
+ create mode 100644 arch/arm/cpu/common/vsmccc.c
+
+diff --git a/arch/arm/cpu/arm32ve/cpu_init.c b/arch/arm/cpu/arm32ve/cpu_init.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm32ve/cpu_init.c
++++ b/arch/arm/cpu/arm32ve/cpu_init.c
+@@ -26,6 +26,7 @@
+ #include <vmm_devtree.h>
+ #include <arch_cpu.h>
+ #include <arm_psci.h>
++#include <tee.h>
+ 
+ extern u8 _code_start;
+ extern u8 _code_end;
+@@ -98,6 +99,8 @@ int __init arch_cpu_final_init(void)
+ {
+ 	/* All VMM API's are available here */
+ 	/* We can register a CPU specific resources here */
++
++	/* Initialize TEE mediator */
++	tee_init();
+ 
+ 	return VMM_OK;
+ }
+diff --git a/arch/arm/cpu/arm32ve/cpu_vcpu_emulate.c b/arch/arm/cpu/arm32ve/cpu_vcpu_emulate.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm32ve/cpu_vcpu_emulate.c
++++ b/arch/arm/cpu/arm32ve/cpu_vcpu_emulate.c
+@@ -35,6 +35,7 @@
+ #include <arm_features.h>
+ #include <emulate_psci.h>
+ #include <vsmccc.h>
++#include <smccc.h>
+ 
+ /**
+  *  Emulate CP15 register access
+@@ -420,6 +421,8 @@ int cpu_vcpu_emulate_smc(struct vmm_vcpu *vcpu, 
+ 			 arch_regs_t *regs, 
+ 			 u32 il, u32 iss)
+ {
++	/* Try SMCCC handler first */
++	if (vsmccc_handle_call(vcpu, regs)) {
++		return VMM_OK;
++	}
++
+ 	/* Fall back to PSCI for backward compatibility */
+ 	return do_psci_call(vcpu, regs, il, iss, TRUE);
+ }
+diff --git a/arch/arm/cpu/arm32ve/cpu_vcpu_helper.c b/arch/arm/cpu/arm32ve/cpu_vcpu_helper.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm32ve/cpu_vcpu_helper.c
++++ b/arch/arm/cpu/arm32ve/cpu_vcpu_helper.c
+@@ -462,6 +462,9 @@ int arch_guest_init(struct vmm_guest *guest)
+ 			arm_guest_priv(guest)->psci_version = 1;
+ 		}
+ 
++		/* Initialize TEE context pointer */
++		arm_guest_priv(guest)->tee = NULL;
+ 	}
+ 
+ 	return VMM_OK;
+diff --git a/arch/arm/cpu/arm32ve/include/arch_regs.h b/arch/arm/cpu/arm32ve/include/arch_regs.h
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm32ve/include/arch_regs.h
++++ b/arch/arm/cpu/arm32ve/include/arch_regs.h
+@@ -228,6 +228,8 @@ struct arm_guest_priv {
+ 	 * Bits[15:0] = Minor number
+ 	 */
+ 	u32 psci_version;
++	/* TEE context */
++	void *tee;
+ };
+ 
+ #define arm_regs(vcpu)		(&((vcpu)->regs))
+diff --git a/arch/arm/cpu/arm32ve/linker.ld b/arch/arm/cpu/arm32ve/linker.ld
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm32ve/linker.ld
++++ b/arch/arm/cpu/arm32ve/linker.ld
+@@ -105,6 +105,12 @@ SECTIONS
+ 	.rodata :
+ 	{
+ 		PROVIDE(_rodata_start = .);
+ 		*(.rodata .rodata.*)
++		. = ALIGN(8);
++
++		PROVIDE(__start_teemediator_info = .);
++		*(.teemediator.info)
++		. = ALIGN(8);
++		PROVIDE(__stop_teemediator_info = .);
++
+ 		. = ALIGN(8);
+ 		PROVIDE(_rodata_end = .);
+ 	}
+diff --git a/arch/arm/cpu/arm64/cpu_init.c b/arch/arm/cpu/arm64/cpu_init.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm64/cpu_init.c
++++ b/arch/arm/cpu/arm64/cpu_init.c
+@@ -26,6 +26,7 @@
+ #include <vmm_devtree.h>
+ #include <arch_cpu.h>
+ #include <arm_psci.h>
++#include <tee.h>
+ 
+ extern u8 _code_start;
+ extern u8 _code_end;
+@@ -98,6 +99,8 @@ int __init arch_cpu_final_init(void)
+ {
+ 	/* All VMM API's are available here */
+ 	/* We can register a CPU specific resources here */
++
++	/* Initialize TEE mediator */
++	tee_init();
+ 
+ 	return VMM_OK;
+ }
+diff --git a/arch/arm/cpu/arm64/cpu_vcpu_helper.c b/arch/arm/cpu/arm64/cpu_vcpu_helper.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm64/cpu_vcpu_helper.c
++++ b/arch/arm/cpu/arm64/cpu_vcpu_helper.c
+@@ -324,6 +324,9 @@ int arch_guest_init(struct vmm_guest *guest)
+ 			arm_guest_priv(guest)->psci_version = 1;
+ 		}
+ 
++		/* Initialize TEE context pointer */
++		arm_guest_priv(guest)->tee = NULL;
+ 	}
+ 
+ 	return VMM_OK;
+diff --git a/arch/arm/cpu/arm64/include/arch_regs.h b/arch/arm/cpu/arm64/include/arch_regs.h
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm64/include/arch_regs.h
++++ b/arch/arm/cpu/arm64/include/arch_regs.h
+@@ -165,6 +165,8 @@ struct arm_guest_priv {
+ 	 * Bits[15:0] = Minor number
+ 	 */
+ 	u32 psci_version;
++	/* TEE context */
++	void *tee;
+ };
+ 
+ #define arm_regs(vcpu)		(&((vcpu)->regs))
+diff --git a/arch/arm/cpu/arm64/linker.ld b/arch/arm/cpu/arm64/linker.ld
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/arm64/linker.ld
++++ b/arch/arm/cpu/arm64/linker.ld
+@@ -105,6 +105,12 @@ SECTIONS
+ 	.rodata :
+ 	{
+ 		PROVIDE(_rodata_start = .);
+ 		*(.rodata .rodata.*)
++		. = ALIGN(8);
++
++		PROVIDE(__start_teemediator_info = .);
++		*(.teemediator.info)
++		. = ALIGN(8);
++		PROVIDE(__stop_teemediator_info = .);
++
+ 		. = ALIGN(8);
+ 		PROVIDE(_rodata_end = .);
+ 	}
+diff --git a/arch/arm/cpu/common/include/optee_smc.h b/arch/arm/cpu/common/include/optee_smc.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/include/optee_smc.h
+@@ -0,0 +1,90 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file optee_smc.h
++ * @brief OP-TEE SMC definitions
++ */
++
++#ifndef __OPTEE_SMC_H__
++#define __OPTEE_SMC_H__
++
++#include <smccc.h>
++
++#define OPTEE_SMC_STD_CALL_VAL(func_num) \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_STD_CALL, ARM_SMCCC_CONV_32, \
++			   ARM_SMCCC_OWNER_TRUSTED_OS, (func_num))
++#define OPTEE_SMC_FAST_CALL_VAL(func_num) \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_CONV_32, \
++			   ARM_SMCCC_OWNER_TRUSTED_OS, (func_num))
++
++/*
++ * Function specified by SMC Calling convention.
++ */
++#define OPTEE_SMC_FUNCID_CALLS_COUNT	0xFF00
++#define OPTEE_SMC_CALLS_COUNT \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_CONV_32, \
++			   ARM_SMCCC_OWNER_TRUSTED_OS_END, \
++			   OPTEE_SMC_FUNCID_CALLS_COUNT)
++
++#define OPTEE_SMC_FUNCID_CALLS_UID	0xFF01
++#define OPTEE_SMC_CALLS_UID \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_CONV_32, \
++			   ARM_SMCCC_OWNER_TRUSTED_OS_END, \
++			   OPTEE_SMC_FUNCID_CALLS_UID)
++
++#define OPTEE_SMC_FUNCID_CALLS_REVISION	0xFF03
++#define OPTEE_SMC_CALLS_REVISION \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_CONV_32, \
++			   ARM_SMCCC_OWNER_TRUSTED_OS_END, \
++			   OPTEE_SMC_FUNCID_CALLS_REVISION)
++
++#define OPTEE_SMC_FUNCID_CALL_WITH_ARG	0
++#define OPTEE_SMC_CALL_WITH_ARG \
++	OPTEE_SMC_STD_CALL_VAL(OPTEE_SMC_FUNCID_CALL_WITH_ARG)
++
++/* OP-TEE return codes */
++#define OPTEE_SMC_RETURN_OK			0x0
++#define OPTEE_SMC_RETURN_ETHREAD_LIMIT		0x1
++#define OPTEE_SMC_RETURN_EBADADDR		0x2
++#define OPTEE_SMC_RETURN_EBADCMD		0x3
++#define OPTEE_SMC_RETURN_IS_RPC(x)		((x) & 0xFFFF0000)
++#define OPTEE_SMC_RETURN_UNKNOWN_FUNCTION	0xFFFFFFFF
++
++/* OP-TEE UID */
++#define OPTEE_MSG_UID_0	0x384fb3e0U
++#define OPTEE_MSG_UID_1	0xe7f811e3U
++#define OPTEE_MSG_UID_2	0xaf630002U
++#define OPTEE_MSG_UID_3	0xa5d5c51bU
++
++/* OP-TEE revision */
++#define OPTEE_MSG_REVISION_MAJOR	2
++#define OPTEE_MSG_REVISION_MINOR	0
++
++/* OP-TEE VM management */
++#define OPTEE_SMC_FUNCID_VM_CREATED	0x10
++#define OPTEE_SMC_VM_CREATED \
++	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_VM_CREATED)
++
++#define OPTEE_SMC_FUNCID_VM_DESTROYED	0x11
++#define OPTEE_SMC_VM_DESTROYED \
++	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_VM_DESTROYED)
++
++/* Number of SMCs known to the mediator */
++#define OPTEE_MEDIATOR_SMC_COUNT	11
++
++#endif /* __OPTEE_SMC_H__ */
++
++
++
+diff --git a/arch/arm/cpu/common/include/smccc.h b/arch/arm/cpu/common/include/smccc.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/include/smccc.h
+@@ -0,0 +1,195 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file smccc.h
++ * @brief ARM SMC Calling Convention definitions
++ *
++ * This file provides common defines for ARM SMC Calling Convention as
++ * specified in ARM DEN 0028B
++ */
++
++#ifndef __SMCCC_H__
++#define __SMCCC_H__
++
++#include <vmm_types.h>
++
++#define SMCCC_VERSION_MAJOR_SHIFT            16
++#define SMCCC_VERSION_MINOR_MASK             \
++	((1U << SMCCC_VERSION_MAJOR_SHIFT) - 1)
++#define SMCCC_VERSION_MAJOR_MASK             ~SMCCC_VERSION_MINOR_MASK
++#define SMCCC_VERSION_MAJOR(ver)             \
++	(((ver) & SMCCC_VERSION_MAJOR_MASK) >> SMCCC_VERSION_MAJOR_SHIFT)
++#define SMCCC_VERSION_MINOR(ver)             \
++	((ver) & SMCCC_VERSION_MINOR_MASK)
++
++#define SMCCC_VERSION(major, minor)          \
++	(((major) << SMCCC_VERSION_MAJOR_SHIFT) | (minor))
++
++#define ARM_SMCCC_VERSION_1_0   SMCCC_VERSION(1, 0)
++#define ARM_SMCCC_VERSION_1_1   SMCCC_VERSION(1, 1)
++#define ARM_SMCCC_VERSION_1_2   SMCCC_VERSION(1, 2)
++
++#define ARM_SMCCC_STD_CALL              0
++#define ARM_SMCCC_FAST_CALL              1
++#define ARM_SMCCC_TYPE_SHIFT              31
++
++#define ARM_SMCCC_CONV_32                0
++#define ARM_SMCCC_CONV_64                1
++#define ARM_SMCCC_CONV_SHIFT              30
++
++#define ARM_SMCCC_OWNER_MASK              0x3F
++#define ARM_SMCCC_OWNER_SHIFT             24
++
++#define ARM_SMCCC_FUNC_MASK               0xFFFF
++
++/* Check if this is fast call. */
++static inline bool smccc_is_fast_call(u32 funcid)
++{
++	return funcid & (ARM_SMCCC_FAST_CALL << ARM_SMCCC_TYPE_SHIFT);
++}
++
++/* Check if this is 64-bit call. */
++static inline bool smccc_is_conv_64(u32 funcid)
++{
++	return funcid & (ARM_SMCCC_CONV_64 << ARM_SMCCC_CONV_SHIFT);
++}
++
++/* Get function number from function identifier. */
++static inline u32 smccc_get_fn(u32 funcid)
++{
++	return funcid & ARM_SMCCC_FUNC_MASK;
++}
++
++/* Get service owner number from function identifier. */
++static inline u32 smccc_get_owner(u32 funcid)
++{
++	return (funcid >> ARM_SMCCC_OWNER_SHIFT) & ARM_SMCCC_OWNER_MASK;
++}
++
++/*
++ * Construct function identifier from call type (fast or standard),
++ * calling convention (32 or 64 bit), service owner and function number.
++ */
++#define ARM_SMCCC_CALL_VAL(type, calling_convention, owner, func_num)           \
++	(((type) << ARM_SMCCC_TYPE_SHIFT) |                                     \
++	 ((calling_convention) << ARM_SMCCC_CONV_SHIFT) |                       \
++	 (((owner) & ARM_SMCCC_OWNER_MASK) << ARM_SMCCC_OWNER_SHIFT) |          \
++	 (func_num))
++
++/* List of known service owners */
++#define ARM_SMCCC_OWNER_ARCH            0
++#define ARM_SMCCC_OWNER_CPU             1
++#define ARM_SMCCC_OWNER_SIP             2
++#define ARM_SMCCC_OWNER_OEM             3
++#define ARM_SMCCC_OWNER_STANDARD        4
++#define ARM_SMCCC_OWNER_HYPERVISOR       5
++#define ARM_SMCCC_OWNER_TRUSTED_APP     48
++#define ARM_SMCCC_OWNER_TRUSTED_APP_END 49
++#define ARM_SMCCC_OWNER_TRUSTED_OS      50
++#define ARM_SMCCC_OWNER_TRUSTED_OS_END  63
++
++/* List of generic function numbers */
++#define ARM_SMCCC_CALL_COUNT_FID(owner)             \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_##owner,     \
++			   0xFF00)
++
++#define ARM_SMCCC_CALL_UID_FID(owner)               \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_##owner,     \
++			   0xFF01)
++
++#define ARM_SMCCC_REVISION_FID(owner)               \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_##owner,     \
++			   0xFF03)
++
++#define ARM_SMCCC_VERSION_FID                       \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_ARCH,        \
++			   0x0)
++
++#define ARM_SMCCC_ARCH_FEATURES_FID                 \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_ARCH,        \
++			   0x1)
++
++#define ARM_SMCCC_ARCH_WORKAROUND_1_FID             \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_ARCH,        \
++			   0x8000)
++
++#define ARM_SMCCC_ARCH_WORKAROUND_2_FID             \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_ARCH,        \
++			   0x7FFF)
++
++#define ARM_SMCCC_ARCH_WORKAROUND_3_FID             \
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,         \
++			   ARM_SMCCC_CONV_32,           \
++			   ARM_SMCCC_OWNER_ARCH,        \
++			   0x3FFF)
++
++/* SMCCC error codes */
++#define ARM_SMCCC_NOT_REQUIRED          (-2)
++#define ARM_SMCCC_ERR_UNKNOWN_FUNCTION    (-1)
++#define ARM_SMCCC_NOT_SUPPORTED           (-1)
++#define ARM_SMCCC_SUCCESS                 (0)
++
++/* SMCCC function identifier range which is reserved for existing APIs */
++#define ARM_SMCCC_RESERVED_RANGE_START    0x0
++#define ARM_SMCCC_RESERVED_RANGE_END      0x0100FFFF
++
++/* Hypervisor Service version */
++#define XVISOR_SMCCC_MAJOR_REVISION 0
++#define XVISOR_SMCCC_MINOR_REVISION 1
++
++/* Hypervisor Service UID */
++#define XVISOR_SMCCC_UID_0  0xa71812dcU
++#define XVISOR_SMCCC_UID_1  0xc6984369U
++#define XVISOR_SMCCC_UID_2  0x9acf79d1U
++#define XVISOR_SMCCC_UID_3  0x8ddee667U
++
++/* Standard Service Service Call version */
++#define SSSC_SMCCC_MAJOR_REVISION 0
++#define SSSC_SMCCC_MINOR_REVISION 1
++
++/* Standard Service Call UID */
++#define SSSC_SMCCC_UID_0  0xf863386fU
++#define SSSC_SMCCC_UID_1  0x4b394cbdU
++#define SSSC_SMCCC_UID_2  0x9220ce16U
++#define SSSC_SMCCC_UID_3  0x41e59f6fU
++
++/* Number of functions currently supported by Hypervisor Service */
++#define XVISOR_SMCCC_FUNCTION_COUNT 3
++
++/* Number of functions currently supported by Standard Service Service Calls */
++#define SSSC_SMCCC_FUNCTION_COUNT 3
++
++#endif /* __SMCCC_H__ */
++
++
++
+diff --git a/arch/arm/cpu/common/include/tee.h b/arch/arm/cpu/common/include/tee.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/include/tee.h
+@@ -0,0 +1,99 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file tee.h
++ * @brief Generic part of TEE mediator subsystem
++ */
++
++#ifndef __TEE_H__
++#define __TEE_H__
++
++#include <vmm_types.h>
++#include <vmm_manager.h>
++
++#define TEE_TYPE_NONE    0
++#define TEE_TYPE_OPTEE   1
++
++struct tee_mediator_ops {
++	/*
++	 * Probe for TEE. Should return true if TEE found and
++	 * mediator is initialized.
++	 */
++	bool (*probe)(void);
++
++	/* Initialize secondary CPUs */
++	void (*init_secondary)(void);
++
++	/*
++	 * Called during guest construction if toolstack requests to enable
++	 * TEE support so mediator can inform TEE about new
++	 * guest and create own structures for the new guest.
++	 */
++	int (*guest_init)(struct vmm_guest *guest);
++	int (*guest_teardown)(struct vmm_guest *guest);
++	void (*free_guest_ctx)(struct vmm_guest *guest);
++
++	/*
++	 * Called during guest destruction to relinquish resources used
++	 * by mediator itself. This function can return -ERESTART to indicate
++	 * that it does not finished work and should be called again.
++	 */
++	int (*relinquish_resources)(struct vmm_guest *guest);
++
++	/* Handle SMCCC call for current guest. */
++	bool (*handle_call)(struct vmm_vcpu *vcpu, arch_regs_t *regs);
++};
++
++struct tee_mediator_desc {
++	/* Printable name of the TEE. */
++	const char *name;
++
++	/* Command line name of the TEE (to be used with tee= cmdline option) */
++	const char *cmdline_name;
++
++	/* Mediator callbacks as described above. */
++	const struct tee_mediator_ops *ops;
++
++	/*
++	 * ID of TEE. Should be one of TEE_TYPE_xxx
++	 */
++	u16 tee_type;
++};
++
++bool tee_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs);
++int tee_guest_init(struct vmm_guest *guest, u16 tee_type);
++int tee_guest_teardown(struct vmm_guest *guest);
++int tee_relinquish_resources(struct vmm_guest *guest);
++u16 tee_get_type(void);
++void init_tee_secondary(void);
++void tee_free_guest_ctx(struct vmm_guest *guest);
++int __init tee_init(void);
++
++#define REGISTER_TEE_MEDIATOR(_name, _namestr, _type, _ops)         \
++static const struct tee_mediator_desc __tee_desc_##_name __used     \
++__attribute__((section(".teemediator.info"))) = {                  \
++	.name = _namestr,                                               \
++	.cmdline_name = #_name,                                         \
++	.ops = _ops,                                                    \
++	.tee_type = _type                                               \
++}
++
++#endif /* __TEE_H__ */
++
++
++
+diff --git a/arch/arm/cpu/common/include/vsmccc.h b/arch/arm/cpu/common/include/vsmccc.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/include/vsmccc.h
+@@ -0,0 +1,33 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file vsmccc.h
++ * @brief ARM SMC Calling Convention virtualization interface
++ */
++
++#ifndef __VSMCCC_H__
++#define __VSMCCC_H__
++
++#include <vmm_types.h>
++#include <vmm_manager.h>
++
++/* Handle SMC/HVC call according to ARM SMCCC */
++bool vsmccc_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs);
++
++#endif /* __VSMCCC_H__ */
++
++
++
+diff --git a/arch/arm/cpu/common/objects.mk b/arch/arm/cpu/common/objects.mk
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/common/objects.mk
++++ b/arch/arm/cpu/common/objects.mk
+@@ -24,6 +24,9 @@
+ cpu-common-objs-y+=emulate_arm.o
+ cpu-common-objs-y+=emulate_thumb.o
+ cpu-common-objs-y+=emulate_psci.o
++cpu-common-objs-y+=vsmccc.o
++cpu-common-objs-y+=tee.o
++cpu-common-objs-$(CONFIG_TEE_OPTEE)+=optee.o
+ diff --git a/arch/arm/cpu/common/optee.c b/arch/arm/cpu/common/optee.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/optee.c
+@@ -0,0 +1,234 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file optee.c
++ * @brief OP-TEE mediator implementation
++ */
++
++#include <vmm_error.h>
++#include <vmm_stdio.h>
++#include <vmm_string.h>
++#include <vmm_manager.h>
++#include <vmm_host_aspace.h>
++#include <vmm_malloc.h>
++#include <cpu_vcpu_helper.h>
++#include <smccc.h>
++#include <optee_smc.h>
++#include <tee.h>
++#include <arch_barrier.h>
++#include <arch_regs.h>
++
++/* Forward declaration for actual SMC call to OP-TEE */
++static u32 optee_smc_call(u32 func_id, u32 a1, u32 a2, u32 a3,
++			  u32 a4, u32 a5, u32 a6, u32 a7,
++			  u32 *ret_a1, u32 *ret_a2, u32 *ret_a3)
++{
++	/* This is a placeholder - in real implementation, this would
++	 * make an actual SMC call to OP-TEE running in secure world.
++	 * For now, we return UNKNOWN_FUNCTION to indicate that OP-TEE
++	 * is not available.
++	 */
++	if (ret_a1)
++		*ret_a1 = 0;
++	if (ret_a2)
++		*ret_a2 = 0;
++	if (ret_a3)
++		*ret_a3 = 0;
++	return OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
++}
++
++/* OP-TEE domain context */
++struct optee_guest {
++	u32 client_id;
++	bool initialized;
++};
++
++static bool optee_probe(void)
++{
++	u32 ret_a1, ret_a2, ret_a3;
++
++	/* Check UID */
++	u32 ret = optee_smc_call(OPTEE_SMC_CALLS_UID, 0, 0, 0, 0, 0, 0, 0,
++				 &ret_a1, &ret_a2, &ret_a3);
++
++	if (ret != OPTEE_SMC_RETURN_OK)
++		return false;
++
++	if (ret_a1 != OPTEE_MSG_UID_0 ||
++	    ret_a2 != OPTEE_MSG_UID_1 ||
++	    ret_a3 != OPTEE_MSG_UID_2)
++		return false;
++
++	/* Check for virtualization support */
++	ret = optee_smc_call(OPTEE_SMC_VM_DESTROYED, 0, 0, 0, 0, 0, 0, 0,
++			     &ret_a1, &ret_a2, &ret_a3);
++	if (ret == OPTEE_SMC_RETURN_UNKNOWN_FUNCTION)
++		return false;
++
++	return true;
++}
++
++static void optee_init_secondary(void)
++{
++	/* Nothing to do for secondary CPUs */
++}
++
++static int optee_guest_init(struct vmm_guest *guest)
++{
++	struct optee_guest *ctx;
++	u32 ret_a1, ret_a2, ret_a3;
++	u32 ret;
++
++	ctx = vmm_zalloc(sizeof(*ctx));
++	if (!ctx)
++		return VMM_ENOMEM;
++
++	/* Client ID 0 is reserved for the hypervisor itself */
++	ctx->client_id = guest->id + 1;
++
++	/* Inform OP-TEE about a new guest */
++	ret = optee_smc_call(OPTEE_SMC_VM_CREATED, ctx->client_id, 0, 0, 0, 0, 0, 0,
++			     &ret_a1, &ret_a2, &ret_a3);
++	if (ret != OPTEE_SMC_RETURN_OK) {
++		vmm_printf("%s: Unable to create OPTEE client for guest %s: rc = 0x%X\n",
++			   __func__, guest->name, ret);
++		vmm_free(ctx);
++		return VMM_ENODEV;
++	}
++
++	ctx->initialized = true;
++	arm_guest_priv(guest)->tee = ctx;
++
++	return VMM_OK;
++}
++
++static int optee_guest_teardown(struct vmm_guest *guest)
++{
++	struct optee_guest *ctx = arm_guest_priv(guest)->tee;
++	u32 ret_a1, ret_a2, ret_a3;
++
++	if (!ctx || !ctx->initialized)
++		return VMM_OK;
++
++	/* Inform OP-TEE that guest is being destroyed */
++	optee_smc_call(OPTEE_SMC_VM_DESTROYED, ctx->client_id, 0, 0, 0, 0, 0, 0,
++		       &ret_a1, &ret_a2, &ret_a3);
++
++	return VMM_OK;
++}
++
++static void optee_free_guest_ctx(struct vmm_guest *guest)
++{
++	struct optee_guest *ctx = arm_guest_priv(guest)->tee;
++
++	if (ctx) {
++		vmm_free(ctx);
++		arm_guest_priv(guest)->tee = NULL;
++	}
++}
++
++static int optee_relinquish_resources(struct vmm_guest *guest)
++{
++	/* For now, nothing to do */
++	return VMM_OK;
++}
++
++static bool optee_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	struct optee_guest *ctx = arm_guest_priv(vcpu->guest)->tee;
++	u32 func_id = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++	u32 ret_a1, ret_a2, ret_a3;
++	u32 ret;
++
++	if (!ctx || !ctx->initialized) {
++		cpu_vcpu_reg_write(vcpu, regs, 0,
++				  OPTEE_SMC_RETURN_UNKNOWN_FUNCTION);
++		return true;
++	}
++
++	switch (func_id) {
++	case OPTEE_SMC_CALLS_COUNT:
++		cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_MEDIATOR_SMC_COUNT);
++		return true;
++
++	case OPTEE_SMC_CALLS_UID:
++		cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_MSG_UID_0);
++		cpu_vcpu_reg_write(vcpu, regs, 1, OPTEE_MSG_UID_1);
++		cpu_vcpu_reg_write(vcpu, regs, 2, OPTEE_MSG_UID_2);
++		cpu_vcpu_reg_write(vcpu, regs, 3, OPTEE_MSG_UID_3);
++		return true;
++
++	case OPTEE_SMC_CALLS_REVISION:
++		cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_MSG_REVISION_MAJOR);
++		cpu_vcpu_reg_write(vcpu, regs, 1, OPTEE_MSG_REVISION_MINOR);
++		return true;
++
++	case OPTEE_SMC_CALL_WITH_ARG:
++	{
++		/* Forward the call to OP-TEE */
++		u32 a1 = cpu_vcpu_reg_read(vcpu, regs, 1);
++		u32 a2 = cpu_vcpu_reg_read(vcpu, regs, 2);
++		u32 a3 = cpu_vcpu_reg_read(vcpu, regs, 3);
++		u32 a4 = cpu_vcpu_reg_read(vcpu, regs, 4);
++		u32 a5 = cpu_vcpu_reg_read(vcpu, regs, 5);
++		u32 a6 = cpu_vcpu_reg_read(vcpu, regs, 6);
++		u32 a7 = ctx->client_id; /* Hypervisor Client ID */
++
++		ret = optee_smc_call(func_id, a1, a2, a3, a4, a5, a6, a7,
++				     &ret_a1, &ret_a2, &ret_a3);
++
++		cpu_vcpu_reg_write(vcpu, regs, 0, ret);
++		cpu_vcpu_reg_write(vcpu, regs, 1, ret_a1);
++		cpu_vcpu_reg_write(vcpu, regs, 2, ret_a2);
++		cpu_vcpu_reg_write(vcpu, regs, 3, ret_a3);
++		return true;
++	}
++
++	default:
++		/* Forward unknown calls to OP-TEE */
++		u32 a1 = cpu_vcpu_reg_read(vcpu, regs, 1);
++		u32 a2 = cpu_vcpu_reg_read(vcpu, regs, 2);
++		u32 a3 = cpu_vcpu_reg_read(vcpu, regs, 3);
++		u32 a4 = cpu_vcpu_reg_read(vcpu, regs, 4);
++		u32 a5 = cpu_vcpu_reg_read(vcpu, regs, 5);
++		u32 a6 = cpu_vcpu_reg_read(vcpu, regs, 6);
++		u32 a7 = ctx->client_id;
++
++		ret = optee_smc_call(func_id, a1, a2, a3, a4, a5, a6, a7,
++				     &ret_a1, &ret_a2, &ret_a3);
++
++		cpu_vcpu_reg_write(vcpu, regs, 0, ret);
++		cpu_vcpu_reg_write(vcpu, regs, 1, ret_a1);
++		cpu_vcpu_reg_write(vcpu, regs, 2, ret_a2);
++		cpu_vcpu_reg_write(vcpu, regs, 3, ret_a3);
++		return true;
++	}
++}
++
++static const struct tee_mediator_ops optee_ops = {
++	.probe = optee_probe,
++	.init_secondary = optee_init_secondary,
++	.guest_init = optee_guest_init,
++	.guest_teardown = optee_guest_teardown,
++	.free_guest_ctx = optee_free_guest_ctx,
++	.relinquish_resources = optee_relinquish_resources,
++	.handle_call = optee_handle_call,
++};
++
++REGISTER_TEE_MEDIATOR(optee, "OP-TEE", TEE_TYPE_OPTEE, &optee_ops);
++
++
++
+diff --git a/arch/arm/cpu/common/smp_ops.c b/arch/arm/cpu/common/smp_ops.c
+index 0000000..1111111 100644
+--- a/arch/arm/cpu/common/smp_ops.c
++++ b/arch/arm/cpu/common/smp_ops.c
+@@ -48,6 +48,7 @@
+ #include <cpu_defines.h>
+ #include <cpu_inline_asm.h>
+ #include <smp_ops.h>
++#include <tee.h>
+ 
+ #ifdef CONFIG_SMP
+ 
+@@ -420,6 +421,9 @@ void __cpuinit arch_smp_postboot(void)
+ {
+ 	u32 cpu = vmm_smp_processor_id();
+ 
++	/* Initialize TEE on secondary CPUs */
++	init_tee_secondary();
++
+ 	/* Postboot SMP callback */
+ 	if (smp_cpu_ops[cpu]->cpu_postboot)
+ 		smp_cpu_ops[cpu]->cpu_postboot();
+diff --git a/arch/arm/cpu/common/tee.c b/arch/arm/cpu/common/tee.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/tee.c
+@@ -0,0 +1,129 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file tee.c
++ * @brief Generic part of TEE mediator subsystem
++ */
++
++#include <vmm_error.h>
++#include <vmm_stdio.h>
++#include <vmm_string.h>
++#include <vmm_manager.h>
++#include <tee.h>
++
++extern const struct tee_mediator_desc __start_teemediator_info[];
++extern const struct tee_mediator_desc __stop_teemediator_info[];
++
++static const struct tee_mediator_desc *cur_mediator;
++
++/* Select the TEE mediator using a name on command line. */
++static char opt_mediator[16] = "";
++
++/*
++ * TODO: Add function to alter Guest DTB, so we can properly describe
++ * present TEE.
++ */
++
++bool tee_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	if (!cur_mediator)
++		return false;
++
++	return cur_mediator->ops->handle_call(vcpu, regs);
++}
++
++int tee_guest_init(struct vmm_guest *guest, u16 tee_type)
++{
++	if (tee_type == TEE_TYPE_NONE)
++		return VMM_OK;
++
++	if (!cur_mediator)
++		return VMM_ENODEV;
++
++	if (cur_mediator->tee_type != tee_type)
++		return VMM_EINVALID;
++
++	return cur_mediator->ops->guest_init(guest);
++}
++
++int tee_guest_teardown(struct vmm_guest *guest)
++{
++	if (!cur_mediator)
++		return VMM_OK;
++
++	return cur_mediator->ops->guest_teardown(guest);
++}
++
++int tee_relinquish_resources(struct vmm_guest *guest)
++{
++	if (!cur_mediator)
++		return VMM_OK;
++
++	return cur_mediator->ops->relinquish_resources(guest);
++}
++
++u16 tee_get_type(void)
++{
++	if (!cur_mediator)
++		return TEE_TYPE_NONE;
++
++	return cur_mediator->tee_type;
++}
++
++int __init tee_init(void)
++{
++	const struct tee_mediator_desc *desc;
++	bool select_mediator = (strlen(opt_mediator) > 0);
++
++	if (select_mediator)
++		vmm_printf("TEE Mediator %s selected from command line\n",
++			   opt_mediator);
++
++	/*
++	 * When a specific TEE is selected using the 'tee=' command line
++	 * argument, we panic if the probe fails or if the requested TEE is not
++	 * supported.
++	 */
++	for (desc = __start_teemediator_info;
++	     desc < __stop_teemediator_info; desc++) {
++		if (select_mediator &&
++		    strncmp(opt_mediator, desc->cmdline_name,
++			    sizeof(opt_mediator)))
++			continue;
++
++		if (desc->ops->probe()) {
++			vmm_printf("Using TEE mediator for %s\n", desc->name);
++			cur_mediator = desc;
++			return VMM_OK;
++		} else if (select_mediator) {
++			vmm_panic("TEE mediator %s from command line probe failed\n",
++				  opt_mediator);
++			return VMM_EFAULT;
++		}
++	}
++
++	if (select_mediator) {
++		vmm_panic("TEE Mediator %s from command line not supported\n",
++			  opt_mediator);
++		return VMM_EINVALID;
++	}
++
++	return VMM_OK;
++}
++
++void init_tee_secondary(void)
++{
++	if (cur_mediator && cur_mediator->ops->init_secondary)
++		cur_mediator->ops->init_secondary();
++}
++
++void tee_free_guest_ctx(struct vmm_guest *guest)
++{
++	if (cur_mediator && cur_mediator->ops->free_guest_ctx)
++		cur_mediator->ops->free_guest_ctx(guest);
++}
++
++
++
+diff --git a/arch/arm/cpu/common/vsmccc.c b/arch/arm/cpu/common/vsmccc.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/arch/arm/cpu/common/vsmccc.c
+@@ -0,0 +1,270 @@
++/**
++ * Copyright (c) 2024
++ * All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ * 
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ * @file vsmccc.c
++ * @brief Generic handler for SMC and HVC calls according to ARM SMC Calling Convention
++ */
++
++#include <vmm_error.h>
++#include <vmm_stdio.h>
++#include <vmm_manager.h>
++#include <cpu_vcpu_helper.h>
++#include <emulate_psci.h>
++#include <smccc.h>
++#include <vsmccc.h>
++#ifdef CONFIG_ARM_64
++#include <cpu_defines.h>
++#endif
++
++#include <tee.h>
++
++static bool fill_uid(struct vmm_vcpu *vcpu, arch_regs_t *regs, u32 uid0,
++		     u32 uid1, u32 uid2, u32 uid3)
++{
++	/*
++	 * UID is returned in registers r0..r3, four bytes per register,
++	 * first byte is stored in low-order bits of a register.
++	 * (ARM DEN 0028B page 14)
++	 */
++	cpu_vcpu_reg_write(vcpu, regs, 0, uid0);
++	cpu_vcpu_reg_write(vcpu, regs, 1, uid1);
++	cpu_vcpu_reg_write(vcpu, regs, 2, uid2);
++	cpu_vcpu_reg_write(vcpu, regs, 3, uid3);
++
++	return true;
++}
++
++static bool fill_revision(struct vmm_vcpu *vcpu, arch_regs_t *regs,
++			  u32 major, u32 minor)
++{
++	/*
++	 * Revision is returned in registers r0 and r1.
++	 * r0 stores major part of the version
++	 * r1 stores minor part of the version
++	 * (ARM DEN 0028B page 15)
++	 */
++	cpu_vcpu_reg_write(vcpu, regs, 0, major);
++	cpu_vcpu_reg_write(vcpu, regs, 1, minor);
++
++	return true;
++}
++
++static bool fill_function_call_count(struct vmm_vcpu *vcpu, arch_regs_t *regs,
++				     u32 cnt)
++{
++	/*
++	 * Function call count is returned as any other return value in register r0
++	 * (ARM DEN 0028B page 17)
++	 */
++	cpu_vcpu_reg_write(vcpu, regs, 0, cnt);
++
++	return true;
++}
++
++/* SMCCC interface for ARM Architecture */
++static bool handle_arch(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	u32 fid = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++
++	switch (fid) {
++	case ARM_SMCCC_VERSION_FID:
++		cpu_vcpu_reg_write(vcpu, regs, 0, ARM_SMCCC_VERSION_1_2);
++		return true;
++
++	case ARM_SMCCC_ARCH_FEATURES_FID:
++	{
++		u32 arch_func_id = cpu_vcpu_reg_read(vcpu, regs, 1);
++		int ret = ARM_SMCCC_NOT_SUPPORTED;
++
++		switch (arch_func_id) {
++		case ARM_SMCCC_ARCH_WORKAROUND_1_FID:
++		case ARM_SMCCC_ARCH_WORKAROUND_3_FID:
++			/* For now, we don't support these workarounds */
++			ret = ARM_SMCCC_NOT_REQUIRED;
++			break;
++		case ARM_SMCCC_ARCH_WORKAROUND_2_FID:
++			/* For now, we don't support this workaround */
++			ret = ARM_SMCCC_NOT_REQUIRED;
++			break;
++		}
++
++		cpu_vcpu_reg_write(vcpu, regs, 0, ret);
++
++		return true;
++	}
++
++	case ARM_SMCCC_ARCH_WORKAROUND_1_FID:
++	case ARM_SMCCC_ARCH_WORKAROUND_3_FID:
++		/* No return value */
++		return true;
++
++	case ARM_SMCCC_ARCH_WORKAROUND_2_FID:
++		/* No return value */
++		return true;
++	}
++
++	return false;
++}
++
++/* SMCCC interface for hypervisor. Tell about itself. */
++static bool handle_hypervisor(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	u32 fid = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++
++	switch (fid) {
++	case ARM_SMCCC_CALL_COUNT_FID(HYPERVISOR):
++		return fill_function_call_count(vcpu, regs,
++						XVISOR_SMCCC_FUNCTION_COUNT);
++	case ARM_SMCCC_CALL_UID_FID(HYPERVISOR):
++		return fill_uid(vcpu, regs, XVISOR_SMCCC_UID_0,
++				XVISOR_SMCCC_UID_1, XVISOR_SMCCC_UID_2,
++				XVISOR_SMCCC_UID_3);
++	case ARM_SMCCC_REVISION_FID(HYPERVISOR):
++		return fill_revision(vcpu, regs, XVISOR_SMCCC_MAJOR_REVISION,
++				     XVISOR_SMCCC_MINOR_REVISION);
++	default:
++		return false;
++	}
++}
++
++/* Existing (pre SMCCC) APIs. This includes PSCI 0.1 interface */
++static bool handle_existing_apis(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	/* Only least 32 bits are significant (ARM DEN 0028B, page 12) */
++	u32 fid = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++
++	/* Try PSCI 0.1 call */
++	if (emulate_psci_call(vcpu, regs, true) == VMM_OK) {
++		return true;
++	}
++
++	return false;
++}
++
++static bool is_psci_fid(u32 fid)
++{
++	u32 fn = fid & ARM_SMCCC_FUNC_MASK;
++
++	/* PSCI function numbers are in range 0x84000000 - 0x8400001F */
++	return (fn >= 0x0000 && fn <= 0x001F);
++}
++
++/* PSCI 0.2 interface and other Standard Secure Calls */
++static bool handle_sssc(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	u32 fid = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++
++	if (is_psci_fid(fid)) {
++		if (emulate_psci_call(vcpu, regs, true) == VMM_OK) {
++			return true;
++		}
++	}
++
++	switch (fid) {
++	case ARM_SMCCC_CALL_COUNT_FID(STANDARD):
++		return fill_function_call_count(vcpu, regs,
++						SSSC_SMCCC_FUNCTION_COUNT);
++
++	case ARM_SMCCC_CALL_UID_FID(STANDARD):
++		return fill_uid(vcpu, regs, SSSC_SMCCC_UID_0,
++				SSSC_SMCCC_UID_1, SSSC_SMCCC_UID_2,
++				SSSC_SMCCC_UID_3);
++
++	case ARM_SMCCC_REVISION_FID(STANDARD):
++		return fill_revision(vcpu, regs, SSSC_SMCCC_MAJOR_REVISION,
++				     SSSC_SMCCC_MINOR_REVISION);
++
++	default:
++		return false;
++	}
++}
++
++/* Secure Calls defined by the Silicon Provider (SiP) */
++static bool handle_sip(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	/* For now, we don't handle SiP calls */
++	return false;
++}
++
++/*
++ * vsmccc_handle_call() - handle SMC/HVC call according to ARM SMCCC.
++ * returns true if that was valid SMCCC call (even if function number
++ * was unknown).
++ */
++bool vsmccc_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs)
++{
++	bool handled = false;
++	u32 funcid = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++	bool is_32bit_guest = false;
++
++#ifdef CONFIG_ARM_64
++	/* Check if guest is in 32-bit mode */
++	is_32bit_guest = (regs->pstate & PSR_MODE32) ? true : false;
++#else
++	is_32bit_guest = true;
++#endif
++
++	/* 64 bit calls are allowed only from 64 bit guests. */
++	if (smccc_is_conv_64(funcid) && is_32bit_guest) {
++		cpu_vcpu_reg_write(vcpu, regs, 0,
++				  ARM_SMCCC_ERR_UNKNOWN_FUNCTION);
++		return true;
++	}
++
++	/*
++	 * Special case: identifier range for existing APIs.
++	 * This range is described in SMCCC (ARM DEN 0028B, page 16),
++	 * but it does not conforms to standard function identifier
++	 * encoding.
++	 */
++	if (funcid >= ARM_SMCCC_RESERVED_RANGE_START &&
++	    funcid <= ARM_SMCCC_RESERVED_RANGE_END)
++		handled = handle_existing_apis(vcpu, regs);
++	else {
++		switch (smccc_get_owner(funcid)) {
++		case ARM_SMCCC_OWNER_ARCH:
++			handled = handle_arch(vcpu, regs);
++			break;
++		case ARM_SMCCC_OWNER_HYPERVISOR:
++			handled = handle_hypervisor(vcpu, regs);
++			break;
++		case ARM_SMCCC_OWNER_STANDARD:
++			handled = handle_sssc(vcpu, regs);
++			break;
++		case ARM_SMCCC_OWNER_SIP:
++			handled = handle_sip(vcpu, regs);
++			break;
++		case ARM_SMCCC_OWNER_TRUSTED_APP ... ARM_SMCCC_OWNER_TRUSTED_APP_END:
++		case ARM_SMCCC_OWNER_TRUSTED_OS ... ARM_SMCCC_OWNER_TRUSTED_OS_END:
++			handled = tee_handle_call(vcpu, regs);
++			break;
++		}
++	}
++
++	if (!handled) {
++		vmm_printf("%s: Unhandled SMC/HVC: %#x\n", __func__, funcid);
++
++		/* Inform caller that function is not supported. */
++		cpu_vcpu_reg_write(vcpu, regs, 0,
++				  ARM_SMCCC_ERR_UNKNOWN_FUNCTION);
++	}
++
++	return true;
++}
++
++
++
+diff --git a/core/vmm_manager.c b/core/vmm_manager.c
+index 0000000..1111111 100644
+--- a/core/vmm_manager.c
++++ b/core/vmm_manager.c
+@@ -37,6 +37,7 @@
+ #include <arch_vcpu.h>
+ #include <arch_guest.h>
+ #include <libs/stringlib.h>
++#include <tee.h>
+ 
+ #undef DEBUG
+ 
+@@ -1500,6 +1501,18 @@ struct vmm_guest *vmm_manager_guest_create(struct vmm_devtree_node *node)
+ 	/* Initialize guest address space */
+ 	if (vmm_guest_aspace_init(guest)) {
+ 		goto fail_destroy_guest;
+ 	}
++
++	/* Initialize TEE for guest if configured */
++	u16 tee_type = TEE_TYPE_NONE;
++	u32 tee_type_u32;
++	if (vmm_devtree_read_u32(guest->node, "tee_type",
++				  &tee_type_u32) == VMM_OK) {
++		tee_type = (u16)tee_type_u32;
++	}
++	if (tee_type != TEE_TYPE_NONE) {
++		if (tee_guest_init(guest, tee_type)) {
++			vmm_printf("%s: Failed to initialize TEE for guest %s\n",
++				   __func__, guest->name);
++			/* Continue without TEE support */
++		}
++	}
+ 	
+ 	/* Reset guest address space */
+ 	if (vmm_guest_aspace_reset(guest)) {
+@@ -1555,6 +1568,10 @@ int vmm_manager_guest_destroy(struct vmm_guest *guest)
+ 	/* For sanity reset guest (ignore reture value) */
+ 	vmm_manager_guest_reset(guest);
+ 
++	/* Tear down TEE for guest */
++	tee_guest_teardown(guest);
++	tee_relinquish_resources(guest);
++	tee_free_guest_ctx(guest);
++
+ 	/* Flush all request for this guest */
+ 	manager_flush_req(guest);
+ 
+-- 
+2.25.1
+
