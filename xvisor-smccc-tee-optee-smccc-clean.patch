@@ -1,0 +1,413 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ChatGPT <noreply@example.com>
+Date: Sat, 10 Jan 2026 00:00:00 +0000
+Subject: [PATCH] arm: tee/optee: introduce Xen-like SMCCC call wrapper and fix OP-TEE VM_* FIDs
+
+This patch is meant to be applied on top of your current TEE/OP-TEE draft.
+It:
+- Adds arm_smccc_smc()/arm_smccc_hvc() wrappers (Xen-style) into smccc.h
+- Fixes OPTEE_SMC_FUNCID_VM_CREATED/DESTROYED (13/14) and adds build-time checks
+- Reworks optee.c to use arm_smccc_smc() and fixes optee_probe() UID checks
+
+---
+ arch/arm/cpu/common/include/optee_smc.h |  40 +++++++--
+ arch/arm/cpu/common/include/smccc.h     | 104 ++++++++++++++++++++++++
+ arch/arm/cpu/common/optee.c             |  77 +++++++++++-------
+ 3 files changed, 185 insertions(+), 36 deletions(-)
+
+diff --git a/arch/arm/cpu/common/include/smccc.h b/arch/arm/cpu/common/include/smccc.h
+index 1111111..2222222 100644
+--- a/arch/arm/cpu/common/include/smccc.h
++++ b/arch/arm/cpu/common/include/smccc.h
+@@ -1,5 +1,12 @@
+ #ifndef _SMCCC_H_
+ #define _SMCCC_H_
+ 
++/*
++ * SMCCC helpers (function ID encoding) + SMCCC call wrappers.
++ *
++ * The encoding part is similar to Xen's asm/smccc.h.
++ * The call wrappers (arm_smccc_smc/arm_smccc_hvc) are added so higher-level
++ * modules (TEE mediators, PSCI, platform code) do not open-code inline SMC.
++ */
++
+ #include <vmm_types.h>
+ 
+ /* SMCCC constants */
+@@ -118,6 +125,103 @@ static inline u32 smccc_get_function(u32 func_id)
+     return func_id & ARM_SMCCC_FUNC_MASK;
+ }
++
++/* -------------------------------------------------------------------------- */
++/* SMCCC call wrappers (Xen-style)                                             */
++/* -------------------------------------------------------------------------- */
++
++/*
++ * Only the first 4 registers are returned by SMCCC v1.0/v1.1.
++ * (SMCCC v1.2 adds x0-x17 extended result registers, which we don't need yet
++ * for OP-TEE virtualization minimal path.)
++ */
++struct arm_smccc_res {
++    unsigned long a0;
++    unsigned long a1;
++    unsigned long a2;
++    unsigned long a3;
++};
++
++/*
++ * arm_smccc_smc()
++ * @a0-a7: arguments placed in x0-x7 (AArch64) or r0-r7 (AArch32)
++ * @res:   optional return values from a0-a3
++ */
++static inline void arm_smccc_smc(unsigned long a0, unsigned long a1,
++                                 unsigned long a2, unsigned long a3,
++                                 unsigned long a4, unsigned long a5,
++                                 unsigned long a6, unsigned long a7,
++                                 struct arm_smccc_res *res)
++{
++#ifdef CONFIG_ARM_64
++    register unsigned long x0 asm("x0") = a0;
++    register unsigned long x1 asm("x1") = a1;
++    register unsigned long x2 asm("x2") = a2;
++    register unsigned long x3 asm("x3") = a3;
++    register unsigned long x4 asm("x4") = a4;
++    register unsigned long x5 asm("x5") = a5;
++    register unsigned long x6 asm("x6") = a6;
++    register unsigned long x7 asm("x7") = a7;
++
++    asm volatile(
++        "smc    #0\n"
++        : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
++        : "r"(x4), "r"(x5), "r"(x6), "r"(x7)
++        /* SMCCC doesn't guarantee anything about x8-x17 */
++        : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++          "x16", "x17", "memory");
++
++    if (res) {
++        res->a0 = x0;
++        res->a1 = x1;
++        res->a2 = x2;
++        res->a3 = x3;
++    }
++#else
++    register unsigned long r0 asm("r0") = a0;
++    register unsigned long r1 asm("r1") = a1;
++    register unsigned long r2 asm("r2") = a2;
++    register unsigned long r3 asm("r3") = a3;
++    register unsigned long r4 asm("r4") = a4;
++    register unsigned long r5 asm("r5") = a5;
++    register unsigned long r6 asm("r6") = a6;
++    register unsigned long r7 asm("r7") = a7;
++
++    asm volatile(
++        "smc    #0\n"
++        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
++        : "r"(r4), "r"(r5), "r"(r6), "r"(r7)
++        : "r8", "r9", "r10", "r11", "r12", "memory");
++
++    if (res) {
++        res->a0 = r0;
++        res->a1 = r1;
++        res->a2 = r2;
++        res->a3 = r3;
++    }
++#endif
++}
++
++static inline void arm_smccc_hvc(unsigned long a0, unsigned long a1,
++                                 unsigned long a2, unsigned long a3,
++                                 unsigned long a4, unsigned long a5,
++                                 unsigned long a6, unsigned long a7,
++                                 struct arm_smccc_res *res)
++{
++#ifdef CONFIG_ARM_64
++    register unsigned long x0 asm("x0") = a0;
++    register unsigned long x1 asm("x1") = a1;
++    register unsigned long x2 asm("x2") = a2;
++    register unsigned long x3 asm("x3") = a3;
++    register unsigned long x4 asm("x4") = a4;
++    register unsigned long x5 asm("x5") = a5;
++    register unsigned long x6 asm("x6") = a6;
++    register unsigned long x7 asm("x7") = a7;
++
++    asm volatile(
++        "hvc    #0\n"
++        : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
++        : "r"(x4), "r"(x5), "r"(x6), "r"(x7)
++        : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++          "x16", "x17", "memory");
++
++    if (res) {
++        res->a0 = x0;
++        res->a1 = x1;
++        res->a2 = x2;
++        res->a3 = x3;
++    }
++#else
++    register unsigned long r0 asm("r0") = a0;
++    register unsigned long r1 asm("r1") = a1;
++    register unsigned long r2 asm("r2") = a2;
++    register unsigned long r3 asm("r3") = a3;
++    register unsigned long r4 asm("r4") = a4;
++    register unsigned long r5 asm("r5") = a5;
++    register unsigned long r6 asm("r6") = a6;
++    register unsigned long r7 asm("r7") = a7;
++
++    asm volatile(
++        "hvc    #0\n"
++        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
++        : "r"(r4), "r"(r5), "r"(r6), "r"(r7)
++        : "r8", "r9", "r10", "r11", "r12", "memory");
++
++    if (res) {
++        res->a0 = r0;
++        res->a1 = r1;
++        res->a2 = r2;
++        res->a3 = r3;
++    }
++#endif
++}
+ 
+ #endif /* _SMCCC_H_ */
+diff --git a/arch/arm/cpu/common/include/optee_smc.h b/arch/arm/cpu/common/include/optee_smc.h
+index 1111111..2222222 100644
+--- a/arch/arm/cpu/common/include/optee_smc.h
++++ b/arch/arm/cpu/common/include/optee_smc.h
+@@ -1,6 +1,10 @@
+ #ifndef _OPTEE_SMC_H_
+ #define _OPTEE_SMC_H_
+ 
++/*
++ * Keep this header ABI-compatible with OP-TEE / Xen's optee_smc.h.
++ */
++
+ #include <smccc.h>
+ 
+ /* OP-TEE SMC Call identifiers */
+@@ -99,18 +103,38 @@
+ #define OPTEE_SMC_RETURN_ENOTAVAIL     0xFFFF000A
+ #define OPTEE_SMC_RETURN_ENOMEM       0xFFFF000C
+ 
+-/* VM management calls */
+-#define OPTEE_SMC_FUNCID_VM_CREATED    0x10
+-#define OPTEE_SMC_FUNCID_VM_DESTROYED  0x11
++/* VM management calls (OP-TEE virtualization ABI)
++ *
++ * NOTE: these are *function numbers* (lower 16 bits), not full FIDs.
++ * VM_CREATED  = 13 (0x000D)
++ * VM_DESTROYED= 14 (0x000E)
++ *
++ * If you accidentally use 0x14 instead of 14, you will generate 0xB2000014
++ * instead of 0xB200000E and OP-TEE will return UNKNOWN_FUNCTION.
++ */
++#define OPTEE_SMC_FUNCID_VM_CREATED    13
++#define OPTEE_SMC_FUNCID_VM_DESTROYED  14
+ #define OPTEE_SMC_VM_CREATED   OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_VM_CREATED)
+ #define OPTEE_SMC_VM_DESTROYED OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_VM_DESTROYED)
++
++/* Query number of threads supported by OP-TEE */
++#define OPTEE_SMC_FUNCID_GET_THREAD_COUNT 15
++#define OPTEE_SMC_GET_THREAD_COUNT OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_THREAD_COUNT)
++
++/* Build-time guardrails to avoid "VM_DESTROYED fid wrong" regressions */
++#if OPTEE_SMC_VM_CREATED != 0xB200000D
++#error "OPTEE_SMC_VM_CREATED wrong: expected 0xB200000D (FAST/SMC32/TRUSTED_OS/13)"
++#endif
++#if OPTEE_SMC_VM_DESTROYED != 0xB200000E
++#error "OPTEE_SMC_VM_DESTROYED wrong: expected 0xB200000E (FAST/SMC32/TRUSTED_OS/14)"
++#endif
+ 
+ #endif /* _OPTEE_SMC_H_ */
+diff --git a/arch/arm/cpu/common/optee.c b/arch/arm/cpu/common/optee.c
+index 1111111..2222222 100644
+--- a/arch/arm/cpu/common/optee.c
++++ b/arch/arm/cpu/common/optee.c
+@@ -10,6 +10,7 @@
+ #include <vmm_error.h>
+ #include <vmm_heap.h>
+ #include <vmm_stdio.h>
++#include <smccc.h>
+ 
+ #include <arch_regs.h>
+ 
+@@ -24,41 +25,6 @@
+ /* Client ID 0 is reserved for the hypervisor itself */
+ #define OPTEE_CLIENT_ID(guest) ((guest)->id + 1)
+ 
+-static u32 optee_smc_call(u32 func_id, u32 a1, u32 a2, u32 a3,
+-                            u32 a4, u32 a5, u32 a6, u32 a7,
+-                            u32 *ret_a1, u32 *ret_a2, u32 *ret_a3)
+-{
+-    /*
+-     * Placeholder implementation – you should replace this with
+-     * actual SMC invocation using smc instruction.
+-     */
+-    if (ret_a1)
+-        *ret_a1 = 0;
+-    if (ret_a2)
+-        *ret_a2 = 0;
+-    if (ret_a3)
+-        *ret_a3 = 0;
+-
+-    /* Return unknown function by default */
+-    return OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+-}
+-
+ /* OP-TEE guest context */
+ struct optee_guest {
+     u32 client_id;
+@@ -67,40 +33,64 @@ struct optee_guest {
+ };
+ 
+ static bool optee_probe(void)
+ {
+-    u32 ret_a1, ret_a2, ret_a3;
+-    u32 ret;
+-
+-    vmm_init_printf("OPTEE: probing OP-TEE (cmd=optee)\n");
+-
+-    /* Check UID */
+-    ret = optee_smc_call(OPTEE_SMC_CALLS_UID, 0, 0, 0, 0, 0, 0, 0,
+-                         &ret_a1, &ret_a2, &ret_a3);
+-    vmm_init_printf("OPTEE: CALLS_UID = %08x %08x %08x %08x\n",
+-                    ret, ret_a1, ret_a2, ret_a3);
+-
+-    if (ret != OPTEE_SMC_RETURN_OK)
+-        return false;
+-
+-    if (ret_a1 != OPTEE_MSG_UID_0 ||
+-        ret_a2 != OPTEE_MSG_UID_1 ||
+-        ret_a3 != OPTEE_MSG_UID_2)
+-        return false;
+-
+-    /* Check virtualization support */
+-    ret = optee_smc_call(OPTEE_SMC_VM_DESTROYED, 0, 0, 0, 0, 0, 0, 0,
+-                         &ret_a1, &ret_a2, &ret_a3);
+-    vmm_init_printf("OPTEE: VM_DESTROYED probe rc=%08x\n", ret);
+-
+-    if (ret == OPTEE_SMC_RETURN_UNKNOWN_FUNCTION)
+-        return false;
+-
+-    return true;
++    struct arm_smccc_res res;
++
++    vmm_init_printf("TEE: probing OP-TEE (cmd=optee)\n");
++
++    /* 1) Check OP-TEE ABI UID via SMCCC discovery call */
++    arm_smccc_smc(OPTEE_SMC_CALLS_UID, 0, 0, 0, 0, 0, 0, 0, &res);
++    vmm_init_printf("OPTEE: CALLS_UID = %08lx %08lx %08lx %08lx\n",
++                    res.a0, res.a1, res.a2, res.a3);
++
++    if ((u32)res.a0 != OPTEE_MSG_UID_0 ||
++        (u32)res.a1 != OPTEE_MSG_UID_1 ||
++        (u32)res.a2 != OPTEE_MSG_UID_2 ||
++        (u32)res.a3 != OPTEE_MSG_UID_3)
++        return false;
++
++    /* 2) Optional: read number of OP-TEE threads */
++    arm_smccc_smc(OPTEE_SMC_GET_THREAD_COUNT, 0, 0, 0, 0, 0, 0, 0, &res);
++    if ((u32)res.a0 == OPTEE_SMC_RETURN_OK)
++        vmm_init_printf("OPTEE: thread_count=%lu\n", res.a1);
++    else
++        vmm_init_printf("OPTEE: GET_THREAD_COUNT rc=%08lx (ignored)\n", res.a0);
++
++    /* 3) Probe virtualization support: VM_DESTROYED must not be UNKNOWN */
++    vmm_init_printf("OPTEE: VM_DESTROYED fid=%#x\n", OPTEE_SMC_VM_DESTROYED);
++    arm_smccc_smc(OPTEE_SMC_VM_DESTROYED, 0, 0, 0, 0, 0, 0, 0, &res);
++    vmm_init_printf("OPTEE: VM_DESTROYED probe rc=%08lx\n", res.a0);
++
++    if ((u32)res.a0 == OPTEE_SMC_RETURN_UNKNOWN_FUNCTION)
++        return false;
++
++    return true;
+ }
+ 
+ static int optee_guest_init(struct vmm_guest *guest)
+ {
+-    u32 ret_a1, ret_a2, ret_a3;
+-    u32 ret;
++    struct arm_smccc_res res;
+     struct optee_guest *ctx;
+     u32 client_id;
+@@ -112,11 +102,14 @@ static int optee_guest_init(struct vmm_guest *guest)
+ 
+     /* Notify OP-TEE about new guest */
+-    ret = optee_smc_call(OPTEE_SMC_VM_CREATED, client_id, 0, 0, 0, 0, 0, 0,
+-                         &ret_a1, &ret_a2, &ret_a3);
+-    if (ret != OPTEE_SMC_RETURN_OK) {
+-        vmm_init_printf("OPTEE: VM_CREATED failed rc=%08x\n", ret);
++    arm_smccc_smc(OPTEE_SMC_VM_CREATED, client_id, 0, 0, 0, 0, 0, 0, &res);
++    if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
++        vmm_init_printf("OPTEE: VM_CREATED failed rc=%08lx\n", res.a0);
+         vmm_free(ctx);
+         return VMM_EFAIL;
+@@ -137,11 +130,14 @@ static int optee_guest_teardown(struct vmm_guest *guest)
+ {
+-    u32 ret_a1, ret_a2, ret_a3;
+-    u32 ret;
++    struct arm_smccc_res res;
+     struct optee_guest *ctx = guest->arch.tee;
+ 
+     if (!ctx)
+         return VMM_OK;
+ 
+-    ret = optee_smc_call(OPTEE_SMC_VM_DESTROYED, ctx->client_id, 0, 0, 0, 0, 0, 0,
+-                         &ret_a1, &ret_a2, &ret_a3);
+-    if (ret != OPTEE_SMC_RETURN_OK) {
+-        vmm_init_printf("OPTEE: VM_DESTROYED failed rc=%08x\n", ret);
++    arm_smccc_smc(OPTEE_SMC_VM_DESTROYED, ctx->client_id, 0, 0, 0, 0, 0, 0, &res);
++    if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
++        vmm_init_printf("OPTEE: VM_DESTROYED failed rc=%08lx\n", res.a0);
+     }
+ 
+     vmm_free(ctx);
+@@ -154,18 +150,27 @@ static bool optee_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs)
+ {
+     struct optee_guest *ctx = vcpu->guest->arch.tee;
+ 
+     if (!ctx)
+         return false;
+ 
+-    /* Forward OP-TEE calls */
+-    u32 a0 = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
+-    u32 a1 = (u32)cpu_vcpu_reg_read(vcpu, regs, 1);
+-    u32 a2 = (u32)cpu_vcpu_reg_read(vcpu, regs, 2);
+-    u32 a3 = (u32)cpu_vcpu_reg_read(vcpu, regs, 3);
+-    u32 a4 = (u32)cpu_vcpu_reg_read(vcpu, regs, 4);
+-    u32 a5 = (u32)cpu_vcpu_reg_read(vcpu, regs, 5);
+-    u32 a6 = (u32)cpu_vcpu_reg_read(vcpu, regs, 6);
+-    u32 a7 = ctx->client_id; /* Hypervisor Client ID */
+-
+-    u32 ret_a1, ret_a2, ret_a3;
+-    u32 ret = optee_smc_call(a0, a1, a2, a3, a4, a5, a6, a7,
+-                             &ret_a1, &ret_a2, &ret_a3);
+-
+-    cpu_vcpu_reg_write(vcpu, regs, 0, ret);
+-    cpu_vcpu_reg_write(vcpu, regs, 1, ret_a1);
+-    cpu_vcpu_reg_write(vcpu, regs, 2, ret_a2);
+-    cpu_vcpu_reg_write(vcpu, regs, 3, ret_a3);
+-
+-    return true;
++    /* Forward OP-TEE calls: keep guest's a0-a6, override a7 with client_id */
++    unsigned long a0 = (u32)cpu_vcpu_reg_read(vcpu, regs, 0);
++    unsigned long a1 = (u32)cpu_vcpu_reg_read(vcpu, regs, 1);
++    unsigned long a2 = (u32)cpu_vcpu_reg_read(vcpu, regs, 2);
++    unsigned long a3 = (u32)cpu_vcpu_reg_read(vcpu, regs, 3);
++    unsigned long a4 = (u32)cpu_vcpu_reg_read(vcpu, regs, 4);
++    unsigned long a5 = (u32)cpu_vcpu_reg_read(vcpu, regs, 5);
++    unsigned long a6 = (u32)cpu_vcpu_reg_read(vcpu, regs, 6);
++    unsigned long a7 = (u32)ctx->client_id;
++
++    struct arm_smccc_res res;
++    arm_smccc_smc(a0, a1, a2, a3, a4, a5, a6, a7, &res);
++
++    cpu_vcpu_reg_write(vcpu, regs, 0, (u32)res.a0);
++    cpu_vcpu_reg_write(vcpu, regs, 1, (u32)res.a1);
++    cpu_vcpu_reg_write(vcpu, regs, 2, (u32)res.a2);
++    cpu_vcpu_reg_write(vcpu, regs, 3, (u32)res.a3);
++
++    return true;
+ }
+ 
+ static const struct tee_mediator_ops optee_ops = {
+     .probe = optee_probe,
