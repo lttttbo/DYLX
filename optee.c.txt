@@ -1,0 +1,1615 @@
+/*
+ * Xvisor OP-TEE mediator (SMCCC-based), Xen-like design
+ *
+ * Goals:
+ *  - Per-guest client_id via a7 (OP-TEE virtualization)
+ *  - Implement EXCHANGE_CAPABILITIES filtering (dynamic shm only)
+ *  - Translate NONCONTIG pagelist: guest IPA -> host PA
+ *  - Implement CALL_WITH_ARG + RPC loop (ALLOC/CMD/FREE)
+ *  - Support VM_CREATED/VM_DESTROYED on guest create/destroy
+ *
+ * Integration points you may need to adjust:
+ *  1) host RAM page allocation/free:
+ *      - vmm_host_ram_alloc(&pa, size, align)
+ *      - vmm_host_ram_free(pa, size)
+ *  2) host memmap/memunmap:
+ *      - vmm_host_memmap(pa, size)
+ *      - vmm_host_memunmap(va)
+ *  3) guest physical map:
+ *      - vmm_guest_physical_map(guest, gpa, size, &hpa, &availsz, &reg_flags)
+ *
+ * Everything else stays close to Xen logic.
+ */
+
+#include <vmm_error.h>
+#include <vmm_stdio.h>
+#include <vmm_string.h>
+#include <vmm_manager.h>
+#include <vmm_malloc.h>
+#include <vmm_host_aspace.h>
+#include <vmm_host_ram.h>
+#include <cpu_vcpu_helper.h>
+#include <arch_regs.h>
+
+#include <smccc.h>
+#include <tee.h>
+#include <optee_smc.h>
+
+/* --------------------------------------------------------- */
+/* Basic page helpers (fallback if xvisor doesn't expose them) */
+
+#ifndef VMM_PAGE_SIZE
+#define VMM_PAGE_SIZE 4096UL
+#endif
+
+#ifndef VMM_PAGE_SHIFT
+#define VMM_PAGE_SHIFT 12
+#endif
+
+#define OPTEE_PAGE_SIZE   VMM_PAGE_SIZE
+#define OPTEE_PAGE_MASK   (~(OPTEE_PAGE_SIZE - 1UL))
+
+static inline unsigned long optee_align_down(unsigned long x, unsigned long a)
+{
+    return x & ~(a - 1UL);
+}
+
+static inline unsigned long optee_align_up(unsigned long x, unsigned long a)
+{
+    return (x + a - 1UL) & ~(a - 1UL);
+}
+
+static inline unsigned long optee_min_ul(unsigned long a, unsigned long b)
+{
+    return (a < b) ? a : b;
+}
+
+/* --------------------------------------------------------- */
+/* Regpair helpers: OP-TEE uses SMC32 encoding even on AArch64 */
+
+static inline u64 regpair_to_u64(u64 lo, u64 hi)
+{
+    return ((u64)(lo & 0xffffffffULL)) | (((u64)(hi & 0xffffffffULL)) << 32);
+}
+
+static inline void u64_to_regpair(u64 v, u64 *lo, u64 *hi)
+{
+    *lo = (u32)(v & 0xffffffffULL);
+    *hi = (u32)((v >> 32) & 0xffffffffULL);
+}
+
+/* --------------------------------------------------------- */
+/*
+ * Minimal OP-TEE message ABI definitions
+ * If you already have optee_msg.h in your tree, include it instead.
+ */
+
+#ifndef OPTEE_MSG_ATTR_TYPE_MASK
+#define OPTEE_MSG_ATTR_TYPE_MASK          0xFF
+
+#define OPTEE_MSG_ATTR_TYPE_NONE          0x0
+#define OPTEE_MSG_ATTR_TYPE_VALUE_INPUT   0x1
+#define OPTEE_MSG_ATTR_TYPE_VALUE_OUTPUT  0x2
+#define OPTEE_MSG_ATTR_TYPE_VALUE_INOUT   0x3
+
+#define OPTEE_MSG_ATTR_TYPE_RMEM_INPUT    0x5
+#define OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT   0x6
+#define OPTEE_MSG_ATTR_TYPE_RMEM_INOUT    0x7
+
+#define OPTEE_MSG_ATTR_TYPE_TMEM_INPUT    0x9
+#define OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT   0xA
+#define OPTEE_MSG_ATTR_TYPE_TMEM_INOUT    0xB
+
+#define OPTEE_MSG_ATTR_NONCONTIG          (1U << 8)
+
+/* Standard commands */
+#define OPTEE_MSG_CMD_OPEN_SESSION        0
+#define OPTEE_MSG_CMD_INVOKE_COMMAND      1
+#define OPTEE_MSG_CMD_CLOSE_SESSION       2
+#define OPTEE_MSG_CMD_CANCEL              3
+#define OPTEE_MSG_CMD_REGISTER_SHM        4
+#define OPTEE_MSG_CMD_UNREGISTER_SHM      5
+
+/* These are GlobalPlatform-ish error/origin codes used by Linux driver too */
+#ifndef TEEC_SUCCESS
+#define TEEC_SUCCESS                      0x00000000
+#define TEEC_ERROR_GENERIC                0xFFFF0000
+#define TEEC_ERROR_BAD_PARAMETERS         0xFFFF0006
+#define TEEC_ERROR_OUT_OF_MEMORY          0xFFFF000C
+#define TEEC_ERROR_NOT_SUPPORTED          0xFFFF000A
+#define TEEC_ERROR_COMMUNICATION          0xFFFF000E
+#define TEEC_ORIGIN_COMMS                 0x00000002
+#endif
+
+struct optee_msg_param_value {
+    u64 a;
+    u64 b;
+    u64 c;
+};
+
+struct optee_msg_param_tmem {
+    u64 buf_ptr;
+    u64 size;
+    u64 shm_ref;
+};
+
+struct optee_msg_param_rmem {
+    u64 offs;
+    u64 size;
+    u64 shm_ref;
+};
+
+struct optee_msg_param {
+    u64 attr;
+    union {
+        struct optee_msg_param_value value;
+        struct optee_msg_param_tmem  tmem;
+        struct optee_msg_param_rmem  rmem;
+    } u;
+};
+
+struct optee_msg_arg {
+    u32 cmd;
+    u32 func;
+    u32 session;
+    u32 cancel_id;
+
+    u32 pad;
+    u32 ret;
+    u32 ret_origin;
+    u32 num_params;
+
+    struct optee_msg_param params[];
+};
+
+static inline u32 optee_msg_get_arg_size(u32 num_params)
+{
+    /* Round up to 8 for safety */
+    u32 sz = (u32)sizeof(struct optee_msg_arg) +
+             num_params * (u32)sizeof(struct optee_msg_param);
+    return (sz + 7U) & ~7U;
+}
+#endif /* OPTEE_MSG_ATTR_TYPE_MASK */
+
+/* --------------------------------------------------------- */
+/*
+ * RPC command IDs.
+ * Ideally include Linux drivers/tee/optee/optee_rpc_cmd.h.
+ * These fallback values match common upstream layouts:
+ *  - LOAD_TA=0, RPMB=1, FS=2, GET_TIME=3, WAIT_QUEUE=4, SUSPEND=5,
+ *    SHM_ALLOC=6, SHM_FREE=7, ...
+ */
+#ifndef OPTEE_RPC_CMD_SHM_ALLOC
+#define OPTEE_RPC_CMD_SHM_ALLOC           6
+#endif
+
+#ifndef OPTEE_RPC_CMD_SHM_FREE
+#define OPTEE_RPC_CMD_SHM_FREE            7
+#endif
+
+/* --------------------------------------------------------- */
+/* OP-TEE capability bits (should match optee_smc.h in Linux/OP-TEE) */
+
+#ifndef OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM
+#define OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM   (1U << 0)
+#define OPTEE_SMC_SEC_CAP_UNREGISTERED_SHM    (1U << 1)
+#define OPTEE_SMC_SEC_CAP_DYNAMIC_SHM         (1U << 2)
+#define OPTEE_SMC_SEC_CAP_MEMREF_NULL         (1U << 3)
+#endif
+
+#ifndef OPTEE_SMC_NSEC_CAP_UNIPROCESSOR
+#define OPTEE_SMC_NSEC_CAP_UNIPROCESSOR       (1U << 0)
+#endif
+
+#define OPTEE_KNOWN_NSEC_CAPS  (OPTEE_SMC_NSEC_CAP_UNIPROCESSOR)
+#define OPTEE_KNOWN_SEC_CAPS   (OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM | \
+                                OPTEE_SMC_SEC_CAP_UNREGISTERED_SHM | \
+                                OPTEE_SMC_SEC_CAP_DYNAMIC_SHM | \
+                                OPTEE_SMC_SEC_CAP_MEMREF_NULL)
+
+/* --------------------------------------------------------- */
+/* mediator calls count (what guest sees via CALLS_COUNT) */
+#define OPTEE_MEDIATOR_SMC_COUNT          12U
+
+/* --------------------------------------------------------- */
+/* Resource limits (avoid DoS by guests). Tune as needed. */
+#define OPTEE_MAX_SHM_BUFS_DEFAULT        128U
+#define OPTEE_MAX_SHM_PAGES_DEFAULT       2048U  /* ~8MB if 4K pages */
+#define OPTEE_MAX_SHM_BUFFER_PG           129U   /* like Xen's default */
+
+/* --------------------------------------------------------- */
+/* NONCONTIG pagelist format: 4K page, 511 entries + next pointer */
+#define OPTEE_NONCONTIG_ENTRIES_PER_PAGE  ((OPTEE_PAGE_SIZE / sizeof(u64)) - 1U)
+
+struct optee_msg_noncontig_page {
+    u64 pages[OPTEE_NONCONTIG_ENTRIES_PER_PAGE];
+    u64 next; /* physical address of next list page (0 if last) */
+};
+
+/* --------------------------------------------------------- */
+/* Host page wrapper: we need a host physical page visible to OP-TEE */
+
+struct optee_host_page {
+    physical_addr_t pa;
+    void *va;
+    physical_size_t sz;
+};
+
+/*
+ * Allocate one host page and map it into hypervisor VA.
+ *
+ * NOTE: Adjust if your xvisor host-ram allocator has different signature.
+ */
+static int optee_host_page_alloc(struct optee_host_page *pg, physical_size_t sz)
+{
+    int rc;
+    physical_addr_t pa;
+    void *va;
+
+    if (!pg || !sz)
+        return VMM_EINVALID;
+
+    /* must be page-aligned size for OP-TEE shared buffers */
+    sz = optee_align_up(sz, OPTEE_PAGE_SIZE);
+
+    rc = vmm_host_ram_alloc(&pa, sz, OPTEE_PAGE_SIZE);
+    if (rc != VMM_OK)
+        return rc;
+
+    va = vmm_host_memmap(pa, sz);
+    if (!va) {
+        vmm_host_ram_free(pa, sz);
+        return VMM_ENOMEM;
+    }
+
+    /* zero for safety */
+    vmm_memset(va, 0, sz);
+
+    pg->pa = pa;
+    pg->va = va;
+    pg->sz = sz;
+    return VMM_OK;
+}
+
+static void optee_host_page_free(struct optee_host_page *pg)
+{
+    if (!pg || !pg->va || !pg->sz)
+        return;
+
+    vmm_host_memunmap(pg->va);
+    vmm_host_ram_free(pg->pa, pg->sz);
+
+    pg->pa = 0;
+    pg->va = NULL;
+    pg->sz = 0;
+}
+
+/* --------------------------------------------------------- */
+/* Guest IPA -> Host PA translation and guest memory copy helpers */
+
+static int optee_guest_pa_to_host_pa(struct vmm_guest *guest,
+                                     physical_addr_t gpa,
+                                     physical_addr_t *hpa)
+{
+    physical_size_t availsz = 0;
+    u32 reg_flags = 0;
+    int rc;
+
+    if (!guest || !hpa)
+        return VMM_EINVALID;
+
+    rc = vmm_guest_physical_map(guest, gpa, 1, hpa, &availsz, &reg_flags);
+    if (rc != VMM_OK)
+        return rc;
+
+#ifdef VMM_REGION_ISRAM
+    if (!(reg_flags & VMM_REGION_ISRAM))
+        return VMM_EACCESS;
+#endif
+
+    return VMM_OK;
+}
+
+static int optee_guest_read(struct vmm_guest *guest,
+                            physical_addr_t gpa,
+                            void *dst,
+                            unsigned long len)
+{
+    unsigned long done = 0;
+
+    if (!guest || (!dst && len))
+        return VMM_EINVALID;
+
+    while (done < len) {
+        physical_addr_t hpa;
+        physical_size_t availsz = 0;
+        u32 reg_flags = 0;
+        int rc;
+
+        rc = vmm_guest_physical_map(guest, gpa + done, len - done,
+                                    &hpa, &availsz, &reg_flags);
+        if (rc != VMM_OK)
+            return rc;
+
+#ifdef VMM_REGION_ISRAM
+        if (!(reg_flags & VMM_REGION_ISRAM))
+            return VMM_EACCESS;
+#endif
+
+        unsigned long chunk = optee_min_ul((unsigned long)availsz, len - done);
+        void *hva = vmm_host_memmap(hpa, chunk);
+        if (!hva)
+            return VMM_ENOMEM;
+
+        vmm_memcpy((u8 *)dst + done, hva, chunk);
+        vmm_host_memunmap(hva);
+        done += chunk;
+    }
+
+    return VMM_OK;
+}
+
+static int optee_guest_write(struct vmm_guest *guest,
+                             physical_addr_t gpa,
+                             const void *src,
+                             unsigned long len)
+{
+    unsigned long done = 0;
+
+    if (!guest || (!src && len))
+        return VMM_EINVALID;
+
+    while (done < len) {
+        physical_addr_t hpa;
+        physical_size_t availsz = 0;
+        u32 reg_flags = 0;
+        int rc;
+
+        rc = vmm_guest_physical_map(guest, gpa + done, len - done,
+                                    &hpa, &availsz, &reg_flags);
+        if (rc != VMM_OK)
+            return rc;
+
+#ifdef VMM_REGION_ISRAM
+        if (!(reg_flags & VMM_REGION_ISRAM))
+            return VMM_EACCESS;
+#endif
+
+        unsigned long chunk = optee_min_ul((unsigned long)availsz, len - done);
+        void *hva = vmm_host_memmap(hpa, chunk);
+        if (!hva)
+            return VMM_ENOMEM;
+
+        vmm_memcpy(hva, (const u8 *)src + done, chunk);
+        vmm_host_memunmap(hva);
+        done += chunk;
+    }
+
+    return VMM_OK;
+}
+
+/* --------------------------------------------------------- */
+/* Per-guest context & bookkeeping */
+
+enum optee_call_state {
+    OPTEE_CALL_STATE_NORMAL = 0,
+    OPTEE_CALL_STATE_XVISOR_RPC = 1, /* hypervisor-injected RPC (free) */
+};
+
+struct optee_shm_buf {
+    struct optee_shm_buf *next;
+    u64 cookie;
+    u32 page_cnt;
+
+    /* shadow pagelist pages (host pages), may be freed after register_shm */
+    u32 pg_list_cnt;
+    struct optee_host_page *pg_list;
+};
+
+struct optee_shm_rpc {
+    struct optee_shm_rpc *next;
+    u64 cookie;
+
+    /* guest command buffer page (guest-allocated), page aligned gpa */
+    physical_addr_t guest_cmd_gpa;
+
+    /* host page shared with OP-TEE as RPC arg buffer */
+    struct optee_host_page xvisor_arg_pg;
+};
+
+struct optee_std_call {
+    struct optee_std_call *next;
+
+    /* guest arg buffer address (page aligned) */
+    physical_addr_t guest_arg_gpa;
+
+    /* shadow arg page (host page) */
+    struct optee_host_page xvisor_arg_pg;
+    struct optee_msg_arg *arg; /* points into xvisor_arg_pg.va */
+
+    /* OP-TEE thread id when RPC happens */
+    u32 thread_id;
+    bool in_flight;
+
+    /* last RPC func code (ALLOC/CMD/FREE/...) */
+    u32 rpc_func;
+    u32 rpc_buffer_type;
+
+    /* used when we translated shm for RPC SHM_ALLOC */
+    u64 rpc_data_cookie;
+
+    enum optee_call_state state;
+};
+
+struct optee_ctx {
+    u32 client_id;
+
+    /* limits */
+    u32 max_calls;
+    u32 max_shm_bufs;
+    u32 max_shm_pages;
+
+    /* current usage */
+    u32 call_count;
+    u32 shm_buf_count;
+    u32 shm_page_count;
+
+    vmm_spinlock_t lock;
+
+    struct optee_std_call *calls;
+    struct optee_shm_buf  *shm_bufs;
+    struct optee_shm_rpc  *shm_rpcs;
+};
+
+/* --------------------------------------------------------- */
+/* List helpers (simple singly linked under lock) */
+
+static struct optee_shm_buf *optee_find_shm_buf(struct optee_ctx *ctx, u64 cookie)
+{
+    struct optee_shm_buf *p;
+    for (p = ctx->shm_bufs; p; p = p->next)
+        if (p->cookie == cookie)
+            return p;
+    return NULL;
+}
+
+static void optee_remove_shm_buf_locked(struct optee_ctx *ctx, struct optee_shm_buf *sb)
+{
+    struct optee_shm_buf **pp = &ctx->shm_bufs;
+    while (*pp) {
+        if (*pp == sb) {
+            *pp = sb->next;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static struct optee_shm_rpc *optee_find_shm_rpc(struct optee_ctx *ctx, u64 cookie)
+{
+    struct optee_shm_rpc *p;
+    for (p = ctx->shm_rpcs; p; p = p->next)
+        if (p->cookie == cookie)
+            return p;
+    return NULL;
+}
+
+static void optee_remove_shm_rpc_locked(struct optee_ctx *ctx, struct optee_shm_rpc *sr)
+{
+    struct optee_shm_rpc **pp = &ctx->shm_rpcs;
+    while (*pp) {
+        if (*pp == sr) {
+            *pp = sr->next;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static struct optee_std_call *optee_find_call_by_thread(struct optee_ctx *ctx,
+                                                        u32 thread_id,
+                                                        bool require_not_inflight)
+{
+    struct optee_std_call *c;
+    for (c = ctx->calls; c; c = c->next) {
+        if (c->thread_id == thread_id) {
+            if (require_not_inflight && c->in_flight)
+                continue;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static void optee_remove_call_locked(struct optee_ctx *ctx, struct optee_std_call *c)
+{
+    struct optee_std_call **pp = &ctx->calls;
+    while (*pp) {
+        if (*pp == c) {
+            *pp = c->next;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+/* --------------------------------------------------------- */
+/* SHM buffer management */
+
+static struct optee_shm_buf *optee_alloc_shm_buf(struct optee_ctx *ctx,
+                                                 u64 cookie, u32 page_cnt)
+{
+    struct optee_shm_buf *sb;
+
+    vmm_spin_lock(&ctx->lock);
+
+    if (ctx->shm_buf_count >= ctx->max_shm_bufs ||
+        (ctx->shm_page_count + page_cnt) > ctx->max_shm_pages) {
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+
+    /* prevent duplicate cookie */
+    if (optee_find_shm_buf(ctx, cookie)) {
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+
+    ctx->shm_buf_count++;
+    ctx->shm_page_count += page_cnt;
+
+    vmm_spin_unlock(&ctx->lock);
+
+    sb = vmm_zalloc(sizeof(*sb));
+    if (!sb) {
+        vmm_spin_lock(&ctx->lock);
+        ctx->shm_buf_count--;
+        ctx->shm_page_count -= page_cnt;
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+
+    sb->cookie = cookie;
+    sb->page_cnt = page_cnt;
+    sb->pg_list_cnt = 0;
+    sb->pg_list = NULL;
+
+    vmm_spin_lock(&ctx->lock);
+    sb->next = ctx->shm_bufs;
+    ctx->shm_bufs = sb;
+    vmm_spin_unlock(&ctx->lock);
+
+    return sb;
+}
+
+static void optee_free_shm_buf_pg_list(struct optee_ctx *ctx, u64 cookie)
+{
+    struct optee_shm_buf *sb;
+
+    vmm_spin_lock(&ctx->lock);
+    sb = optee_find_shm_buf(ctx, cookie);
+    vmm_spin_unlock(&ctx->lock);
+
+    if (!sb || !sb->pg_list || !sb->pg_list_cnt)
+        return;
+
+    for (u32 i = 0; i < sb->pg_list_cnt; i++)
+        optee_host_page_free(&sb->pg_list[i]);
+
+    vmm_free(sb->pg_list);
+    sb->pg_list = NULL;
+    sb->pg_list_cnt = 0;
+}
+
+static void optee_free_shm_buf(struct optee_ctx *ctx, u64 cookie)
+{
+    struct optee_shm_buf *sb;
+
+    vmm_spin_lock(&ctx->lock);
+    sb = optee_find_shm_buf(ctx, cookie);
+    if (sb)
+        optee_remove_shm_buf_locked(ctx, sb);
+    if (sb) {
+        ctx->shm_buf_count--;
+        ctx->shm_page_count -= sb->page_cnt;
+    }
+    vmm_spin_unlock(&ctx->lock);
+
+    if (!sb)
+        return;
+
+    if (sb->pg_list && sb->pg_list_cnt) {
+        for (u32 i = 0; i < sb->pg_list_cnt; i++)
+            optee_host_page_free(&sb->pg_list[i]);
+        vmm_free(sb->pg_list);
+    }
+    vmm_free(sb);
+}
+
+/* Free all temporary shm buffers referenced in arg (TMEM only) */
+static void optee_free_tmem_buffers(struct optee_ctx *ctx, struct optee_msg_arg *arg)
+{
+    if (!arg)
+        return;
+
+    for (u32 i = 0; i < arg->num_params; i++) {
+        struct optee_msg_param *p = &arg->params[i];
+        u32 t = (u32)(p->attr & OPTEE_MSG_ATTR_TYPE_MASK);
+
+        if (t == OPTEE_MSG_ATTR_TYPE_TMEM_INPUT ||
+            t == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT ||
+            t == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT) {
+
+            u64 cookie = p->u.tmem.shm_ref;
+            if (cookie)
+                optee_free_shm_buf(ctx, cookie);
+        }
+    }
+}
+
+/* --------------------------------------------------------- */
+/* RPC SHM management */
+
+static struct optee_shm_rpc *optee_alloc_shm_rpc(struct optee_ctx *ctx,
+                                                 u64 cookie,
+                                                 physical_addr_t guest_cmd_gpa)
+{
+    struct optee_shm_rpc *sr;
+    int rc;
+
+    sr = vmm_zalloc(sizeof(*sr));
+    if (!sr)
+        return NULL;
+
+    sr->cookie = cookie;
+    sr->guest_cmd_gpa = guest_cmd_gpa;
+
+    rc = optee_host_page_alloc(&sr->xvisor_arg_pg, OPTEE_PAGE_SIZE);
+    if (rc != VMM_OK) {
+        vmm_free(sr);
+        return NULL;
+    }
+
+    vmm_spin_lock(&ctx->lock);
+    sr->next = ctx->shm_rpcs;
+    ctx->shm_rpcs = sr;
+    vmm_spin_unlock(&ctx->lock);
+
+    return sr;
+}
+
+static void optee_free_shm_rpc(struct optee_ctx *ctx, u64 cookie)
+{
+    struct optee_shm_rpc *sr;
+
+    vmm_spin_lock(&ctx->lock);
+    sr = optee_find_shm_rpc(ctx, cookie);
+    if (sr)
+        optee_remove_shm_rpc_locked(ctx, sr);
+    vmm_spin_unlock(&ctx->lock);
+
+    if (!sr)
+        return;
+
+    optee_host_page_free(&sr->xvisor_arg_pg);
+    vmm_free(sr);
+}
+
+/* --------------------------------------------------------- */
+/* Translate NONCONTIG pagelist */
+
+static int optee_translate_noncontig(struct optee_ctx *ctx,
+                                     struct vmm_guest *guest,
+                                     struct optee_msg_param *p)
+{
+    u64 buf_ptr = p->u.tmem.buf_ptr;
+    u64 size = p->u.tmem.size;
+    u64 cookie = p->u.tmem.shm_ref;
+
+    if (!buf_ptr || !size)
+        return VMM_OK;
+
+    /* offset inside first page list page */
+    unsigned long offset = (unsigned long)(buf_ptr & (OPTEE_PAGE_SIZE - 1UL));
+    physical_addr_t list_gpa = (physical_addr_t)(buf_ptr & OPTEE_PAGE_MASK);
+
+    unsigned long total = optee_align_up((unsigned long)size + offset, OPTEE_PAGE_SIZE);
+    u32 page_cnt = (u32)(total / OPTEE_PAGE_SIZE);
+
+    if (!cookie)
+        return VMM_EINVALID;
+
+    if (!page_cnt || page_cnt > OPTEE_MAX_SHM_BUFFER_PG)
+        return VMM_EOVERFLOW;
+
+    u32 list_pages_needed = (page_cnt + OPTEE_NONCONTIG_ENTRIES_PER_PAGE - 1U) /
+                            OPTEE_NONCONTIG_ENTRIES_PER_PAGE;
+
+    struct optee_shm_buf *sb = optee_alloc_shm_buf(ctx, cookie, page_cnt);
+    if (!sb)
+        return VMM_ENOMEM;
+
+    sb->pg_list_cnt = list_pages_needed;
+    sb->pg_list = vmm_zalloc(sizeof(struct optee_host_page) * list_pages_needed);
+    if (!sb->pg_list) {
+        optee_free_shm_buf(ctx, cookie);
+        return VMM_ENOMEM;
+    }
+
+    for (u32 i = 0; i < list_pages_needed; i++) {
+        int rc = optee_host_page_alloc(&sb->pg_list[i], OPTEE_PAGE_SIZE);
+        if (rc != VMM_OK) {
+            for (u32 j = 0; j < i; j++)
+                optee_host_page_free(&sb->pg_list[j]);
+            vmm_free(sb->pg_list);
+            sb->pg_list = NULL;
+            sb->pg_list_cnt = 0;
+            optee_free_shm_buf(ctx, cookie);
+            return rc;
+        }
+    }
+
+    /* build translated list pages */
+    struct optee_msg_noncontig_page guest_pg;
+    u32 gi = 0;      /* index inside guest page */
+    u32 pi = 0;      /* which host list page */
+    u32 li = 0;      /* index inside host list page */
+
+    for (u32 n = 0; n < page_cnt; n++) {
+        if (gi == 0) {
+            int rc = optee_guest_read(guest, list_gpa, &guest_pg, sizeof(guest_pg));
+            if (rc != VMM_OK) {
+                optee_free_shm_buf(ctx, cookie);
+                return rc;
+            }
+        }
+
+        physical_addr_t page_gpa = (physical_addr_t)guest_pg.pages[gi];
+
+        physical_addr_t page_hpa;
+        int rc = optee_guest_pa_to_host_pa(guest, page_gpa, &page_hpa);
+        if (rc != VMM_OK) {
+            optee_free_shm_buf(ctx, cookie);
+            return rc;
+        }
+
+        struct optee_msg_noncontig_page *host_pg =
+            (struct optee_msg_noncontig_page *)sb->pg_list[pi].va;
+
+        host_pg->pages[li] = (u64)page_hpa;
+
+        gi++;
+        li++;
+
+        if (gi >= OPTEE_NONCONTIG_ENTRIES_PER_PAGE) {
+            /* move to next guest list page */
+            list_gpa = (physical_addr_t)guest_pg.next;
+            gi = 0;
+        }
+
+        if (li >= OPTEE_NONCONTIG_ENTRIES_PER_PAGE) {
+            /* chain next host list page */
+            if ((pi + 1) < sb->pg_list_cnt)
+                host_pg->next = (u64)sb->pg_list[pi + 1].pa;
+            li = 0;
+            pi++;
+        }
+    }
+
+    /* replace buf_ptr with translated host pagelist pointer */
+    p->u.tmem.buf_ptr = ((u64)sb->pg_list[0].pa) | (u64)offset;
+    return VMM_OK;
+}
+
+/* --------------------------------------------------------- */
+/* Standard call context allocation/free */
+
+static struct optee_std_call *optee_alloc_call(struct optee_ctx *ctx)
+{
+    struct optee_std_call *c;
+    int rc;
+
+    vmm_spin_lock(&ctx->lock);
+    if (ctx->call_count >= ctx->max_calls) {
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+    ctx->call_count++;
+    vmm_spin_unlock(&ctx->lock);
+
+    c = vmm_zalloc(sizeof(*c));
+    if (!c) {
+        vmm_spin_lock(&ctx->lock);
+        ctx->call_count--;
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+
+    rc = optee_host_page_alloc(&c->xvisor_arg_pg, OPTEE_PAGE_SIZE);
+    if (rc != VMM_OK) {
+        vmm_free(c);
+        vmm_spin_lock(&ctx->lock);
+        ctx->call_count--;
+        vmm_spin_unlock(&ctx->lock);
+        return NULL;
+    }
+
+    c->arg = (struct optee_msg_arg *)c->xvisor_arg_pg.va;
+    c->thread_id = 0;
+    c->in_flight = true;
+    c->rpc_func = 0;
+    c->rpc_buffer_type = 0;
+    c->rpc_data_cookie = 0;
+    c->state = OPTEE_CALL_STATE_NORMAL;
+
+    vmm_spin_lock(&ctx->lock);
+    c->next = ctx->calls;
+    ctx->calls = c;
+    vmm_spin_unlock(&ctx->lock);
+
+    return c;
+}
+
+static void optee_put_call(struct optee_ctx *ctx, struct optee_std_call *c)
+{
+    if (!c)
+        return;
+
+    vmm_spin_lock(&ctx->lock);
+    c->in_flight = false;
+    vmm_spin_unlock(&ctx->lock);
+}
+
+static struct optee_std_call *optee_get_call_by_thread(struct optee_ctx *ctx, u32 thread_id)
+{
+    struct optee_std_call *c;
+
+    vmm_spin_lock(&ctx->lock);
+    c = optee_find_call_by_thread(ctx, thread_id, true /* require not inflight */);
+    if (c)
+        c->in_flight = true;
+    vmm_spin_unlock(&ctx->lock);
+
+    return c;
+}
+
+static void optee_destroy_call(struct optee_ctx *ctx, struct optee_std_call *c)
+{
+    if (!c)
+        return;
+
+    vmm_spin_lock(&ctx->lock);
+    optee_remove_call_locked(ctx, c);
+    ctx->call_count--;
+    vmm_spin_unlock(&ctx->lock);
+
+    optee_host_page_free(&c->xvisor_arg_pg);
+    vmm_free(c);
+}
+
+/* --------------------------------------------------------- */
+/* Copy guest arg buffer into shadow; and selective copy back */
+
+static int optee_copy_std_request(struct vmm_guest *guest,
+                                  struct optee_std_call *call,
+                                  physical_addr_t guest_arg_gpa)
+{
+    /* arg must be page-aligned because we always copy a page */
+    if (guest_arg_gpa & (OPTEE_PAGE_SIZE - 1UL))
+        return VMM_EINVALID;
+
+    call->guest_arg_gpa = guest_arg_gpa;
+
+    return optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va, OPTEE_PAGE_SIZE);
+}
+
+static int optee_copy_std_response_back(struct vmm_guest *guest,
+                                       struct optee_std_call *call)
+{
+    u8 guest_buf[OPTEE_PAGE_SIZE];
+    struct optee_msg_arg *garg;
+    u32 arg_sz;
+
+    int rc = optee_guest_read(guest, call->guest_arg_gpa, guest_buf, OPTEE_PAGE_SIZE);
+    if (rc != VMM_OK)
+        return rc;
+
+    garg = (struct optee_msg_arg *)guest_buf;
+
+    /* sanity: params count should match (or at least be within bounds) */
+    arg_sz = optee_msg_get_arg_size(garg->num_params);
+    if (arg_sz > OPTEE_PAGE_SIZE)
+        return VMM_EOVERFLOW;
+
+    /* copy only return fields and output sizes/values from shadow arg */
+    garg->ret = call->arg->ret;
+    garg->ret_origin = call->arg->ret_origin;
+    garg->session = call->arg->session;
+
+    u32 n = (garg->num_params < call->arg->num_params) ? garg->num_params : call->arg->num_params;
+
+    for (u32 i = 0; i < n; i++) {
+        struct optee_msg_param *gp = &garg->params[i];
+        struct optee_msg_param *hp = &call->arg->params[i];
+        u32 gt = (u32)(gp->attr & OPTEE_MSG_ATTR_TYPE_MASK);
+
+        /* value outputs */
+        if (gt == OPTEE_MSG_ATTR_TYPE_VALUE_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_VALUE_INOUT) {
+            gp->u.value.a = hp->u.value.a;
+            gp->u.value.b = hp->u.value.b;
+            gp->u.value.c = hp->u.value.c;
+        }
+
+        /* memref output: only size (do NOT copy buf_ptr) */
+        if (gt == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT) {
+            gp->u.tmem.size = hp->u.tmem.size;
+        }
+        if (gt == OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_RMEM_INOUT) {
+            gp->u.rmem.size = hp->u.rmem.size;
+        }
+    }
+
+    return optee_guest_write(guest, call->guest_arg_gpa, guest_buf, arg_sz);
+}
+
+/* --------------------------------------------------------- */
+/* Translate all params in shadow arg */
+
+static int optee_translate_params(struct optee_ctx *ctx,
+                                 struct vmm_guest *guest,
+                                 struct optee_msg_arg *arg)
+{
+    for (u32 i = 0; i < arg->num_params; i++) {
+        struct optee_msg_param *p = &arg->params[i];
+        u32 t = (u32)(p->attr & OPTEE_MSG_ATTR_TYPE_MASK);
+
+        if (t == OPTEE_MSG_ATTR_TYPE_TMEM_INPUT ||
+            t == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT ||
+            t == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT) {
+
+            /* if NONCONTIG, translate pagelist */
+            if (p->attr & OPTEE_MSG_ATTR_NONCONTIG) {
+                int rc = optee_translate_noncontig(ctx, guest, p);
+                if (rc != VMM_OK)
+                    return rc;
+            } else {
+                /*
+                 * For simplicity we don't support contiguous tmem here.
+                 * Most dynamic-shm flows use NONCONTIG.
+                 */
+                if (p->u.tmem.buf_ptr) {
+                    return VMM_EINVALID;
+                }
+            }
+        }
+    }
+    return VMM_OK;
+}
+
+/* --------------------------------------------------------- */
+/* RPC handling helpers */
+
+static int optee_rpc_copy_to_guest(struct vmm_guest *guest,
+                                   struct optee_shm_rpc *sr)
+{
+    struct optee_msg_arg *xarg = (struct optee_msg_arg *)sr->xvisor_arg_pg.va;
+    u32 sz = optee_msg_get_arg_size(xarg->num_params);
+    if (sz > OPTEE_PAGE_SIZE)
+        return VMM_EOVERFLOW;
+
+    return optee_guest_write(guest, sr->guest_cmd_gpa, xarg, sz);
+}
+
+static int optee_rpc_copy_from_guest(struct vmm_guest *guest,
+                                     struct optee_shm_rpc *sr)
+{
+    /* first read header to get num_params */
+    u8 tmp[sizeof(struct optee_msg_arg)];
+    int rc = optee_guest_read(guest, sr->guest_cmd_gpa, tmp, sizeof(tmp));
+    if (rc != VMM_OK)
+        return rc;
+
+    struct optee_msg_arg *hdr = (struct optee_msg_arg *)tmp;
+    u32 sz = optee_msg_get_arg_size(hdr->num_params);
+    if (sz > OPTEE_PAGE_SIZE)
+        return VMM_EOVERFLOW;
+
+    return optee_guest_read(guest, sr->guest_cmd_gpa, sr->xvisor_arg_pg.va, sz);
+}
+
+/*
+ * If translation of the returned shm_alloc buffer fails, we ask guest to free it.
+ * This matches Xen's defensive behavior to avoid leaks inside guest.
+ */
+static bool optee_issue_rpc_cmd_free(struct optee_ctx *ctx,
+                                    struct vmm_vcpu *vcpu,
+                                    arch_regs_t *regs,
+                                    struct optee_std_call *call,
+                                    struct optee_shm_rpc *sr,
+                                    u64 cookie_to_free)
+{
+    struct optee_msg_arg *xarg = (struct optee_msg_arg *)sr->xvisor_arg_pg.va;
+
+    vmm_memset(xarg, 0, OPTEE_PAGE_SIZE);
+    xarg->cmd = OPTEE_RPC_CMD_SHM_FREE;
+    xarg->ret = TEEC_ERROR_GENERIC;
+    xarg->ret_origin = TEEC_ORIGIN_COMMS;
+    xarg->num_params = 1;
+
+    xarg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT;
+    xarg->params[0].u.value.a = (u64)call->rpc_buffer_type;
+    xarg->params[0].u.value.b = cookie_to_free;
+    xarg->params[0].u.value.c = 0;
+
+    if (optee_rpc_copy_to_guest(vcpu->guest, sr) != VMM_OK)
+        return false;
+
+    /* return RPC_CMD again to guest */
+    cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_RPC_CMD);
+    cpu_vcpu_reg_write(vcpu, regs, 1, (u32)(sr->cookie & 0xffffffffULL));
+    cpu_vcpu_reg_write(vcpu, regs, 2, (u32)((sr->cookie >> 32) & 0xffffffffULL));
+    /* keep x3 thread id unchanged */
+
+    call->state = OPTEE_CALL_STATE_XVISOR_RPC;
+    call->rpc_func = OPTEE_SMC_RPC_FUNC_CMD;
+
+    return true;
+}
+
+/* --------------------------------------------------------- */
+/* Core call into OP-TEE with a7=client_id, handle RPC loop */
+
+static void optee_do_smc(struct optee_ctx *ctx,
+                         unsigned long a0, unsigned long a1, unsigned long a2,
+                         unsigned long a3, unsigned long a4, unsigned long a5,
+                         struct arm_smccc_res *res)
+{
+    arm_smccc_smc(a0, a1, a2, a3, a4, a5, 0, ctx->client_id, res);
+}
+
+static int optee_handle_rpc_return(struct optee_ctx *ctx,
+                                  struct vmm_vcpu *vcpu,
+                                  arch_regs_t *regs,
+                                  struct optee_std_call *call,
+                                  struct arm_smccc_res *res)
+{
+    /* Save thread id */
+    call->thread_id = (u32)(res->a3 & 0xffffffffUL);
+    call->rpc_func = OPTEE_SMC_RETURN_GET_RPC_FUNC(res->a0);
+
+    /* forward RPC return to guest by default */
+    cpu_vcpu_reg_write(vcpu, regs, 0, res->a0);
+    cpu_vcpu_reg_write(vcpu, regs, 1, res->a1);
+    cpu_vcpu_reg_write(vcpu, regs, 2, res->a2);
+    cpu_vcpu_reg_write(vcpu, regs, 3, res->a3);
+
+    if (call->rpc_func == OPTEE_SMC_RPC_FUNC_FREE) {
+        /* OP-TEE asks to free rpc buffer identified by cookie in a1/a2 */
+        u64 cookie = regpair_to_u64(res->a1, res->a2);
+        optee_free_shm_rpc(ctx, cookie);
+        return VMM_OK;
+    }
+
+    if (call->rpc_func == OPTEE_SMC_RPC_FUNC_CMD) {
+        u64 cookie = regpair_to_u64(res->a1, res->a2);
+
+        vmm_spin_lock(&ctx->lock);
+        struct optee_shm_rpc *sr = optee_find_shm_rpc(ctx, cookie);
+        vmm_spin_unlock(&ctx->lock);
+        if (!sr) {
+            /* no buffer => ask OP-TEE to resume (ERESTART-like) */
+            return VMM_EAGAIN;
+        }
+
+        /* Copy RPC request from host rpc buffer to guest command buffer */
+        int rc = optee_rpc_copy_to_guest(vcpu->guest, sr);
+        if (rc != VMM_OK)
+            return VMM_EAGAIN;
+
+        /* For SHM_ALLOC, record buffer type from request if it looks like VALUE */
+        struct optee_msg_arg *xarg = (struct optee_msg_arg *)sr->xvisor_arg_pg.va;
+        if (xarg->num_params >= 1 &&
+            (xarg->params[0].attr & OPTEE_MSG_ATTR_TYPE_MASK) == OPTEE_MSG_ATTR_TYPE_VALUE_INPUT) {
+            call->rpc_buffer_type = (u32)(xarg->params[0].u.value.a & 0xffffffffUL);
+        }
+
+        /* If request looks like SHM_FREE, free corresponding tracked shm buffer (best effort) */
+        if (xarg->num_params >= 1 &&
+            (xarg->params[0].attr & OPTEE_MSG_ATTR_TYPE_MASK) == OPTEE_MSG_ATTR_TYPE_VALUE_INPUT) {
+            u64 maybe_cookie = xarg->params[0].u.value.b;
+            vmm_spin_lock(&ctx->lock);
+            struct optee_shm_buf *sb = optee_find_shm_buf(ctx, maybe_cookie);
+            vmm_spin_unlock(&ctx->lock);
+            if (sb)
+                optee_free_shm_buf(ctx, maybe_cookie);
+        }
+
+        return VMM_OK;
+    }
+
+    /* other rpc funcs: just forward */
+    return VMM_OK;
+}
+
+static void optee_do_call_with_arg(struct optee_ctx *ctx,
+                                  struct vmm_vcpu *vcpu,
+                                  arch_regs_t *regs,
+                                  struct optee_std_call *call,
+                                  unsigned long smc_fid,
+                                  unsigned long a1,
+                                  unsigned long a2,
+                                  unsigned long a3,
+                                  unsigned long a4,
+                                  unsigned long a5)
+{
+    struct arm_smccc_res res;
+
+    optee_do_smc(ctx, smc_fid, a1, a2, a3, a4, a5, &res);
+
+    while (OPTEE_SMC_RETURN_IS_RPC(res.a0)) {
+        int rc = optee_handle_rpc_return(ctx, vcpu, regs, call, &res);
+        if (rc == VMM_EAGAIN) {
+            /* resume OP-TEE immediately (guest didn't get/handle rpc) */
+            optee_do_smc(ctx, res.a0, res.a1, res.a2, res.a3, 0, 0, &res);
+            continue;
+        }
+
+        /* delivered RPC to guest -> call is now waiting for guest */
+        optee_put_call(ctx, call);
+        return;
+    }
+
+    /* Normal return: update arg results back to guest */
+    optee_copy_std_response_back(vcpu->guest, call);
+
+    /* Return final a0 to guest */
+    cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
+
+    /*
+     * Free temporary buffers depending on cmd.
+     * - REGISTER_SHM: on success, keep shm_buf but can free shadow pagelist
+     * - UNREGISTER_SHM: on success, release shm_buf
+     * - others: free all tmem buffers
+     */
+    switch (call->arg->cmd) {
+    case OPTEE_MSG_CMD_REGISTER_SHM:
+        if (call->arg->ret == TEEC_SUCCESS) {
+            /* OP-TEE has consumed pagelist; free our shadow pagelist pages */
+            if (call->arg->num_params >= 1)
+                optee_free_shm_buf_pg_list(ctx, call->arg->params[0].u.tmem.shm_ref);
+        } else {
+            /* registration failed, drop full buf */
+            if (call->arg->num_params >= 1)
+                optee_free_shm_buf(ctx, call->arg->params[0].u.tmem.shm_ref);
+        }
+        break;
+
+    case OPTEE_MSG_CMD_UNREGISTER_SHM:
+        if (call->arg->ret == TEEC_SUCCESS) {
+            if (call->arg->num_params >= 1)
+                optee_free_shm_buf(ctx, call->arg->params[0].u.rmem.shm_ref);
+        }
+        break;
+
+    default:
+        optee_free_tmem_buffers(ctx, call->arg);
+        break;
+    }
+
+    optee_destroy_call(ctx, call);
+}
+
+/* --------------------------------------------------------- */
+/* Handle EXCHANGE_CAPABILITIES (Xen-like) */
+
+static void optee_handle_exchange_caps(struct optee_ctx *ctx,
+                                       struct vmm_vcpu *vcpu,
+                                       arch_regs_t *regs)
+{
+    struct arm_smccc_res res;
+    u32 caps = (u32)cpu_vcpu_reg_read(vcpu, regs, 1);
+
+    caps &= OPTEE_KNOWN_NSEC_CAPS;
+
+    optee_do_smc(ctx, OPTEE_SMC_EXCHANGE_CAPABILITIES, caps, 0, 0, 0, 0, &res);
+
+    if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
+        cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
+        return;
+    }
+
+    u32 sec_caps = (u32)res.a1;
+    sec_caps &= OPTEE_KNOWN_SEC_CAPS;
+
+    /* Drop static reserved shm */
+    sec_caps &= ~OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM;
+
+    /* Require dynamic shm for guests */
+    if (!(sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)) {
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOTAVAIL);
+        return;
+    }
+
+    cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_OK);
+    cpu_vcpu_reg_write(vcpu, regs, 1, sec_caps);
+}
+
+/* --------------------------------------------------------- */
+/* Handle CALL_WITH_ARG and CALL_RETURN_FROM_RPC */
+
+static void optee_handle_std_call(struct optee_ctx *ctx,
+                                  struct vmm_vcpu *vcpu,
+                                  arch_regs_t *regs)
+{
+    struct optee_std_call *call;
+    u64 gpa = regpair_to_u64(cpu_vcpu_reg_read(vcpu, regs, 1),
+                             cpu_vcpu_reg_read(vcpu, regs, 2));
+    unsigned long a3 = (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 3);
+
+    call = optee_alloc_call(ctx);
+    if (!call) {
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOMEM);
+        return;
+    }
+
+    if (optee_copy_std_request(vcpu->guest, call, (physical_addr_t)gpa) != VMM_OK) {
+        optee_destroy_call(ctx, call);
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_EBADADDR);
+        return;
+    }
+
+    /* sanity */
+    u32 arg_sz = optee_msg_get_arg_size(call->arg->num_params);
+    if (arg_sz > OPTEE_PAGE_SIZE) {
+        optee_destroy_call(ctx, call);
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_EBADADDR);
+        return;
+    }
+
+    /* translate params (dynamic shm NONCONTIG) */
+    if (optee_translate_params(ctx, vcpu->guest, call->arg) != VMM_OK) {
+        /* report via arg->ret, but SMC return OK like Xen/Linux expects */
+        call->arg->ret = TEEC_ERROR_COMMUNICATION;
+        call->arg->ret_origin = TEEC_ORIGIN_COMMS;
+        optee_copy_std_response_back(vcpu->guest, call);
+        optee_destroy_call(ctx, call);
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_OK);
+        return;
+    }
+
+    /* Call into OP-TEE: pass host physical address of shadow arg */
+    u64 lo, hi;
+    u64_to_regpair(call->xvisor_arg_pg.pa, &lo, &hi);
+
+    optee_do_call_with_arg(ctx, vcpu, regs, call,
+                           OPTEE_SMC_CALL_WITH_ARG,
+                           (unsigned long)lo, (unsigned long)hi,
+                           a3, 0, 0);
+}
+
+static void optee_handle_rpc(struct optee_ctx *ctx,
+                             struct vmm_vcpu *vcpu,
+                             arch_regs_t *regs)
+{
+    u32 thread_id = (u32)(cpu_vcpu_reg_read(vcpu, regs, 3) & 0xffffffffUL);
+    struct optee_std_call *call = optee_get_call_by_thread(ctx, thread_id);
+
+    if (!call) {
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ERESUME);
+        return;
+    }
+
+    if (call->rpc_func == OPTEE_SMC_RPC_FUNC_ALLOC) {
+        /* guest returned pointer+cookie: allocate rpc buffer mapping for OP-TEE */
+        u64 ptr = regpair_to_u64(cpu_vcpu_reg_read(vcpu, regs, 1),
+                                 cpu_vcpu_reg_read(vcpu, regs, 2));
+        u64 cookie = regpair_to_u64(cpu_vcpu_reg_read(vcpu, regs, 4),
+                                    cpu_vcpu_reg_read(vcpu, regs, 5));
+
+        /* require guest cmd buffer to be page-aligned */
+        if (ptr & (OPTEE_PAGE_SIZE - 1UL)) {
+            cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_EBADADDR);
+            optee_destroy_call(ctx, call);
+            return;
+        }
+
+        if (!optee_alloc_shm_rpc(ctx, cookie, (physical_addr_t)ptr)) {
+            cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOMEM);
+            optee_destroy_call(ctx, call);
+            return;
+        }
+
+        /* resume OP-TEE with pointer to host rpc arg page */
+        vmm_spin_lock(&ctx->lock);
+        struct optee_shm_rpc *sr = optee_find_shm_rpc(ctx, cookie);
+        vmm_spin_unlock(&ctx->lock);
+
+        u64 lo, hi;
+        u64_to_regpair(sr->xvisor_arg_pg.pa, &lo, &hi);
+
+        optee_do_call_with_arg(ctx, vcpu, regs, call,
+                               OPTEE_SMC_CALL_RETURN_FROM_RPC,
+                               (unsigned long)lo, (unsigned long)hi,
+                               thread_id,
+                               (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 4),
+                               (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 5));
+        return;
+    }
+
+    if (call->rpc_func == OPTEE_SMC_RPC_FUNC_CMD) {
+        /* guest processed RPC command: copy back and maybe translate shm_alloc output */
+        u64 cookie = regpair_to_u64(cpu_vcpu_reg_read(vcpu, regs, 1),
+                                    cpu_vcpu_reg_read(vcpu, regs, 2));
+
+        vmm_spin_lock(&ctx->lock);
+        struct optee_shm_rpc *sr = optee_find_shm_rpc(ctx, cookie);
+        vmm_spin_unlock(&ctx->lock);
+
+        if (!sr) {
+            cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ERESUME);
+            optee_destroy_call(ctx, call);
+            return;
+        }
+
+        if (optee_rpc_copy_from_guest(vcpu->guest, sr) != VMM_OK) {
+            cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ERESUME);
+            optee_destroy_call(ctx, call);
+            return;
+        }
+
+        struct optee_msg_arg *xarg = (struct optee_msg_arg *)sr->xvisor_arg_pg.va;
+
+        /*
+         * If this was our injected RPC (free), just craft failure return for OP-TEE.
+         */
+        if (call->state == OPTEE_CALL_STATE_XVISOR_RPC) {
+            call->state = OPTEE_CALL_STATE_NORMAL;
+            vmm_memset(xarg, 0, OPTEE_PAGE_SIZE);
+            xarg->ret = TEEC_ERROR_GENERIC;
+            xarg->ret_origin = TEEC_ORIGIN_COMMS;
+            xarg->num_params = 0;
+        } else {
+            /*
+             * Try to translate any returned NONCONTIG output memref[0] (typical for SHM_ALLOC).
+             * We do it heuristically: if param0 is TMEM_OUTPUT|NONCONTIG, translate it.
+             */
+            if (xarg->num_params >= 1) {
+                struct optee_msg_param *p0 = &xarg->params[0];
+                u32 t0 = (u32)(p0->attr & OPTEE_MSG_ATTR_TYPE_MASK);
+
+                if ((p0->attr & OPTEE_MSG_ATTR_NONCONTIG) &&
+                    (t0 == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT || t0 == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT)) {
+
+                    /* If we already had a translated rpc buffer, drop old pagelist */
+                    if (call->rpc_data_cookie)
+                        optee_free_shm_buf_pg_list(ctx, call->rpc_data_cookie);
+
+                    int rc = optee_translate_noncontig(ctx, vcpu->guest, p0);
+                    if (rc != VMM_OK) {
+                        /* ask guest to free buffer it allocated */
+                        u64 cfree = p0->u.tmem.shm_ref;
+                        call->rpc_data_cookie = 0;
+
+                        if (optee_issue_rpc_cmd_free(ctx, vcpu, regs, call, sr, cfree)) {
+                            optee_put_call(ctx, call);
+                            return; /* return to guest with injected RPC */
+                        }
+
+                        /* can't free => just report failure back to OP-TEE */
+                        vmm_memset(xarg, 0, OPTEE_PAGE_SIZE);
+                        xarg->ret = TEEC_ERROR_GENERIC;
+                        xarg->ret_origin = TEEC_ORIGIN_COMMS;
+                        xarg->num_params = 0;
+                    } else {
+                        call->rpc_data_cookie = p0->u.tmem.shm_ref;
+                    }
+                }
+            }
+        }
+
+        /* Resume OP-TEE: return-from-rpc with thread id */
+        optee_do_call_with_arg(ctx, vcpu, regs, call,
+                               OPTEE_SMC_CALL_RETURN_FROM_RPC,
+                               0, 0, thread_id, 0, 0);
+        return;
+    }
+
+    /* other rpc func: just resume */
+    optee_do_call_with_arg(ctx, vcpu, regs, call,
+                           OPTEE_SMC_CALL_RETURN_FROM_RPC,
+                           0, 0, thread_id, 0, 0);
+}
+
+/* --------------------------------------------------------- */
+/* Probe + per-guest init/teardown */
+
+static u32 optee_max_threads = 1;
+
+static bool optee_probe(void)
+{
+    struct arm_smccc_res res;
+
+    /* Basic API UID check */
+    optee_do_smc(&(struct optee_ctx){ .client_id = 0 }, OPTEE_SMC_CALLS_UID, 0,0,0,0,0, &res);
+    vmm_init_printf("OPTEE: CALLS_UID = %08lx %08lx %08lx %08lx\n",
+                    res.a0, res.a1, res.a2, res.a3);
+
+    /* Get thread count */
+    optee_do_smc(&(struct optee_ctx){ .client_id = 0 }, OPTEE_SMC_GET_THREAD_COUNT, 0,0,0,0,0, &res);
+    if ((u32)res.a0 == OPTEE_SMC_RETURN_OK && (u32)res.a1 > 0)
+        optee_max_threads = (u32)res.a1;
+
+    /* Probe virtualization support (VM_DESTROYED should not be UNKNOWN_FUNCTION) */
+    vmm_init_printf("OPTEE: VM_DESTROYED fid=%#x\n", (u32)OPTEE_SMC_VM_DESTROYED);
+    optee_do_smc(&(struct optee_ctx){ .client_id = 0 }, OPTEE_SMC_VM_DESTROYED, 0,0,0,0,0, &res);
+    vmm_init_printf("OPTEE: VM_DESTROYED probe rc=%#x\n", (u32)res.a0);
+
+    if ((u32)res.a0 == OPTEE_SMC_RETURN_UNKNOWN_FUNCTION)
+        return false;
+
+    return true;
+}
+
+static void optee_init_secondary(void)
+{
+    /* no-op for now */
+}
+
+static int optee_guest_init(struct vmm_guest *guest)
+{
+    struct optee_ctx *ctx = vmm_zalloc(sizeof(*ctx));
+    struct arm_smccc_res res;
+
+    if (!ctx)
+        return VMM_ENOMEM;
+
+    /* Xen-like: client_id starts at 1, 0 reserved for host */
+    ctx->client_id = (u32)guest->id + 1U;
+    ctx->max_calls = optee_max_threads ? optee_max_threads : 1U;
+    ctx->max_shm_bufs = OPTEE_MAX_SHM_BUFS_DEFAULT;
+    ctx->max_shm_pages = OPTEE_MAX_SHM_PAGES_DEFAULT;
+
+    ctx->call_count = 0;
+    ctx->shm_buf_count = 0;
+    ctx->shm_page_count = 0;
+    ctx->calls = NULL;
+    ctx->shm_bufs = NULL;
+    ctx->shm_rpcs = NULL;
+    INIT_SPIN_LOCK(&ctx->lock);
+
+    /* Notify OP-TEE: VM_CREATED(client_id), a7 must be 0 (host context) */
+    arm_smccc_smc(OPTEE_SMC_VM_CREATED, ctx->client_id, 0,0,0,0,0,0, &res);
+    if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
+        vmm_free(ctx);
+        return VMM_EFAIL;
+    }
+
+    arm_guest_priv(guest)->tee = ctx;
+    vmm_init_printf("OPTEE: guest '%s' id=%lu -> client_id=%u\n",
+                    guest->name, guest->id, ctx->client_id);
+    return VMM_OK;
+}
+
+static void optee_guest_teardown(struct vmm_guest *guest)
+{
+    struct optee_ctx *ctx = (struct optee_ctx *)arm_guest_priv(guest)->tee;
+    struct arm_smccc_res res;
+
+    if (!ctx)
+        return;
+
+    /* Notify OP-TEE: VM_DESTROYED(client_id), a7 must be 0 */
+    arm_smccc_smc(OPTEE_SMC_VM_DESTROYED, ctx->client_id, 0,0,0,0,0,0, &res);
+
+    /* Free all resources best-effort */
+    while (ctx->calls)
+        optee_destroy_call(ctx, ctx->calls);
+
+    while (ctx->shm_rpcs)
+        optee_free_shm_rpc(ctx, ctx->shm_rpcs->cookie);
+
+    while (ctx->shm_bufs)
+        optee_free_shm_buf(ctx, ctx->shm_bufs->cookie);
+
+    arm_guest_priv(guest)->tee = NULL;
+    vmm_free(ctx);
+}
+
+static void optee_free_guest_ctx(struct vmm_guest *guest)
+{
+    /* guest_teardown already frees; keep for framework completeness */
+    (void)guest;
+}
+
+static void optee_relinquish_resources(struct vmm_guest *guest)
+{
+    /* called on hard teardown paths; reuse guest_teardown */
+    optee_guest_teardown(guest);
+}
+
+/* --------------------------------------------------------- */
+/* Main handler */
+
+static bool optee_handle_call(struct vmm_vcpu *vcpu, arch_regs_t *regs)
+{
+    struct optee_ctx *ctx = (struct optee_ctx *)arm_guest_priv(vcpu->guest)->tee;
+    u32 fid;
+
+    if (!ctx)
+        return false;
+
+    fid = (u32)(cpu_vcpu_reg_read(vcpu, regs, 0) & 0xffffffffUL);
+
+    switch (fid) {
+    case OPTEE_SMC_CALLS_COUNT:
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_MEDIATOR_SMC_COUNT);
+        return true;
+
+    case OPTEE_SMC_CALLS_UID:
+    case OPTEE_SMC_CALLS_REVISION:
+    case OPTEE_SMC_CALL_GET_OS_UUID:
+    case OPTEE_SMC_CALL_GET_OS_REVISION:
+    case OPTEE_SMC_ENABLE_SHM_CACHE:
+    case OPTEE_SMC_DISABLE_SHM_CACHE: {
+        struct arm_smccc_res res;
+        unsigned long a0 = fid;
+
+        /* passthrough fastcall, but force a7=client_id */
+        optee_do_smc(ctx, a0,
+                    (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 1),
+                    (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 2),
+                    (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 3),
+                    (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 4),
+                    (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 5),
+                    &res);
+
+        cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
+        cpu_vcpu_reg_write(vcpu, regs, 1, res.a1);
+        cpu_vcpu_reg_write(vcpu, regs, 2, res.a2);
+        cpu_vcpu_reg_write(vcpu, regs, 3, res.a3);
+
+        /* If disabling shm cache returned a cookie to free, free it */
+        if (fid == OPTEE_SMC_DISABLE_SHM_CACHE && (u32)res.a0 == OPTEE_SMC_RETURN_OK) {
+            u64 cookie = regpair_to_u64(res.a1, res.a2);
+            if (cookie)
+                optee_free_shm_rpc(ctx, cookie);
+        }
+        return true;
+    }
+
+    case OPTEE_SMC_GET_SHM_CONFIG:
+        /* force dynamic shm for guests */
+        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOTAVAIL);
+        return true;
+
+    case OPTEE_SMC_EXCHANGE_CAPABILITIES:
+        optee_handle_exchange_caps(ctx, vcpu, regs);
+        return true;
+
+    case OPTEE_SMC_CALL_WITH_ARG:
+        optee_handle_std_call(ctx, vcpu, regs);
+        return true;
+
+    case OPTEE_SMC_CALL_RETURN_FROM_RPC:
+        optee_handle_rpc(ctx, vcpu, regs);
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+/* --------------------------------------------------------- */
+/* Register mediator */
+
+static const struct tee_mediator_ops optee_ops = {
+    .probe = optee_probe,
+    .init_secondary = optee_init_secondary,
+    .guest_init = optee_guest_init,
+    .guest_teardown = optee_guest_teardown,
+    .free_guest_ctx = optee_free_guest_ctx,
+    .relinquish_resources = optee_relinquish_resources,
+    .handle_call = optee_handle_call,
+};
+
+REGISTER_TEE_MEDIATOR(optee, "OP-TEE", TEE_TYPE_OPTEE, &optee_ops);
