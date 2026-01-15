@@ -1,0 +1,196 @@
+--- a/optee.c
++++ b/optee.c
+@@ -194,7 +194,7 @@
+ #define OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM   (1U << 0)
+ #define OPTEE_SMC_SEC_CAP_UNREGISTERED_SHM    (1U << 1)
+ #define OPTEE_SMC_SEC_CAP_DYNAMIC_SHM         (1U << 2)
+-#define OPTEE_SMC_SEC_CAP_MEMREF_NULL         (1U << 3)
++#define OPTEE_SMC_SEC_CAP_MEMREF_NULL         (1U << 4)
+ #endif
+ 
+ #ifndef OPTEE_SMC_NSEC_CAP_UNIPROCESSOR
+@@ -894,39 +894,66 @@
+                                   struct optee_std_call *call,
+                                   physical_addr_t guest_arg_gpa)
+ {
+-    /* arg must be page-aligned because we always copy a page */
+-    if (guest_arg_gpa & (OPTEE_PAGE_SIZE - 1UL))
+-        return VMM_EINVALID;
++    int rc;
++    u32 arg_sz;
+ 
+     call->guest_arg_gpa = guest_arg_gpa;
+ 
+-    return optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va, OPTEE_PAGE_SIZE);
++    /*
++     * Guest msg_arg buffer is NOT guaranteed to be page aligned.
++     * For example, Linux static reserved SHM pool typically aligns to 512B.
++     *
++     * So:
++     *   1) Read the header to get num_params
++     *   2) Compute arg size
++     *   3) Copy exactly arg size into the shadow page
++     */
++    rc = optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va,
++                          sizeof(struct optee_msg_arg));
++    if (rc != VMM_OK)
++        return rc;
++
++    arg_sz = optee_msg_get_arg_size(call->arg->num_params);
++    if (arg_sz > OPTEE_PAGE_SIZE)
++        return VMM_EOVERFLOW;
++
++    return optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va, arg_sz);
+ }
+ 
+ static int optee_copy_std_response_back(struct vmm_guest *guest,
+                                        struct optee_std_call *call)
+ {
+     u8 guest_buf[OPTEE_PAGE_SIZE];
++    struct optee_msg_arg hdr;
+     struct optee_msg_arg *garg;
+     u32 arg_sz;
+-
+-    int rc = optee_guest_read(guest, call->guest_arg_gpa, guest_buf, OPTEE_PAGE_SIZE);
++    int rc;
++
++    /*
++     * Guest buffer may be smaller than one page and not page aligned,
++     * so only read/write the actual argument size.
++     */
++    rc = optee_guest_read(guest, call->guest_arg_gpa, &hdr, sizeof(hdr));
+     if (rc != VMM_OK)
+         return rc;
+ 
+-    garg = (struct optee_msg_arg *)guest_buf;
+-
+-    /* sanity: params count should match (or at least be within bounds) */
+-    arg_sz = optee_msg_get_arg_size(garg->num_params);
++    arg_sz = optee_msg_get_arg_size(hdr.num_params);
+     if (arg_sz > OPTEE_PAGE_SIZE)
+         return VMM_EOVERFLOW;
++
++    rc = optee_guest_read(guest, call->guest_arg_gpa, guest_buf, arg_sz);
++    if (rc != VMM_OK)
++        return rc;
++
++    garg = (struct optee_msg_arg *)guest_buf;
+ 
+     /* copy only return fields and output sizes/values from shadow arg */
+     garg->ret = call->arg->ret;
+     garg->ret_origin = call->arg->ret_origin;
+     garg->session = call->arg->session;
+ 
+-    u32 n = (garg->num_params < call->arg->num_params) ? garg->num_params : call->arg->num_params;
++    u32 n = (garg->num_params < call->arg->num_params) ?
++            garg->num_params : call->arg->num_params;
+ 
+     for (u32 i = 0; i < n; i++) {
+         struct optee_msg_param *gp = &garg->params[i];
+@@ -934,17 +961,20 @@
+         u32 gt = (u32)(gp->attr & OPTEE_MSG_ATTR_TYPE_MASK);
+ 
+         /* value outputs */
+-        if (gt == OPTEE_MSG_ATTR_TYPE_VALUE_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_VALUE_INOUT) {
++        if (gt == OPTEE_MSG_ATTR_TYPE_VALUE_OUTPUT ||
++            gt == OPTEE_MSG_ATTR_TYPE_VALUE_INOUT) {
+             gp->u.value.a = hp->u.value.a;
+             gp->u.value.b = hp->u.value.b;
+             gp->u.value.c = hp->u.value.c;
+         }
+ 
+         /* memref output: only size (do NOT copy buf_ptr) */
+-        if (gt == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT) {
++        if (gt == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT ||
++            gt == OPTEE_MSG_ATTR_TYPE_TMEM_INOUT) {
+             gp->u.tmem.size = hp->u.tmem.size;
+         }
+-        if (gt == OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT || gt == OPTEE_MSG_ATTR_TYPE_RMEM_INOUT) {
++        if (gt == OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT ||
++            gt == OPTEE_MSG_ATTR_TYPE_RMEM_INOUT) {
+             gp->u.rmem.size = hp->u.rmem.size;
+         }
+     }
+@@ -974,11 +1004,23 @@
+                     return rc;
+             } else {
+                 /*
+-                 * For simplicity we don't support contiguous tmem here.
+-                 * Most dynamic-shm flows use NONCONTIG.
++                 * Contiguous TMEM (static reserved SHM pool in Linux).
++                 *
++                 * In this case buf_ptr is the guest-physical address of the
++                 * shared buffer. OP-TEE expects a host physical address, so
++                 * translate IPA->PA via stage-2.
++                 *
++                 * If buf_ptr == 0 and MEMREF_NULL is supported, this is a
++                 * NULL buffer and no translation is required.
+                  */
+                 if (p->u.tmem.buf_ptr) {
+-                    return VMM_EINVALID;
++                    physical_addr_t hpa;
++                    int rc = optee_guest_pa_to_host_pa(guest,
++                                                       (physical_addr_t)p->u.tmem.buf_ptr,
++                                                       &hpa);
++                    if (rc != VMM_OK)
++                        return rc;
++                    p->u.tmem.buf_ptr = (u64)hpa;
+                 }
+             }
+         }
+@@ -1221,12 +1263,20 @@
+     u32 sec_caps = (u32)res.a1;
+     sec_caps &= OPTEE_KNOWN_SEC_CAPS;
+ 
+-    /* Drop static reserved shm */
+-    sec_caps &= ~OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM;
+-
+-    /* Require dynamic shm for guests */
+-    if (!(sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)) {
++    /*
++     * Static reserved SHM passthrough mode (single guest):
++     *  - Hide DYNAMIC_SHM so Linux uses the reserved SHM pool.
++     *  - Require HAVE_RESERVED_SHM (GET_SHM_CONFIG must be supported).
++     */
++    sec_caps &= ~OPTEE_SMC_SEC_CAP_DYNAMIC_SHM;
++
++    if (!(sec_caps & OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM)) {
++        /*
++         * As per optee_smc.h: on error return, a1 may still contain
++         * the secure world capability bitfield.
++         */
+         cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOTAVAIL);
++        cpu_vcpu_reg_write(vcpu, regs, 1, sec_caps);
+         return;
+     }
+ 
+@@ -1577,10 +1627,26 @@
+         return true;
+     }
+ 
+-    case OPTEE_SMC_GET_SHM_CONFIG:
+-        /* force dynamic shm for guests */
+-        cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOTAVAIL);
++    case OPTEE_SMC_GET_SHM_CONFIG: {
++        struct arm_smccc_res res;
++
++        /*
++         * Static reserved SHM mode: forward GET_SHM_CONFIG so the guest
++         * Linux driver can discover the reserved SHM region.
++         *
++         * IMPORTANT: guest must have this region mapped (passthrough) in
++         * stage-2, otherwise the guest will fault when it memremaps it.
++         */
++        optee_do_smc(ctx, OPTEE_SMC_GET_SHM_CONFIG, 0, 0, 0, 0, 0, &res);
++
++        cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
++        if ((u32)res.a0 == OPTEE_SMC_RETURN_OK) {
++            cpu_vcpu_reg_write(vcpu, regs, 1, res.a1); /* start PA */
++            cpu_vcpu_reg_write(vcpu, regs, 2, res.a2); /* size */
++            cpu_vcpu_reg_write(vcpu, regs, 3, res.a3); /* cache settings */
++        }
+         return true;
++    }
+ 
+     case OPTEE_SMC_EXCHANGE_CAPABILITIES:
+         optee_handle_exchange_caps(ctx, vcpu, regs);
