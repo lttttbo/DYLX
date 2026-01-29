@@ -1,0 +1,357 @@
+diff --git a/arch/arm/tee/optee.c b/arch/arm/tee/optee.c
+index 0000000..1111111 100644
+--- a/arch/arm/tee/optee.c
++++ b/arch/arm/tee/optee.c
+@@ -1,14 +1,17 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ /*
+  * OP-TEE mediator for Xvisor (single guest, 1:1 passthrough)
+  *
+  * This implementation is intentionally minimal:
+  *   - supports a single guest only;
+  *   - assumes the reserved SHM region returned by OP-TEE is identity mapped for
+  *     that guest (IPA == PA), so we can forward SMC calls without translating
+  *     pointers;
+  *   - hides Dynamic SHM in EXCHANGE_CAPABILITIES so Linux uses static reserved
+  *     SHM.
+  *
+  * If you later want multiple guests or dynamic SHM, you must implement
+  * address translation + SHM registration like Xen does.
+  */
+  #include <vmm_error.h>
+  #include <vmm_stdio.h>
+  #include <vmm_compiler.h>
+  #include <vmm_spinlocks.h>
+  #include <vmm_heap.h>
+  #include <vmm_manager.h>
+  #include <cpu_vcpu_helper.h>
+  #include <vmm_guest_aspace.h>
+
+  #include <arch_regs.h>
+
+  #include <tee.h>
+  #include <smccc.h>
+  #include <optee_msg.h>
+  #include <optee_smc.h>
+
++/* -------------------------------------------------------------------------- */
++/* Compatibility glue: some vendor trees ship an older optee_smc.h */
++#ifndef OPTEE_SMC_SEC_CAP_VIRTUALIZATION
++#define OPTEE_SMC_SEC_CAP_VIRTUALIZATION    (1U << 3)
++#endif
++#ifndef OPTEE_SMC_SEC_CAP_RPC_ARG
++#define OPTEE_SMC_SEC_CAP_RPC_ARG           (1U << 6)
++#endif
++#ifndef OPTEE_SMC_RETURN_UNKNOWN_FUNCTION
++#define OPTEE_SMC_RETURN_UNKNOWN_FUNCTION   0xFFFFFFFFU
++#endif
++
+  /* ------------------------------------------------------------ */
+  /* Policy knobs */
+
+  /* If you truly want a fixed client_id regardless of guest->id */
+  #define OPTEE_SINGLE_GUEST_CLIENT_ID   2U
+
+  /* Optional sanity: refuse to expose dynamic shm to guest */
+  #define OPTEE_FORCE_STATIC_SHM         1
+
+  #define OPTEE_KNOWN_NSEC_CAPS  (OPTEE_SMC_NSEC_CAP_UNIPROCESSOR)
+
+  /* Serialize SMCs to OP-TEE (safer on some platforms/firmwares) */
+  static vmm_spinlock_t optee_smc_lock;
+  static bool optee_smc_lock_init;
+
+  struct optee_ctx {
+      u32 client_id;
+  };
+
+  /* only one guest may own OP-TEE */
+  static struct vmm_guest *optee_owner_guest;
++
++/* Host-discovered secure capabilities (EXCHANGE_CAPABILITIES, a7=0) */
++static u32  optee_host_sec_caps;
++static bool optee_have_host_sec_caps;
++static bool optee_virt_supported;
++static bool optee_virt_enabled;
++
++static void optee_dump_host_caps(u32 caps, unsigned long a2, unsigned long a3)
++{
++    vmm_init_printf("OPTEE: host sec_caps=0x%x a2=%#lx a3=%#lx\n", caps, a2, a3);
++#ifdef OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM
++    if (caps & OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM)
++        vmm_init_printf("OPTEE:   - HAVE_RESERVED_SHM\n");
++#endif
++#ifdef OPTEE_SMC_SEC_CAP_DYNAMIC_SHM
++    if (caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
++        vmm_init_printf("OPTEE:   - DYNAMIC_SHM\n");
++#endif
++    if (caps & OPTEE_SMC_SEC_CAP_VIRTUALIZATION)
++        vmm_init_printf("OPTEE:   - VIRTUALIZATION\n");
++#ifdef OPTEE_SMC_SEC_CAP_MEMREF_NULL
++    if (caps & OPTEE_SMC_SEC_CAP_MEMREF_NULL)
++        vmm_init_printf("OPTEE:   - MEMREF_NULL\n");
++#endif
++    if (caps & OPTEE_SMC_SEC_CAP_RPC_ARG)
++        vmm_init_printf("OPTEE:   - RPC_ARG (max_params=%lu)\n", a3);
++}
+
+  static inline void optee_lock_init_once(void)
+  {
+      if (!optee_smc_lock_init) {
+          INIT_SPIN_LOCK(&optee_smc_lock);
+          optee_smc_lock_init = true;
+      }
+  }
+
+  static inline void optee_smc_call(u32 client_id,
+                                   unsigned long a0, unsigned long a1,
+                                   unsigned long a2, unsigned long a3,
+                                   unsigned long a4, unsigned long a5,
+                                   unsigned long a6,
+                                   struct arm_smccc_res *res)
+  {
+-    /* a7 carries OP-TEE client id for virtualized NS */
++    /*
++     * a7 carries OP-TEE client id when secure world supports NS virtualization.
++     * When virtualization is not supported we must use a7=0.
++     *
++     * We implement this by setting ctx->client_id = 0 in non-virtualized mode.
++     */
+      vmm_spin_lock(&optee_smc_lock);
+      arm_smccc_smc(a0, a1, a2, a3, a4, a5, a6, (unsigned long)client_id, res);
+      vmm_spin_unlock(&optee_smc_lock);
+  }
+
+  static inline void optee_forward_x0_to_x3(struct optee_ctx *ctx,
+                                           struct vmm_vcpu *vcpu,
+                                           arch_regs_t *regs,
+                                           unsigned long fid)
+@@ -86,6 +137,7 @@ static inline void optee_forward_x0_to_x3(struct optee_ctx *ctx,
+  /* ------------------------------------------------------------ */
+  /* Probe */
+
+  static bool optee_probe(void)
+  {
+      struct arm_smccc_res res;
++    u32 nsec_caps = 0;
+
+      optee_lock_init_once();
+
+      /* Basic API UID check (host context => a7 = 0) */
+      vmm_spin_lock(&optee_smc_lock);
+      arm_smccc_smc(OPTEE_SMC_CALLS_UID, 0, 0, 0, 0, 0, 0, 0, &res);
+      vmm_spin_unlock(&optee_smc_lock);
+
+      vmm_init_printf("OPTEE: CALLS_UID = %08lx %08lx %08lx %08lx\n",
+                      res.a0, res.a1, res.a2, res.a3);
+
+  #ifdef OPTEE_MSG_UID_0
+      /* If optee_msg.h provides UID words, validate them */
+      if (res.a0 != OPTEE_MSG_UID_0 || res.a1 != OPTEE_MSG_UID_1 ||
+          res.a2 != OPTEE_MSG_UID_2 || res.a3 != OPTEE_MSG_UID_3) {
+          vmm_printf("OPTEE: UID mismatch, not OP-TEE?\n");
+          return false;
+      }
+  #endif
++
++    /*
++     * Discover secure capabilities from host context (a7=0).
++     * This decides whether we can/should use VM_CREATED and per-guest a7 client_id.
++     */
++#ifdef OPTEE_SMC_NSEC_CAP_UNIPROCESSOR
++    nsec_caps = OPTEE_SMC_NSEC_CAP_UNIPROCESSOR;
++#endif
++
++    vmm_spin_lock(&optee_smc_lock);
++    arm_smccc_smc(OPTEE_SMC_EXCHANGE_CAPABILITIES,
++                  (unsigned long)nsec_caps,
++                  0, 0, 0, 0, 0,
++                  0 /* host: a7=0 */,
++                  &res);
++    vmm_spin_unlock(&optee_smc_lock);
++
++    if ((u32)res.a0 == OPTEE_SMC_RETURN_OK) {
++        optee_host_sec_caps = (u32)res.a1;
++        optee_have_host_sec_caps = true;
++        optee_virt_supported = !!(optee_host_sec_caps & OPTEE_SMC_SEC_CAP_VIRTUALIZATION);
++        optee_virt_enabled = optee_virt_supported;
++        optee_dump_host_caps(optee_host_sec_caps, res.a2, res.a3);
++    } else {
++        vmm_printf("OPTEE: host EXCHANGE_CAPS failed: a0=%#lx\n", res.a0);
++        optee_host_sec_caps = 0;
++        optee_have_host_sec_caps = false;
++        optee_virt_supported = false;
++        optee_virt_enabled = false;
++    }
++
++    vmm_init_printf("OPTEE: virtualization %s (host sec_caps=0x%x)\n",
++                    optee_virt_enabled ? "ENABLED" : "DISABLED",
++                    optee_host_sec_caps);
+
+      return true;
+  }
+
+  /* ------------------------------------------------------------ */
+  /* Guest lifecycle */
+
+  static int optee_guest_init(struct vmm_guest *guest)
+  {
+      struct optee_ctx *ctx;
+      struct arm_smccc_res res;
+
+      if (!guest)
+          return VMM_EINVALID;
+
+      if (optee_owner_guest && optee_owner_guest != guest) {
+          vmm_printf("OPTEE: refusing guest '%s' (id=%u): single-guest mode already bound to '%s'\n",
+                     guest->name, guest->id, optee_owner_guest->name);
+          return VMM_EBUSY;
+      }
+
+      ctx = vmm_zalloc(sizeof(*ctx));
+      if (!ctx)
+          return VMM_ENOMEM;
+
+-    /*
+-     * For single guest passthrough, keep it simple.
+-     * If you prefer guest->id+1, you can change here.
+-     */
+-    ctx->client_id = OPTEE_SINGLE_GUEST_CLIENT_ID;
+-
+-    /* Notify OP-TEE that a VM/client is created (host context => a7 = 0) */
+-    optee_lock_init_once();
+-    vmm_spin_lock(&optee_smc_lock);
+-    arm_smccc_smc(OPTEE_SMC_VM_CREATED,
+-                  (unsigned long)ctx->client_id,
+-                  0, 0, 0, 0, 0, 0,
+-                  &res);
+-    vmm_spin_unlock(&optee_smc_lock);
+-
+-    if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
+-        vmm_printf("OPTEE: VM_CREATED failed: a0=%#lx\n", res.a0);
+-        vmm_free(ctx);
+-        return VMM_EFAIL;
+-    }
++    if (optee_virt_enabled) {
++        /*
++         * Virtualized OP-TEE: each guest must have a non-zero client_id (a7).
++         * OP-TEE typically expects IDs starting from 1. 0 is reserved for host.
++         *
++         * If you want a fixed value, keep OPTEE_SINGLE_GUEST_CLIENT_ID.
++         * Otherwise set it to 0 and use guest->id+1.
++         */
++#if (OPTEE_SINGLE_GUEST_CLIENT_ID != 0U)
++        ctx->client_id = OPTEE_SINGLE_GUEST_CLIENT_ID;
++#else
++        ctx->client_id = (u32)guest->id + 1U;
++#endif
++
++        /* Notify OP-TEE that a VM/client is created (host context => a7 = 0) */
++        optee_lock_init_once();
++        vmm_spin_lock(&optee_smc_lock);
++        arm_smccc_smc(OPTEE_SMC_VM_CREATED,
++                      (unsigned long)ctx->client_id,
++                      0, 0, 0, 0, 0, 0,
++                      &res);
++        vmm_spin_unlock(&optee_smc_lock);
++
++        if ((u32)res.a0 == OPTEE_SMC_RETURN_UNKNOWN_FUNCTION) {
++            /*
++             * Some OP-TEE builds don't support NS virtualization even if
++             * the hypervisor thinks they should. Fall back instead of
++             * failing guest creation.
++             */
++            vmm_printf("OPTEE: VM_CREATED not supported (a0=%#lx). "
++                       "Falling back to non-virtualized passthrough (a7=0).\n",
++                       res.a0);
++            optee_virt_enabled = false;
++            ctx->client_id = 0;
++        } else if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
++            vmm_printf("OPTEE: VM_CREATED failed: a0=%#lx (client_id=%u)\n",
++                       res.a0, ctx->client_id);
++            vmm_free(ctx);
++            return VMM_EFAIL;
++        }
++    } else {
++        /*
++         * Non-virtualized OP-TEE: never call VM_CREATED and always use a7=0.
++         * We still keep single-guest policy to avoid guest-to-guest leakage.
++         */
++        ctx->client_id = 0;
++        vmm_init_printf("OPTEE: guest '%s' uses non-virtualized passthrough (a7=0)\n",
++                        guest->name);
++    }
+
+      arm_guest_priv(guest)->tee = ctx;
+      optee_owner_guest = guest;
+
+-    vmm_init_printf("OPTEE: bound guest '%s' id=%u -> client_id=%u\n",
+-                    guest->name, guest->id, ctx->client_id);
++    vmm_init_printf("OPTEE: bound guest '%s' id=%u -> a7(client_id)=%u (virt=%s)\n",
++                    guest->name, guest->id, ctx->client_id,
++                    optee_virt_enabled ? "yes" : "no");
+
+      return VMM_OK;
+  }
+
+  static int optee_guest_teardown(struct vmm_guest *guest)
+  {
+      struct optee_ctx *ctx;
+      struct arm_smccc_res res;
+
+      if (!guest)
+          return VMM_EINVALID;
+
+      ctx = (struct optee_ctx *)arm_guest_priv(guest)->tee;
+      if (!ctx)
+          return VMM_OK;
+
+-    /* Notify OP-TEE that the VM/client is destroyed (host context => a7 = 0) */
+-    vmm_spin_lock(&optee_smc_lock);
+-    arm_smccc_smc(OPTEE_SMC_VM_DESTROYED,
+-                  (unsigned long)ctx->client_id,
+-                  0, 0, 0, 0, 0, 0,
+-                  &res);
+-    vmm_spin_unlock(&optee_smc_lock);
++    /* Notify OP-TEE that the VM/client is destroyed (host context => a7 = 0) */
++    if (optee_virt_enabled && ctx->client_id) {
++        vmm_spin_lock(&optee_smc_lock);
++        arm_smccc_smc(OPTEE_SMC_VM_DESTROYED,
++                      (unsigned long)ctx->client_id,
++                      0, 0, 0, 0, 0, 0,
++                      &res);
++        vmm_spin_unlock(&optee_smc_lock);
++    }
+
+      arm_guest_priv(guest)->tee = NULL;
+
+      if (optee_owner_guest == guest)
+          optee_owner_guest = NULL;
+
+      vmm_free(ctx);
+
+      return VMM_OK;
+  }
+@@ -206,6 +316,7 @@ static void optee_handle_exchange_caps(struct optee_ctx *ctx,
+     u32 nsec_caps;
+     u32 sec_caps;
+
+     nsec_caps = (u32)cpu_vcpu_reg_read(vcpu, regs, 1);
+@@ -256,6 +367,12 @@ static void optee_handle_exchange_caps(struct optee_ctx *ctx,
+     sec_caps = (u32)res.a1;
+
+ #if OPTEE_FORCE_STATIC_SHM
+ #ifdef OPTEE_SMC_SEC_CAP_DYNAMIC_SHM
+     sec_caps &= ~OPTEE_SMC_SEC_CAP_DYNAMIC_SHM;
+ #endif
+ #endif
++
++    /* If we're not using virtualization (a7=0 passthrough), hide the cap too */
++    if (!optee_virt_enabled)
++        sec_caps &= ~OPTEE_SMC_SEC_CAP_VIRTUALIZATION;
+
+     cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_OK);
+     cpu_vcpu_reg_write(vcpu, regs, 1, (unsigned long)sec_caps);
+     cpu_vcpu_reg_write(vcpu, regs, 2, res.a2);
+     cpu_vcpu_reg_write(vcpu, regs, 3, res.a3);
+ }
