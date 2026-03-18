@@ -1,0 +1,163 @@
+diff --git a/daemon/mterm.c b/daemon/mterm.c
+index 1111111..2222222 100644
+--- a/daemon/mterm.c
++++ b/daemon/mterm.c
+@@ -1,3 +1,4 @@
++/* mterm.c */
+ /**
+  * Copyright (c) 2010 Anup Patel.
+  * All rights reserved.
+@@ -55,6 +56,40 @@ static struct mterm_ctrl {
+ #endif
+ } mtctrl;
+
+ #ifdef CONFIG_LIBAUTH
++
++/*
++ * Timeout/logout must be handled in mterm thread context only.
++ * Never do thread stop/start or terminal I/O in timer callback.
++ */
++static void mterm_handle_timeout_logout(void)
++{
++    if (mtctrl.event.active_state) {
++        vmm_timer_event_stop(&mtctrl.event);
++    }
++
++    CLEAR_FLAG(PROMPT_PRINTED);
++
++    vmm_printf("\007\ntimed out waiting for input: auto-logout, "
++               "Press Enter key to restart session\n");
++}
++
++/*
++ * If timeout flag was set, but we observe new input activity before
++ * actually logging out, cancel the pending timeout/logout.
++ *
++ * NOTE:
++ *   update_logout_timeout() will restart/rearm the timer later from
++ *   process_command(), so here we only clear state flags.
++ */
++static void mterm_cancel_timeout_pending(void)
++{
++    CLEAR_FLAG(TIMEOUT);
++    CLEAR_FLAG(LOGOUT);
++    CLEAR_FLAG(RESET_BUFFERS);
++}
++
+ /* Started by AICoder, pid:x4cfejf36bs3a5114102089fe0655f0d29b7455b */
+ static void wait_enter()
+ {
+@@ -66,16 +101,19 @@ static void wait_enter()
+ /* Ended by AICoder, pid:x4cfejf36bs3a5114102089fe0655f0d29b7455b */
+ /* Started by AICoder, pid:98a9fi9902m767c144cd09d1602ad6470cc4ad0f */
+ static int auth_main(void *udata)
+ {
+     char user[64];
+     char passwd[256];
+     u32 nr_bad_login_tries = 0;
+-    if (IS_FLAG_SET(TIMEOUT)) {
+-        wait_enter();
+-    }
++
++    /*
++     * Stop logout timer before entering any blocking input wait
++     * (including wait_enter/password input), otherwise the timer may
++     * fire again and corrupt the session state machine.
++     */
+     if (mtctrl.event.active_state) {
+         vmm_timer_event_stop(&mtctrl.event);
+     }
++    if (IS_FLAG_SET(TIMEOUT)) {
++        wait_enter();
++    }
+
+     while (CAN_AUTH()) {
+         vmm_printf("user: ");
+         memset(user, 0, sizeof(user));
+@@ -115,18 +153,18 @@ static int auth_main(void *udata)
+ /* Ended by AICoder, pid:98a9fi9902m767c144cd09d1602ad6470cc4ad0f */
+
+ /* Started by AICoder, pid:88f8e28d97wffd01434a093280df8c15add25b17 */
+ static void mterm_timeout(struct vmm_timer_event *event)
+ {
+     if (!IS_FLAG_SET(VSERIAL_BIND)) {
+-        vmm_threads_stop(auth_thread);
++        /*
++         * IMPORTANT:
++         * Timer callback must not stop/start auth_thread and must not do
++         * terminal I/O. Just mark timeout/logout and let mterm_main()
++         * handle state transition in thread context.
++         */
+         SET_FLAG(TIMEOUT);
+         SET_FLAG(LOGOUT);
+         SET_FLAG(RESET_BUFFERS);
+-        vmm_printf("\007\ntimed out waiting for input: auto-logout, "
+-                   "Press Enter key to restart session\n");
+-        vmm_threads_start(auth_thread);
+     }
+ }
+ /* Ended by AICoder, pid:88f8e28d97wffd01434a093280df8c15add25b17 */
+ /* Started by AICoder, pid:pb5b61e9c71087e14b100b47c07af11dd7417656 */
+ static void update_logout_timeout(void)
+@@ -181,7 +219,7 @@ static int mterm_main(void *udata)
+         }
+ #endif
+ #ifdef CONFIG_LIBAUTH
+-        while (CAN_PROCESS()) {
++        while (1) {
++            if (!CAN_PROCESS()) {
++                if (IS_FLAG_SET(LOGOUT) && IS_FLAG_SET(TIMEOUT)) {
++                    mterm_handle_timeout_logout();
++                }
++                break;
++            }
+             if (!IS_FLAG_SET(PROMPT_PRINTED)) {
+                 vmm_printf("%s@host# ", current_user);
+                 SET_FLAG(PROMPT_PRINTED);
+             }
+ #else
+@@ -198,19 +236,30 @@ static int mterm_main(void *udata)
+ #ifdef CONFIG_MTERM_HISTORY
+             int rc = vmm_gets_noblocking(cmds, CONFIG_MTERM_CMD_WIDTH, '\n', &mtctrl.history, TRUE);
+ #else
+             int rc = vmm_gets_noblocking(cmds, CONFIG_MTERM_CMD_WIDTH, '\n', NULL, TRUE);
+ #endif
+             if (!strcmp(cmds, "exit")) {
+                 SET_FLAG(PROMPT_PRINTED);
+                 break;
+             }
+ #else
+ #ifdef CONFIG_MTERM_HISTORY
+             vmm_gets(cmds, CONFIG_MTERM_CMD_WIDTH, '\n', &mtctrl.history, TRUE);
+ #else
+             vmm_gets(cmds, CONFIG_MTERM_CMD_WIDTH, '\n', NULL, TRUE);
+ #endif
+ #endif
+             cdev = vmm_stdio_device();
+ #ifdef CONFIG_LIBAUTH
+ /* Started by AICoder, pid:2db28r5c3bhe1e8149d109c47064510118d6de25 */
+             if (rc == NO_INPUT) {
++                /*
++                 * Only logout when timeout/logout is still pending and
++                 * there is still no new input activity.
++                 */
++                if (IS_FLAG_SET(LOGOUT) && IS_FLAG_SET(TIMEOUT)) {
++                    mterm_handle_timeout_logout();
++                    break;
++                }
+                 vmm_msleep(100UL);
+                 continue;
+             } else {
++                /*
++                 * Any input activity cancels a pending timeout/logout
++                 * decision. This avoids kicking the user out while they
++                 * are actively typing.
++                 */
++                if (IS_FLAG_SET(LOGOUT) || IS_FLAG_SET(TIMEOUT)) {
++                    mterm_cancel_timeout_pending();
++                }
+                 process_command(rc, cmds, cdev);
+             }
+ /* Ended by AICoder, pid:2db28r5c3bhe1e8149d109c47064510118d6de25 */
+ #else
+             // Process command string
