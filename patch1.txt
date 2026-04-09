@@ -1,0 +1,333 @@
+diff --git a/arch/arm/tee/optee.c b/arch/arm/tee/optee.c
+index 0000000..1111111 100644
+--- a/arch/arm/tee/optee.c
++++ b/arch/arm/tee/optee.c
+@@ -1,5 +1,6 @@
+ #include <vmm_error.h>
+ #include <vmm_stdio.h>
++#include <vmm_string.h>
+ #include <vmm_compiler.h>
+ #include <vmm_spinlocks.h>
+ #include <vmm_heap.h>
+@@ -20,6 +21,42 @@
+ #define OPTEE_PAGE_SIZE   VMM_PAGE_SIZE
+ #endif
+ 
++/*
++ * ---- DEBUG SWITCHES ----
++ * 开关尽量集中，便于你后续直接关掉。
++ */
++#define OPTEE_DBG_STD_CALL   1
++#define OPTEE_DBG_MEMMAP     1
++#define OPTEE_DBG_RPC        1
++
++#if OPTEE_DBG_STD_CALL
++#define OPTEE_DBG(fmt, ...) \
++    vmm_printf("OPTEE-DBG: " fmt "\n", ##__VA_ARGS__)
++#else
++#define OPTEE_DBG(fmt, ...) do { } while (0)
++#endif
++
++static inline void *optee_host_memmap_dbg(const char *tag,
++                                          physical_addr_t pa,
++                                          virtual_size_t sz,
++                                          u32 mem_flags)
++{
++    virtual_addr_t va = vmm_host_memmap(pa, sz, mem_flags);
++#if OPTEE_DBG_MEMMAP
++    OPTEE_DBG("memmap %-20s pa=%#llx sz=%#lx flags=%#x -> va=%#lx",
++              tag,
++              (unsigned long long)pa,
++              (unsigned long)sz,
++              mem_flags,
++              (unsigned long)va);
++#endif
++    return (void *)(uintptr_t)va;
++}
++
++static inline void optee_host_memunmap_dbg(const char *tag, void *ptr)
++{
++#if OPTEE_DBG_MEMMAP
++    OPTEE_DBG("memunmap %-18s va=%#lx", tag, (unsigned long)(uintptr_t)ptr);
++#endif
++    vmm_host_memunmap((virtual_addr_t)(uintptr_t)ptr);
++}
++
+ static inline unsigned long optee_align_down(unsigned long x, unsigned long a)
+ {
+     return x & ~(a - 1UL);
+@@ -80,17 +117,31 @@ struct optee_host_page {
+ static int optee_host_page_alloc(struct optee_host_page *pg, physical_size_t sz)
+ {
+     int rc;
+     physical_addr_t pa;
++    virtual_addr_t va;
+ 
+     if (!pg || !sz)
+         return VMM_EINVALID;
+ 
+     sz = optee_align_up(sz, OPTEE_PAGE_SIZE);
+ 
+     rc = vmm_host_ram_alloc(&pa, sz, OPTEE_PAGE_SIZE);
+     if (rc != VMM_OK)
+         return rc;
+ 
+-    pg->va = optee_host_memmap_ptr(pa, sz);
+-    if (!pg->va) {
++    if (pa & (OPTEE_PAGE_SIZE - 1)) {
++        vmm_printf("OPTEE-DBG: host_page_alloc pa NOT aligned: pa=%#llx sz=%#lx\n",
++                   (unsigned long long)pa, (unsigned long)sz);
++    }
++
++    va = (virtual_addr_t)(uintptr_t)optee_host_memmap_dbg("host_page_alloc",
++                                                          pa, sz,
++                                                          VMM_MEMORY_FLAGS_NORMAL);
++    if (!va) {
+         vmm_host_ram_free(pa, sz);
+         return VMM_ENOMEM;
+     }
+ 
++    if (va & (OPTEE_PAGE_SIZE - 1)) {
++        vmm_printf("OPTEE-DBG: host_page_alloc va NOT aligned: va=%#lx pa=%#llx sz=%#lx\n",
++                   (unsigned long)va, (unsigned long long)pa, (unsigned long)sz);
++    }
++
++    pg->va = (void *)(uintptr_t)va;
+     memset(pg->va, 0, sz);
+     pg->pa = pa;
+     pg->sz = sz;
+@@ -103,7 +154,7 @@ static void optee_host_page_free(struct optee_host_page *pg)
+     if (!pg || !pg->va || !pg->sz)
+         return;
+ 
+-    optee_host_memunmap_ptr(pg->va);
++    optee_host_memunmap_dbg("host_page_free", pg->va);
+     vmm_host_ram_free(pg->pa, pg->sz);
+ 
+     pg->pa = 0;
+@@ -124,6 +175,7 @@ static int optee_guest_pa_to_host_pa(struct vmm_guest *guest,
+         return rc;
+ 
+     *hpa = outaddr;
++    OPTEE_DBG("gpa->hpa guest=%s gpa=%#llx -> hpa=%#llx availsz=%#llx flags=%#x", guest->name, (unsigned long long)gpa, (unsigned long long)*hpa, (unsigned long long)availsz, reg_flags);
+     return VMM_OK;
+ }
+ 
+@@ -136,35 +188,57 @@ static int optee_guest_read(struct vmm_guest *guest,
+     while (done < len) {
+         physical_addr_t hpa;
+         physical_size_t availsz = 0;
+         u32 reg_flags = 0;
+         int rc;
++        physical_addr_t base;
++        unsigned long off;
++        unsigned long chunk;
++        unsigned long map_sz;
++        void *hva;
+ 
+         rc = vmm_guest_physical_map(guest, gpa + done, len - done,
+                                     &hpa, &availsz, &reg_flags);
+         if (rc != VMM_OK)
+             return rc;
+ 
+         if (!(reg_flags & VMM_REGION_ISRAM))
+             return VMM_EACCESS;
+ 
+-        unsigned long chunk = optee_min_ul((unsigned long)availsz, len - done);
+-        void *hva = optee_host_memmap_ptr(hpa, chunk);
++        chunk = optee_min_ul((unsigned long)availsz, len - done);
++        base = optee_align_down(hpa, OPTEE_PAGE_SIZE);
++        off = (unsigned long)(hpa - base);
++        map_sz = optee_align_up(off + chunk, OPTEE_PAGE_SIZE);
++
++        hva = optee_host_memmap_dbg("guest_read", base, map_sz,
++                                    VMM_MEMORY_FLAGS_NORMAL);
+         if (!hva)
+             return VMM_ENOMEM;
+ 
+-        memcpy((u8 *)dst + done, hva, chunk);
+-        optee_host_memunmap_ptr(hva);
++        OPTEE_DBG("guest_read chunk gpa=%#llx hpa=%#llx base=%#llx off=%#lx chunk=%#lx map_sz=%#lx hva=%p",
++                  (unsigned long long)(gpa + done),
++                  (unsigned long long)hpa,
++                  (unsigned long long)base,
++                  off, chunk, map_sz, hva);
++
++        memcpy((u8 *)dst + done, (u8 *)hva + off, chunk);
++        optee_host_memunmap_dbg("guest_read", hva);
+         done += chunk;
+     }
+     return VMM_OK;
+ }
+ 
+ static int optee_guest_write(struct vmm_guest *guest,
+                              physical_addr_t gpa,
+                              const void *src,
+                              unsigned long len)
+ {
+     unsigned long done = 0;
+ 
+     if (!guest || (!src && len))
+         return VMM_EINVALID;
+ 
+     while (done < len) {
+         physical_addr_t hpa;
+         physical_size_t availsz = 0;
+         u32 reg_flags = 0;
+         int rc;
++        physical_addr_t base;
++        unsigned long off;
++        unsigned long chunk;
++        unsigned long map_sz;
++        void *hva;
+ 
+         rc = vmm_guest_physical_map(guest, gpa + done, len - done,
+                                     &hpa, &availsz, &reg_flags);
+         if (rc != VMM_OK)
+             return rc;
+@@ -172,14 +246,23 @@ static int optee_guest_write(struct vmm_guest *guest,
+         if (!(reg_flags & VMM_REGION_ISRAM))
+             return VMM_EACCESS;
+ 
+-        unsigned long chunk = optee_min_ul((unsigned long)availsz, len - done);
+-        void *hva = optee_host_memmap_ptr(hpa, chunk);
++        chunk = optee_min_ul((unsigned long)availsz, len - done);
++        base = optee_align_down(hpa, OPTEE_PAGE_SIZE);
++        off = (unsigned long)(hpa - base);
++        map_sz = optee_align_up(off + chunk, OPTEE_PAGE_SIZE);
++
++        hva = optee_host_memmap_dbg("guest_write", base, map_sz,
++                                    VMM_MEMORY_FLAGS_NORMAL);
+         if (!hva)
+             return VMM_ENOMEM;
+ 
+-        memcpy(hva, (const u8 *)src + done, chunk);
+-        optee_host_memunmap_ptr(hva);
++        OPTEE_DBG("guest_write chunk gpa=%#llx hpa=%#llx base=%#llx off=%#lx chunk=%#lx map_sz=%#lx hva=%p",
++                  (unsigned long long)(gpa + done),
++                  (unsigned long long)hpa,
++                  (unsigned long long)base,
++                  off, chunk, map_sz, hva);
++
++        memcpy((u8 *)hva + off, (const u8 *)src + done, chunk);
++        optee_host_memunmap_dbg("guest_write", hva);
+         done += chunk;
+     }
+ 
+     return VMM_OK;
+@@ -340,6 +423,10 @@ static int optee_copy_std_request(struct vmm_guest *guest,
+ {
+     int rc;
+     u32 arg_sz;
++
++    OPTEE_DBG("copy_std_request enter guest=%s gpa=%#llx",
++              guest->name, (unsigned long long)guest_arg_gpa);
++
+     call->guest_arg_gpa = guest_arg_gpa;
+ 
+     rc = optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va,
+@@ -350,6 +437,8 @@ static int optee_copy_std_request(struct vmm_guest *guest,
+     arg_sz = OPTEE_MSG_GET_ARG_SIZE(call->arg->num_params);
+     if (arg_sz > OPTEE_PAGE_SIZE)
+         return VMM_EOVERFLOW;
++
++    OPTEE_DBG("copy_std_request num_params=%u arg_sz=%u", call->arg->num_params, arg_sz);
+ 
+     return optee_guest_read(guest, guest_arg_gpa, call->xvisor_arg_pg.va, arg_sz);
+ }
+@@ -418,6 +507,10 @@ static int optee_translate_params(struct optee_ctx *ctx,
+ {
+     for (u32 i = 0; i < arg->num_params; i++) {
+         struct optee_msg_param *p = &arg->params[i];
+         u32 t = (u32)(p->attr & OPTEE_MSG_ATTR_TYPE_MASK);
++
++        OPTEE_DBG("translate_params[%u] attr=%#llx type=%u buf_ptr=%#llx size=%#llx shm_ref=%#llx",
++                  i, (unsigned long long)p->attr, t,
++                  (unsigned long long)p->u.tmem.buf_ptr, (unsigned long long)p->u.tmem.size, (unsigned long long)p->u.tmem.shm_ref);
+ 
+         if (t == OPTEE_MSG_ATTR_TYPE_TMEM_INPUT ||
+             t == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT ||
+@@ -489,6 +582,10 @@ static void optee_do_smc(struct optee_ctx *ctx,
+                          unsigned long a6,
+                          struct arm_smccc_res *res)
+ {
++    OPTEE_DBG("do_smc enter fid=%#lx a1=%#lx a2=%#lx a3=%#lx a4=%#lx a5=%#lx a6=%#lx cid=%u",
++              a0, a1, a2, a3, a4, a5, a6, ctx->client_id);
+     arm_smccc_smc(a0, a1, a2, a3, a4, a5, a6, (unsigned long)ctx->client_id, res);
++    OPTEE_DBG("do_smc exit  fid=%#lx -> a0=%#lx a1=%#lx a2=%#lx a3=%#lx",
++              a0, res->a0, res->a1, res->a2, res->a3);
+ }
+ 
+ static void optee_do_call_with_arg(struct optee_ctx *ctx,
+@@ -501,6 +598,13 @@ static void optee_do_call_with_arg(struct optee_ctx *ctx,
+                                    unsigned long a5)
+ {
+     struct arm_smccc_res res;
++
++    OPTEE_DBG("do_call_with_arg enter smc_fid=%#lx a1=%#lx a2=%#lx a3=%#lx a4=%#lx a5=%#lx",
++              smc_fid, a1, a2, a3, a4, a5);
+ 
+     optee_do_smc(ctx, smc_fid, a1, a2, a3, a4, a5, &res);
+ 
+     while (OPTEE_SMC_RETURN_IS_RPC(res.a0)) {
++        OPTEE_DBG("do_call_with_arg got RPC ret=%#lx a1=%#lx a2=%#lx a3=%#lx",
++                  res.a0, res.a1, res.a2, res.a3);
+         int rc = optee_handle_rpc_return(ctx, vcpu, regs, call, &res);
+         if (rc == VMM_EAGAIN) {
+             optee_do_smc(ctx, res.a0, res.a1, res.a2, res.a3, 0, 0, &res);
+@@ -510,6 +614,8 @@ static void optee_do_call_with_arg(struct optee_ctx *ctx,
+         return;
+     }
+ 
++    OPTEE_DBG("do_call_with_arg normal return a0=%#lx", res.a0);
++
+     optee_copy_std_response_back(vcpu->guest, call);
+     cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
+@@ -543,6 +649,8 @@ static void optee_handle_std_call(struct optee_ctx *ctx,
+                                   struct vmm_vcpu *vcpu,
+                                   arch_regs_t *regs)
+ {
+     struct optee_std_call *call;
++    OPTEE_DBG("std_call enter guest=%s", vcpu->guest->name);
++
+     u64 gpa = regpair_to_u64(cpu_vcpu_reg_read(vcpu, regs, 1),
+                              cpu_vcpu_reg_read(vcpu, regs, 2));
+     unsigned long a3 = (unsigned long)cpu_vcpu_reg_read(vcpu, regs, 3);
+@@ -551,18 +659,28 @@ static void optee_handle_std_call(struct optee_ctx *ctx,
+     if (!call) {
+         cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOMEM);
+         return;
+     }
++    OPTEE_DBG("std_call alloc_call ok shadow_pa=%#llx shadow_va=%p",
++              (unsigned long long)call->xvisor_arg_pg.pa, call->xvisor_arg_pg.va);
+ 
+     if (optee_copy_std_request(vcpu->guest, call, (physical_addr_t)gpa) != VMM_OK) {
++        OPTEE_DBG("std_call copy_std_request failed");
+         optee_destroy_call(ctx, call);
+         cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_EBADADDR);
+         return;
+     }
++    OPTEE_DBG("std_call copy_std_request ok cmd=%u num_params=%u",
++              call->arg->cmd, call->arg->num_params);
+ 
+     u32 arg_sz = OPTEE_MSG_GET_ARG_SIZE(call->arg->num_params);
+     if (arg_sz > OPTEE_PAGE_SIZE) {
++        OPTEE_DBG("std_call arg_sz too large: %u", arg_sz);
+         optee_destroy_call(ctx, call);
+         cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_EBADADDR);
+         return;
+     }
+ 
+     if (optee_translate_params(ctx, vcpu->guest, call->arg) != VMM_OK) {
++        OPTEE_DBG("std_call translate_params failed");
+         call->arg->ret = TEEC_ERROR_COMMUNICATION;
+         call->arg->ret_origin = TEEC_ORIGIN_COMMS;
+         optee_copy_std_response_back(vcpu->guest, call);
+@@ -576,6 +694,8 @@ static void optee_handle_std_call(struct optee_ctx *ctx,
+     u64_to_regpair(call->xvisor_arg_pg.pa, &lo, &hi);
+ 
++    OPTEE_DBG("std_call calling secure world shadow_arg_pa=%#llx", (unsigned long long)call->xvisor_arg_pg.pa);
++
+     optee_do_call_with_arg(ctx, vcpu, regs, call,
+                            OPTEE_SMC_CALL_WITH_ARG,
+                            (unsigned long)lo, (unsigned long)hi,
