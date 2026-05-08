@@ -1,0 +1,1544 @@
+下面按你的新要求重写 vmm_notifier.c：
+	1.	每个函数独立设计用例，包括 4 个 static 核心函数：
+notifier_chain_register、notifier_chain_cond_register、notifier_chain_unregister、notifier_call_chain。
+	2.	不再通过外层接口间接覆盖 static 函数。
+例如不再用 vmm_atomic_notifier_register() 的用例去覆盖 notifier_chain_register()。
+	3.	外层 atomic / blocking / raw 接口各自只做最小覆盖，验证它们能正确调用核心逻辑、锁/信号量封装路径能正常执行即可。
+	4.	每个用例都给出：
+	•	具体构造方法，包括 Value User Code 怎么写；
+	•	用例注释，可整体复制到用例注释栏。
+
+⸻
+
+0. 公共 User Code 准备
+
+0.1 User Globals
+
+放到：
+
+Environment User Code -> User Globals
+
+unsigned int vcast_nb_call_count;
+unsigned int vcast_nb_order[8];
+unsigned long vcast_nb_val_seen[8];
+void *vcast_nb_arg_seen[8];
+struct vmm_notifier_block *vcast_nb_block_seen[8];
+
+int vcast_nb_ret1;
+int vcast_nb_ret2;
+int vcast_nb_ret3;
+
+
+⸻
+
+0.2 Test Case Init
+
+放到：
+
+Environment User Code -> User Code -> Test Case Init
+
+unsigned int vcast_i;
+
+vcast_nb_call_count = 0U;
+
+for (vcast_i = 0U; vcast_i < 8U; ++vcast_i) {
+    vcast_nb_order[vcast_i] = 0U;
+    vcast_nb_val_seen[vcast_i] = 0UL;
+    vcast_nb_arg_seen[vcast_i] = 0;
+    vcast_nb_block_seen[vcast_i] = 0;
+}
+
+vcast_nb_ret1 = 0;
+vcast_nb_ret2 = 0;
+vcast_nb_ret3 = 0;
+
+如果你环境中 NOTIFY_DONE 可见，也可以把最后三行改成：
+
+vcast_nb_ret1 = NOTIFY_DONE;
+vcast_nb_ret2 = NOTIFY_DONE;
+vcast_nb_ret3 = NOTIFY_DONE;
+
+但用 0 更稳。
+
+⸻
+
+0.3 Prefix User Code
+
+你前面验证过：放在 Prefix 里可以正常编译。
+把下面内容放到你当前可用的 Prefix User Code 位置。
+
+#include <vmm_notifier.h>
+
+extern unsigned int vcast_nb_call_count;
+extern unsigned int vcast_nb_order[8];
+extern unsigned long vcast_nb_val_seen[8];
+extern void *vcast_nb_arg_seen[8];
+extern struct vmm_notifier_block *vcast_nb_block_seen[8];
+
+extern int vcast_nb_ret1;
+extern int vcast_nb_ret2;
+extern int vcast_nb_ret3;
+
+static int vcast_nb_cb1(struct vmm_notifier_block *nb,
+                        unsigned long val,
+                        void *v)
+{
+    unsigned int idx;
+
+    idx = vcast_nb_call_count;
+
+    if (idx < 8U) {
+        vcast_nb_order[idx] = 1U;
+        vcast_nb_val_seen[idx] = val;
+        vcast_nb_arg_seen[idx] = v;
+        vcast_nb_block_seen[idx] = nb;
+    }
+
+    vcast_nb_call_count++;
+
+    return vcast_nb_ret1;
+}
+
+static int vcast_nb_cb2(struct vmm_notifier_block *nb,
+                        unsigned long val,
+                        void *v)
+{
+    unsigned int idx;
+
+    idx = vcast_nb_call_count;
+
+    if (idx < 8U) {
+        vcast_nb_order[idx] = 2U;
+        vcast_nb_val_seen[idx] = val;
+        vcast_nb_arg_seen[idx] = v;
+        vcast_nb_block_seen[idx] = nb;
+    }
+
+    vcast_nb_call_count++;
+
+    return vcast_nb_ret2;
+}
+
+static int vcast_nb_cb3(struct vmm_notifier_block *nb,
+                        unsigned long val,
+                        void *v)
+{
+    unsigned int idx;
+
+    idx = vcast_nb_call_count;
+
+    if (idx < 8U) {
+        vcast_nb_order[idx] = 3U;
+        vcast_nb_val_seen[idx] = val;
+        vcast_nb_arg_seen[idx] = v;
+        vcast_nb_block_seen[idx] = nb;
+    }
+
+    vcast_nb_call_count++;
+
+    return vcast_nb_ret3;
+}
+
+后续所有 Value User Code 只引用：
+
+vcast_nb_cb1
+vcast_nb_cb2
+vcast_nb_cb3
+
+不要再定义这些函数。
+
+⸻
+
+1. notifier_chain_register
+
+源码：
+
+static int notifier_chain_register(struct vmm_notifier_block **nl,
+                   struct vmm_notifier_block *n)
+{
+    while ((*nl) != NULL) {
+        if (n->priority > (*nl)->priority)
+            break;
+        nl = &((*nl)->next);
+    }
+    n->next = *nl;
+    *nl = n;
+    return VMM_OK;
+}
+
+需要覆盖：
+	•	空链表；
+	•	新节点优先级高于头节点，插入头部；
+	•	新节点优先级低于已有节点，插入尾部；
+	•	新节点优先级介于两个节点之间，插入中间；
+	•	if (n->priority > (*nl)->priority) 的 true / false；
+	•	while ((*nl) != NULL) 的 true / false。
+
+⸻
+
+用例名称：notifier_chain_register.001.R
+
+具体构造方法
+
+nl 或 n 的 Value User Code 中构造：
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_new;
+
+head = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb1;
+nb_new.next = 0;
+
+<<vmm_notifier.notifier_chain_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证通知链为空时，注册函数能够将新 notifier block 设置为链表头。
+用例类别：基于需求的测试
+预置条件：构造空通知链头指针，构造一个有效 notifier block。
+测试步骤：step1、构造空通知链；step2、构造优先级为 10 的 notifier block；step3、调用 notifier_chain_register；step4、观察链表头和新节点后继指针。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_register
+等价列表：通知链为空，新节点有效。
+其它说明：本用例覆盖 while 条件初始为 false 的路径。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block，新 notifier block 的 next 为空。
+
+⸻
+
+用例名称：notifier_chain_register.002.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_old;
+static struct vmm_notifier_block nb_new;
+
+nb_old.priority = 5;
+nb_old.notifier_call = vcast_nb_cb1;
+nb_old.next = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb2;
+nb_new.next = 0;
+
+head = &nb_old;
+
+<<vmm_notifier.notifier_chain_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证新 notifier block 优先级高于当前链表头时，注册函数能够将新节点插入到链表头部。
+用例类别：基于需求的测试
+预置条件：通知链已有一个低优先级节点，新注册节点优先级更高。
+测试步骤：step1、构造包含一个低优先级节点的通知链；step2、构造高优先级新节点；step3、调用 notifier_chain_register；step4、观察注册后的链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_register
+等价列表：通知链非空，新节点优先级高于链表头。
+其它说明：本用例覆盖 while 为 true 且优先级比较分支为 true 的路径。
+通过准则：函数返回 VMM_OK，链表头变为新 notifier block，新节点的 next 指向原链表头。
+
+⸻
+
+用例名称：notifier_chain_register.003.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_old;
+static struct vmm_notifier_block nb_new;
+
+nb_old.priority = 10;
+nb_old.notifier_call = vcast_nb_cb1;
+nb_old.next = 0;
+
+nb_new.priority = 5;
+nb_new.notifier_call = vcast_nb_cb2;
+nb_new.next = 0;
+
+head = &nb_old;
+
+<<vmm_notifier.notifier_chain_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证新 notifier block 优先级低于已有节点时，注册函数能够遍历到链表尾部并将新节点追加到尾部。
+用例类别：基于需求的测试
+预置条件：通知链已有一个高优先级节点，新注册节点优先级更低。
+测试步骤：step1、构造包含一个高优先级节点的通知链；step2、构造低优先级新节点；step3、调用 notifier_chain_register；step4、观察注册后的链表尾部关系。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_register
+等价列表：通知链非空，新节点优先级低于已有节点。
+其它说明：本用例覆盖优先级比较分支为 false 后继续遍历，最终插入链表尾部的路径。
+通过准则：函数返回 VMM_OK，链表头保持为原节点，原节点的 next 指向新节点，新节点的 next 为空。
+
+⸻
+
+用例名称：notifier_chain_register.004.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_high;
+static struct vmm_notifier_block nb_low;
+static struct vmm_notifier_block nb_new;
+
+nb_high.priority = 20;
+nb_high.notifier_call = vcast_nb_cb1;
+nb_high.next = &nb_low;
+
+nb_low.priority = 5;
+nb_low.notifier_call = vcast_nb_cb2;
+nb_low.next = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb3;
+nb_new.next = 0;
+
+head = &nb_high;
+
+<<vmm_notifier.notifier_chain_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证新 notifier block 优先级处于两个已有节点之间时，注册函数能够将新节点插入到中间位置。
+用例类别：基于需求的测试
+预置条件：通知链已有两个节点，优先级分别高于和低于新节点。
+测试步骤：step1、构造包含高优先级节点和低优先级节点的通知链；step2、构造中间优先级新节点；step3、调用 notifier_chain_register；step4、观察注册后的链表中间插入关系。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_register
+等价列表：通知链包含多个节点，新节点优先级位于已有节点之间。
+其它说明：本用例覆盖先比较失败并继续遍历、随后比较成功并插入中间位置的路径。
+通过准则：函数返回 VMM_OK，链表顺序为高优先级节点、新节点、低优先级节点。
+
+⸻
+
+2. notifier_chain_cond_register
+
+源码：
+
+static int notifier_chain_cond_register(struct vmm_notifier_block **nl,
+                    struct vmm_notifier_block *n)
+{
+    while ((*nl) != NULL) {
+        if ((*nl) == n)
+            return VMM_OK;
+        if (n->priority > (*nl)->priority)
+            break;
+        nl = &((*nl)->next);
+    }
+    n->next = *nl;
+    *nl = n;
+    return VMM_OK;
+}
+
+需要覆盖：
+	•	空链表插入；
+	•	已存在于头节点，直接返回；
+	•	已存在于后续节点，遍历后直接返回；
+	•	优先级高于当前节点，break 插入；
+	•	优先级低于已有节点，尾部插入；
+	•	中间插入。
+
+⸻
+
+用例名称：notifier_chain_cond_register.001.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_new;
+
+head = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb1;
+nb_new.next = 0;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证条件注册函数在通知链为空时能够注册新 notifier block。
+用例类别：基于需求的测试
+预置条件：通知链为空，新 notifier block 有效且未注册。
+测试步骤：step1、构造空通知链；step2、构造有效 notifier block；step3、调用 notifier_chain_cond_register；step4、观察链表头和新节点后继指针。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：通知链为空，新节点未注册。
+其它说明：本用例覆盖 while 条件初始为 false 的插入路径。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block，新节点的 next 为空。
+
+⸻
+
+用例名称：notifier_chain_cond_register.002.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_exist;
+
+nb_exist.priority = 10;
+nb_exist.notifier_call = vcast_nb_cb1;
+nb_exist.next = 0;
+
+head = &nb_exist;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_exist;
+
+用例注释
+
+测试目的：验证条件注册函数在待注册节点已经是链表头时能够直接返回，不重复插入。
+用例类别：基于需求的测试
+预置条件：通知链头节点就是待注册 notifier block。
+测试步骤：step1、构造包含目标节点的通知链；step2、将同一节点作为待注册入参；step3、调用 notifier_chain_cond_register；step4、观察链表是否保持不变。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：待注册节点已存在于链表头部。
+其它说明：本用例覆盖 (*nl) == n 为 true 的直接返回路径。
+通过准则：函数返回 VMM_OK，链表头仍为原节点，原节点的 next 仍为空，链表中没有重复节点。
+
+⸻
+
+用例名称：notifier_chain_cond_register.003.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_first;
+static struct vmm_notifier_block nb_exist;
+
+nb_first.priority = 20;
+nb_first.notifier_call = vcast_nb_cb1;
+nb_first.next = &nb_exist;
+
+nb_exist.priority = 10;
+nb_exist.notifier_call = vcast_nb_cb2;
+nb_exist.next = 0;
+
+head = &nb_first;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_exist;
+
+用例注释
+
+测试目的：验证条件注册函数在待注册节点已经位于链表后续位置时能够遍历后直接返回，不重复插入。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，待注册节点为第二个节点。
+测试步骤：step1、构造包含两个节点的通知链；step2、将第二个节点作为待注册入参；step3、调用 notifier_chain_cond_register；step4、观察链表是否保持原有结构。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：待注册节点已存在于链表非头部位置。
+其它说明：本用例覆盖先遍历后命中重复节点的路径。
+通过准则：函数返回 VMM_OK，链表顺序保持不变，链表中目标节点只出现一次。
+
+⸻
+
+用例名称：notifier_chain_cond_register.004.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_old;
+static struct vmm_notifier_block nb_new;
+
+nb_old.priority = 5;
+nb_old.notifier_call = vcast_nb_cb1;
+nb_old.next = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb2;
+nb_new.next = 0;
+
+head = &nb_old;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证条件注册函数在新节点优先级高于链表头时，能够将新节点插入到头部。
+用例类别：基于需求的测试
+预置条件：通知链已有一个低优先级节点，新节点未注册且优先级更高。
+测试步骤：step1、构造包含低优先级节点的通知链；step2、构造高优先级新节点；step3、调用 notifier_chain_cond_register；step4、观察注册后的链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：新节点未注册，优先级高于当前链表头。
+其它说明：本用例覆盖重复判断为 false 且优先级比较为 true 的插入路径。
+通过准则：函数返回 VMM_OK，链表头变为新节点，新节点的 next 指向原链表头。
+
+⸻
+
+用例名称：notifier_chain_cond_register.005.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_old;
+static struct vmm_notifier_block nb_new;
+
+nb_old.priority = 10;
+nb_old.notifier_call = vcast_nb_cb1;
+nb_old.next = 0;
+
+nb_new.priority = 5;
+nb_new.notifier_call = vcast_nb_cb2;
+nb_new.next = 0;
+
+head = &nb_old;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证条件注册函数在新节点优先级低于已有节点时，能够将新节点追加到链表尾部。
+用例类别：基于需求的测试
+预置条件：通知链已有一个高优先级节点，新节点未注册且优先级更低。
+测试步骤：step1、构造包含高优先级节点的通知链；step2、构造低优先级新节点；step3、调用 notifier_chain_cond_register；step4、观察链表尾部插入关系。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：新节点未注册，优先级低于已有节点。
+其它说明：本用例覆盖遍历到链表尾部后插入的路径。
+通过准则：函数返回 VMM_OK，原链表头保持不变，原节点的 next 指向新节点，新节点的 next 为空。
+
+⸻
+
+用例名称：notifier_chain_cond_register.006.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_high;
+static struct vmm_notifier_block nb_low;
+static struct vmm_notifier_block nb_new;
+
+nb_high.priority = 20;
+nb_high.notifier_call = vcast_nb_cb1;
+nb_high.next = &nb_low;
+
+nb_low.priority = 5;
+nb_low.notifier_call = vcast_nb_cb2;
+nb_low.next = 0;
+
+nb_new.priority = 10;
+nb_new.notifier_call = vcast_nb_cb3;
+nb_new.next = 0;
+
+head = &nb_high;
+
+<<vmm_notifier.notifier_chain_cond_register.nl>> = &head;
+<<vmm_notifier.notifier_chain_cond_register.n>> = &nb_new;
+
+用例注释
+
+测试目的：验证条件注册函数在新节点优先级位于已有两个节点之间时，能够将新节点插入到中间位置。
+用例类别：基于需求的测试
+预置条件：通知链已有高优先级节点和低优先级节点，新节点未注册且优先级位于二者之间。
+测试步骤：step1、构造包含两个节点的通知链；step2、构造中间优先级的新节点；step3、调用 notifier_chain_cond_register；step4、观察链表中间插入关系。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_cond_register
+等价列表：新节点未注册，优先级位于已有节点之间。
+其它说明：本用例覆盖遍历过程中先比较失败，随后优先级比较成功并插入中间的路径。
+通过准则：函数返回 VMM_OK，链表顺序为高优先级节点、新节点、低优先级节点。
+
+⸻
+
+3. notifier_chain_unregister
+
+源码：
+
+static int notifier_chain_unregister(struct vmm_notifier_block **nl,
+                     struct vmm_notifier_block *n)
+{
+    while ((*nl) != NULL) {
+        if ((*nl) == n) {
+            *nl = n->next;
+            return VMM_OK;
+        }
+        nl = &((*nl)->next);
+    }
+    return VMM_ENOENT;
+}
+
+需要覆盖：
+	•	删除头节点；
+	•	删除非头节点；
+	•	非空链表找不到；
+	•	空链表找不到。
+
+⸻
+
+用例名称：notifier_chain_unregister.001.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 5;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = 0;
+
+head = &nb1;
+
+<<vmm_notifier.notifier_chain_unregister.nl>> = &head;
+<<vmm_notifier.notifier_chain_unregister.n>> = &nb1;
+
+用例注释
+
+测试目的：验证注销函数能够删除链表头部的 notifier block。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，待注销节点为链表头。
+测试步骤：step1、构造包含两个节点的通知链；step2、将链表头节点作为注销对象；step3、调用 notifier_chain_unregister；step4、观察函数返回值和链表头变化。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_unregister
+等价列表：通知链非空，待注销节点位于链表头。
+其它说明：本用例覆盖首次比较即命中注销对象的路径。
+通过准则：函数返回 VMM_OK，链表头更新为原第二个节点。
+
+⸻
+
+用例名称：notifier_chain_unregister.002.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+static struct vmm_notifier_block nb3;
+
+nb1.priority = 30;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 20;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = &nb3;
+
+nb3.priority = 10;
+nb3.notifier_call = vcast_nb_cb3;
+nb3.next = 0;
+
+head = &nb1;
+
+<<vmm_notifier.notifier_chain_unregister.nl>> = &head;
+<<vmm_notifier.notifier_chain_unregister.n>> = &nb2;
+
+用例注释
+
+测试目的：验证注销函数能够删除链表中间的 notifier block，并正确连接前后节点。
+用例类别：基于需求的测试
+预置条件：通知链包含三个节点，待注销节点位于链表中间。
+测试步骤：step1、构造包含三个节点的通知链；step2、将中间节点作为注销对象；step3、调用 notifier_chain_unregister；step4、观察链表前后节点连接关系。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_chain_unregister
+等价列表：通知链非空，待注销节点位于非头部位置。
+其它说明：本用例覆盖遍历后命中注销对象的路径。
+通过准则：函数返回 VMM_OK，链表头保持不变，首节点的 next 指向第三个节点。
+
+⸻
+
+用例名称：notifier_chain_unregister.003.IN.n.NEC
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb_missing;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nb_missing.priority = 5;
+nb_missing.notifier_call = vcast_nb_cb2;
+nb_missing.next = 0;
+
+head = &nb1;
+
+<<vmm_notifier.notifier_chain_unregister.nl>> = &head;
+<<vmm_notifier.notifier_chain_unregister.n>> = &nb_missing;
+
+用例注释
+
+测试目的：验证注销对象不在非空通知链中时，注销函数返回未找到错误。
+用例类别：接口测试
+预置条件：通知链非空，待注销 notifier block 未注册到链表中。
+测试步骤：step1、构造包含一个节点的通知链；step2、构造未注册的 notifier block 作为注销对象；step3、调用 notifier_chain_unregister；step4、观察函数返回值和链表结构。
+用例来源：无效等价类
+追溯ID：notifier_chain_unregister
+等价列表：通知链有效但注销对象不存在。
+其它说明：本用例覆盖非空链表遍历结束仍未找到目标节点的路径。
+通过准则：函数返回 VMM_ENOENT，链表结构保持不变。
+
+⸻
+
+用例名称：notifier_chain_unregister.004.IN.n.NEC
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb_missing;
+
+head = 0;
+
+nb_missing.priority = 5;
+nb_missing.notifier_call = vcast_nb_cb1;
+nb_missing.next = 0;
+
+<<vmm_notifier.notifier_chain_unregister.nl>> = &head;
+<<vmm_notifier.notifier_chain_unregister.n>> = &nb_missing;
+
+用例注释
+
+测试目的：验证通知链为空时，注销函数返回未找到错误。
+用例类别：接口测试
+预置条件：通知链为空，注销对象为有效 notifier block。
+测试步骤：step1、构造空通知链；step2、构造有效但未注册的 notifier block；step3、调用 notifier_chain_unregister；step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：notifier_chain_unregister
+等价列表：通知链为空，注销对象不存在。
+其它说明：本用例覆盖 while 条件初始为 false 后返回未找到的路径。
+通过准则：函数返回 VMM_ENOENT，链表头仍为空。
+
+⸻
+
+4. notifier_call_chain
+
+源码：
+
+static int notifier_call_chain(struct vmm_notifier_block **nl,
+                unsigned long val, void *v,
+                int nr_to_call, int *nr_calls)
+{
+    int ret = NOTIFY_DONE;
+    struct vmm_notifier_block *nb, *next_nb;
+    nb = *nl;
+    while (nb && nr_to_call) {
+        next_nb = nb->next;
+        ret = nb->notifier_call(nb, val, v);
+        if (nr_calls)
+            (*nr_calls)++;
+        if ((ret & NOTIFY_STOP_MASK) == NOTIFY_STOP_MASK)
+            break;
+        nb = next_nb;
+        nr_to_call--;
+    }
+    return ret;
+}
+
+需要覆盖：
+	•	空链表；
+	•	nr_to_call == 0；
+	•	全量调用多个节点；
+	•	nr_calls == NULL；
+	•	stop mask 中断；
+	•	nr_to_call 限制只调用一个节点。
+
+⸻
+
+用例名称：notifier_call_chain.001.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static int nr_calls_obj;
+static int payload;
+
+head = 0;
+nr_calls_obj = 0;
+payload = 0x55;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = -1;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证通知链为空时，调用函数不执行任何回调并返回默认通知结果。
+用例类别：基于需求的测试
+预置条件：通知链为空，调用计数参数有效。
+测试步骤：step1、构造空通知链；step2、构造有效调用计数输出参数；step3、调用 notifier_call_chain；step4、观察函数返回值、调用计数和回调记录。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_call_chain
+等价列表：通知链为空，调用数量不限制。
+其它说明：本用例覆盖 while 条件中链表节点为空的路径。
+通过准则：函数返回 NOTIFY_DONE，调用计数保持为 0，没有任何测试回调被调用。
+
+⸻
+
+用例名称：notifier_call_chain.002.IN.nr_to_call.RA.L
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+head = &nb1;
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = 0;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证调用数量限制为 0 时，即使通知链非空也不会调用任何 notifier 回调。
+用例类别：边界值分析
+预置条件：通知链包含一个有效节点，调用数量限制设置为 0。
+测试步骤：step1、构造包含一个节点的通知链；step2、设置调用数量限制为 0；step3、调用 notifier_call_chain；step4、观察函数返回值、调用计数和回调记录。
+用例来源：边界值分析
+追溯ID：notifier_call_chain
+等价列表：通知链非空，调用数量限制为下边界 0。
+其它说明：本用例覆盖 while 条件中 nr_to_call 为 0 的路径。
+通过准则：函数返回 NOTIFY_DONE，调用计数保持为 0，测试回调未被调用。
+
+⸻
+
+用例名称：notifier_call_chain.003.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 5;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = 0;
+
+head = &nb1;
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+vcast_nb_ret2 = 0x22;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = -1;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证通知链调用函数能够按链表顺序调用全部 notifier block，并返回最后一次回调结果。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，两个回调均不返回停止标志，调用计数参数有效。
+测试步骤：step1、构造包含两个节点的通知链；step2、设置两个测试回调的返回值；step3、调用 notifier_call_chain 并允许全量调用；step4、观察回调调用顺序、调用计数、入参记录和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_call_chain
+等价列表：通知链非空，包含多个节点，未触发停止条件。
+其它说明：本用例覆盖正常多节点遍历路径和 nr_calls 非空计数路径。
+通过准则：两个回调均被调用，调用顺序为第一个节点后第二个节点，调用计数为 2，函数返回第二个回调返回值。
+
+⸻
+
+用例名称：notifier_call_chain.004.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 5;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = 0;
+
+head = &nb1;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+vcast_nb_ret2 = 0x22;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = -1;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = NULL;
+
+用例注释
+
+测试目的：验证调用计数参数为空时，通知链调用函数仍能够正常调用全部 notifier block。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，调用计数参数为空，两个回调均不返回停止标志。
+测试步骤：step1、构造包含两个节点的通知链；step2、将调用计数参数设置为空；step3、调用 notifier_call_chain；step4、观察回调调用顺序和函数返回值。
+用例来源：有效等价类
+追溯ID：notifier_call_chain
+等价列表：通知链非空，调用计数输出参数为空。
+其它说明：本用例覆盖 nr_calls 为空时不执行计数递增的路径。
+通过准则：两个回调均被调用，调用顺序正确，函数返回第二个回调返回值，执行过程中不访问空调用计数指针。
+
+⸻
+
+用例名称：notifier_call_chain.005.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 5;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = 0;
+
+head = &nb1;
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = NOTIFY_STOP_MASK;
+vcast_nb_ret2 = 0x22;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = -1;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证 notifier 回调返回停止标志时，通知链调用函数能够停止后续节点调用。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，第一个回调返回包含停止标志的结果。
+测试步骤：step1、构造包含两个节点的通知链；step2、设置第一个回调返回停止类通知结果；step3、调用 notifier_call_chain；step4、观察回调调用数量、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：notifier_call_chain
+等价列表：通知链非空，首个回调返回停止标志。
+其它说明：本用例覆盖停止标志判断为 true 并中断遍历的路径。
+通过准则：仅第一个回调被调用，第二个回调未被调用，调用计数为 1，函数返回第一个回调的停止类返回值。
+
+⸻
+
+用例名称：notifier_call_chain.006.R
+
+具体构造方法
+
+static struct vmm_notifier_block *head;
+static struct vmm_notifier_block nb1;
+static struct vmm_notifier_block nb2;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = &nb2;
+
+nb2.priority = 5;
+nb2.notifier_call = vcast_nb_cb2;
+nb2.next = 0;
+
+head = &nb1;
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+vcast_nb_ret2 = 0x22;
+
+<<vmm_notifier.notifier_call_chain.nl>> = &head;
+<<vmm_notifier.notifier_call_chain.val>> = 0x1234UL;
+<<vmm_notifier.notifier_call_chain.v>> = &payload;
+<<vmm_notifier.notifier_call_chain.nr_to_call>> = 1;
+<<vmm_notifier.notifier_call_chain.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证调用数量限制为 1 时，通知链调用函数仅调用第一个 notifier block。
+用例类别：基于需求的测试
+预置条件：通知链包含两个节点，调用数量限制设置为 1。
+测试步骤：step1、构造包含两个节点的通知链；step2、设置调用数量限制为 1；step3、调用 notifier_call_chain；step4、观察回调调用数量、调用计数和函数返回值。
+用例来源：有效等价类
+追溯ID：notifier_call_chain
+等价列表：通知链非空，调用数量限制为 1。
+其它说明：本用例覆盖 nr_to_call 限制正常生效的路径。
+通过准则：仅第一个回调被调用，调用计数为 1，函数返回第一个回调返回值。
+
+⸻
+
+5. 外层接口最小独立覆盖
+
+下面这些外层函数不再用于覆盖 static 核心函数，只各自做一条或少量用例，验证自身封装路径、锁/信号量调用以及入参透传。
+
+⸻
+
+5.1 vmm_atomic_notifier_register
+
+用例名称：vmm_atomic_notifier_register.001.R
+
+具体构造方法
+
+static struct vmm_atomic_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nc_obj.head = 0;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+<<vmm_notifier.vmm_atomic_notifier_register.nc>> = &nc_obj;
+<<vmm_notifier.vmm_atomic_notifier_register.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 atomic notifier 注册接口能够在锁保护下完成一次 notifier block 注册。
+用例类别：基于需求的测试
+预置条件：构造空 atomic notifier chain 和有效 notifier block，自旋锁接口采用无副作用测试实现。
+测试步骤：step1、构造空 atomic notifier chain；step2、构造有效 notifier block；step3、调用 vmm_atomic_notifier_register；step4、观察函数返回值、链表头和自旋锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_register
+等价列表：atomic notifier chain 有效，notifier block 有效。
+其它说明：本用例仅用于覆盖 atomic 注册接口自身封装路径，核心注册算法由 notifier_chain_register 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block，自旋锁加锁和解锁接口各执行一次。
+
+⸻
+
+5.2 vmm_atomic_notifier_unregister
+
+用例名称：vmm_atomic_notifier_unregister.001.R
+
+具体构造方法
+
+static struct vmm_atomic_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+<<vmm_notifier.vmm_atomic_notifier_unregister.nc>> = &nc_obj;
+<<vmm_notifier.vmm_atomic_notifier_unregister.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 atomic notifier 注销接口能够在锁保护下完成一次已注册节点注销。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 atomic notifier chain，自旋锁接口采用无副作用测试实现。
+测试步骤：step1、构造包含一个 notifier block 的 atomic notifier chain；step2、将该节点作为注销对象；step3、调用 vmm_atomic_notifier_unregister；step4、观察函数返回值、链表头和自旋锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_unregister
+等价列表：atomic notifier chain 有效，注销对象已注册。
+其它说明：本用例仅用于覆盖 atomic 注销接口自身封装路径，核心注销算法由 notifier_chain_unregister 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头变为空，自旋锁加锁和解锁接口各执行一次。
+
+⸻
+
+5.3 __vmm_atomic_notifier_call
+
+用例名称：__vmm_atomic_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_atomic_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.__vmm_atomic_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.__vmm_atomic_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.__vmm_atomic_notifier_call.v>> = &payload;
+<<vmm_notifier.__vmm_atomic_notifier_call.nr_to_call>> = -1;
+<<vmm_notifier.__vmm_atomic_notifier_call.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证 atomic notifier 内部调用接口能够在锁保护下调用 notifier chain，并透传调用参数。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 atomic notifier chain，调用计数参数有效，自旋锁接口采用无副作用测试实现。
+测试步骤：step1、构造包含一个 notifier block 的 atomic notifier chain；step2、设置回调返回值和调用参数；step3、调用 __vmm_atomic_notifier_call；step4、观察函数返回值、回调记录、调用计数和自旋锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_atomic_notifier_call
+等价列表：atomic notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖 atomic 调用接口自身的锁保护和参数透传路径，通知链遍历算法由 notifier_call_chain 独立用例覆盖。
+通过准则：函数返回回调函数的返回值，回调被调用一次，调用计数为 1，自旋锁加锁和解锁接口各执行一次。
+
+⸻
+
+5.4 vmm_atomic_notifier_call
+
+用例名称：vmm_atomic_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_atomic_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.vmm_atomic_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.vmm_atomic_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.vmm_atomic_notifier_call.v>> = &payload;
+
+用例注释
+
+测试目的：验证 atomic notifier 简化调用接口能够以不限调用数量的方式调用通知链。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 atomic notifier chain，自旋锁接口采用无副作用测试实现。
+测试步骤：step1、构造包含一个 notifier block 的 atomic notifier chain；step2、设置回调返回值和调用参数；step3、调用 vmm_atomic_notifier_call；step4、观察函数返回值和回调记录。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_call
+等价列表：atomic notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖简化接口向内部调用接口传递不限调用数量和空调用计数参数的路径。
+通过准则：函数返回回调函数的返回值，回调被调用一次，回调收到的通知值和数据指针与测试输入一致。
+
+⸻
+
+5.5 vmm_blocking_notifier_register
+
+用例名称：vmm_blocking_notifier_register.001.R
+
+具体构造方法
+
+static struct vmm_blocking_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nc_obj.head = 0;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+<<vmm_notifier.vmm_blocking_notifier_register.nc>> = &nc_obj;
+<<vmm_notifier.vmm_blocking_notifier_register.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 blocking notifier 注册接口能够在信号量保护下完成一次 notifier block 注册。
+用例类别：基于需求的测试
+预置条件：构造空 blocking notifier chain 和有效 notifier block，信号量 down 和 up 接口采用无副作用记录型桩函数。
+测试步骤：step1、构造空 blocking notifier chain；step2、构造有效 notifier block；step3、调用 vmm_blocking_notifier_register；step4、观察函数返回值、链表头和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_register
+等价列表：blocking notifier chain 有效，notifier block 有效。
+其它说明：本用例仅用于覆盖 blocking 注册接口自身封装路径，核心注册算法由 notifier_chain_register 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block，信号量 down 和 up 接口各执行一次。
+
+⸻
+
+5.6 vmm_blocking_notifier_cond_register
+
+用例名称：vmm_blocking_notifier_cond_register.001.R
+
+具体构造方法
+
+static struct vmm_blocking_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nc_obj.head = 0;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+<<vmm_notifier.vmm_blocking_notifier_cond_register.nc>> = &nc_obj;
+<<vmm_notifier.vmm_blocking_notifier_cond_register.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 blocking notifier 条件注册接口能够在信号量保护下完成一次未注册节点的注册。
+用例类别：基于需求的测试
+预置条件：构造空 blocking notifier chain 和有效 notifier block，信号量接口采用无副作用记录型桩函数。
+测试步骤：step1、构造空 blocking notifier chain；step2、构造有效 notifier block；step3、调用 vmm_blocking_notifier_cond_register；step4、观察函数返回值、链表头和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_cond_register
+等价列表：blocking notifier chain 有效，notifier block 有效且未注册。
+其它说明：本用例仅用于覆盖 blocking 条件注册接口自身封装路径，条件注册算法由 notifier_chain_cond_register 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block，信号量 down 和 up 接口各执行一次。
+
+⸻
+
+5.7 vmm_blocking_notifier_unregister
+
+用例名称：vmm_blocking_notifier_unregister.001.R
+
+具体构造方法
+
+static struct vmm_blocking_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+<<vmm_notifier.vmm_blocking_notifier_unregister.nc>> = &nc_obj;
+<<vmm_notifier.vmm_blocking_notifier_unregister.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 blocking notifier 注销接口能够在信号量保护下完成一次已注册节点注销。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 blocking notifier chain，信号量接口采用无副作用记录型桩函数。
+测试步骤：step1、构造包含一个 notifier block 的 blocking notifier chain；step2、将该节点作为注销对象；step3、调用 vmm_blocking_notifier_unregister；step4、观察函数返回值、链表头和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_unregister
+等价列表：blocking notifier chain 有效，注销对象已注册。
+其它说明：本用例仅用于覆盖 blocking 注销接口自身封装路径，核心注销算法由 notifier_chain_unregister 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头变为空，信号量 down 和 up 接口各执行一次。
+
+⸻
+
+5.8 __vmm_blocking_notifier_call
+
+用例名称：__vmm_blocking_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_blocking_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.__vmm_blocking_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.__vmm_blocking_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.__vmm_blocking_notifier_call.v>> = &payload;
+<<vmm_notifier.__vmm_blocking_notifier_call.nr_to_call>> = -1;
+<<vmm_notifier.__vmm_blocking_notifier_call.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证 blocking notifier 内部调用接口能够在信号量保护下调用 notifier chain，并透传调用参数。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 blocking notifier chain，调用计数参数有效，信号量接口采用无副作用记录型桩函数。
+测试步骤：step1、构造包含一个 notifier block 的 blocking notifier chain；step2、设置回调返回值和调用参数；step3、调用 __vmm_blocking_notifier_call；step4、观察函数返回值、回调记录、调用计数和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_blocking_notifier_call
+等价列表：blocking notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖 blocking 调用接口自身的信号量保护和参数透传路径，通知链遍历算法由 notifier_call_chain 独立用例覆盖。
+通过准则：函数返回回调函数的返回值，回调被调用一次，调用计数为 1，信号量 down 和 up 接口各执行一次。
+
+⸻
+
+5.9 vmm_blocking_notifier_call
+
+用例名称：vmm_blocking_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_blocking_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.vmm_blocking_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.vmm_blocking_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.vmm_blocking_notifier_call.v>> = &payload;
+
+用例注释
+
+测试目的：验证 blocking notifier 简化调用接口能够以不限调用数量的方式调用通知链。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 blocking notifier chain，信号量接口采用无副作用记录型桩函数。
+测试步骤：step1、构造包含一个 notifier block 的 blocking notifier chain；step2、设置回调返回值和调用参数；step3、调用 vmm_blocking_notifier_call；step4、观察函数返回值和回调记录。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_call
+等价列表：blocking notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖简化接口向内部调用接口传递不限调用数量和空调用计数参数的路径。
+通过准则：函数返回回调函数的返回值，回调被调用一次，回调收到的通知值和数据指针与测试输入一致。
+
+⸻
+
+5.10 vmm_raw_notifier_register
+
+用例名称：vmm_raw_notifier_register.001.R
+
+具体构造方法
+
+static struct vmm_raw_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nc_obj.head = 0;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+<<vmm_notifier.vmm_raw_notifier_register.nc>> = &nc_obj;
+<<vmm_notifier.vmm_raw_notifier_register.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 raw notifier 注册接口能够完成一次 notifier block 注册。
+用例类别：基于需求的测试
+预置条件：构造空 raw notifier chain 和有效 notifier block。
+测试步骤：step1、构造空 raw notifier chain；step2、构造有效 notifier block；step3、调用 vmm_raw_notifier_register；step4、观察函数返回值和链表头。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_register
+等价列表：raw notifier chain 有效，notifier block 有效。
+其它说明：本用例仅用于覆盖 raw 注册接口自身封装路径，核心注册算法由 notifier_chain_register 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头指向新 notifier block。
+
+⸻
+
+5.11 vmm_raw_notifier_unregister
+
+用例名称：vmm_raw_notifier_unregister.001.R
+
+具体构造方法
+
+static struct vmm_raw_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+<<vmm_notifier.vmm_raw_notifier_unregister.nc>> = &nc_obj;
+<<vmm_notifier.vmm_raw_notifier_unregister.n>> = &nb1;
+
+用例注释
+
+测试目的：验证 raw notifier 注销接口能够完成一次已注册节点注销。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 raw notifier chain。
+测试步骤：step1、构造包含一个 notifier block 的 raw notifier chain；step2、将该节点作为注销对象；step3、调用 vmm_raw_notifier_unregister；step4、观察函数返回值和链表头。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_unregister
+等价列表：raw notifier chain 有效，注销对象已注册。
+其它说明：本用例仅用于覆盖 raw 注销接口自身封装路径，核心注销算法由 notifier_chain_unregister 独立用例覆盖。
+通过准则：函数返回 VMM_OK，链表头变为空。
+
+⸻
+
+5.12 __vmm_raw_notifier_call
+
+用例名称：__vmm_raw_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_raw_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int nr_calls_obj;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+nr_calls_obj = 0;
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.__vmm_raw_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.__vmm_raw_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.__vmm_raw_notifier_call.v>> = &payload;
+<<vmm_notifier.__vmm_raw_notifier_call.nr_to_call>> = -1;
+<<vmm_notifier.__vmm_raw_notifier_call.nr_calls>> = &nr_calls_obj;
+
+用例注释
+
+测试目的：验证 raw notifier 内部调用接口能够调用 notifier chain，并透传调用参数。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 raw notifier chain，调用计数参数有效。
+测试步骤：step1、构造包含一个 notifier block 的 raw notifier chain；step2、设置回调返回值和调用参数；step3、调用 __vmm_raw_notifier_call；step4、观察函数返回值、回调记录和调用计数。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖 raw 调用接口自身参数透传路径，通知链遍历算法由 notifier_call_chain 独立用例覆盖。
+通过准则：函数返回回调函数的返回值，回调被调用一次，调用计数为 1。
+
+⸻
+
+5.13 vmm_raw_notifier_call
+
+用例名称：vmm_raw_notifier_call.001.R
+
+具体构造方法
+
+static struct vmm_raw_notifier_chain nc_obj;
+static struct vmm_notifier_block nb1;
+static int payload;
+
+nb1.priority = 10;
+nb1.notifier_call = vcast_nb_cb1;
+nb1.next = 0;
+
+nc_obj.head = &nb1;
+
+payload = 0x55;
+
+vcast_nb_ret1 = 0x11;
+
+<<vmm_notifier.vmm_raw_notifier_call.nc>> = &nc_obj;
+<<vmm_notifier.vmm_raw_notifier_call.val>> = 0x1234UL;
+<<vmm_notifier.vmm_raw_notifier_call.v>> = &payload;
+
+用例注释
+
+测试目的：验证 raw notifier 简化调用接口能够以不限调用数量的方式调用通知链。
+用例类别：基于需求的测试
+预置条件：构造包含一个节点的 raw notifier chain。
+测试步骤：step1、构造包含一个 notifier block 的 raw notifier chain；step2、设置回调返回值和调用参数；step3、调用 vmm_raw_notifier_call；step4、观察函数返回值和回调记录。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表中存在一个可调用节点。
+其它说明：本用例仅用于覆盖简化接口向内部调用接口传递不限调用数量和空调用计数参数的路径。
+通过准则：函数返回回调函数的返回值，回调被调用一次，回调收到的通知值和数据指针与测试输入一致。
+
+⸻
+
+6. 最终用例清单
+
+建议按下面顺序建立：
+
+notifier_chain_register.001.R
+notifier_chain_register.002.R
+notifier_chain_register.003.R
+notifier_chain_register.004.R
+
+notifier_chain_cond_register.001.R
+notifier_chain_cond_register.002.R
+notifier_chain_cond_register.003.R
+notifier_chain_cond_register.004.R
+notifier_chain_cond_register.005.R
+notifier_chain_cond_register.006.R
+
+notifier_chain_unregister.001.R
+notifier_chain_unregister.002.R
+notifier_chain_unregister.003.IN.n.NEC
+notifier_chain_unregister.004.IN.n.NEC
+
+notifier_call_chain.001.R
+notifier_call_chain.002.IN.nr_to_call.RA.L
+notifier_call_chain.003.R
+notifier_call_chain.004.R
+notifier_call_chain.005.R
+notifier_call_chain.006.R
+
+vmm_atomic_notifier_register.001.R
+vmm_atomic_notifier_unregister.001.R
+__vmm_atomic_notifier_call.001.R
+vmm_atomic_notifier_call.001.R
+
+vmm_blocking_notifier_register.001.R
+vmm_blocking_notifier_cond_register.001.R
+vmm_blocking_notifier_unregister.001.R
+__vmm_blocking_notifier_call.001.R
+vmm_blocking_notifier_call.001.R
+
+vmm_raw_notifier_register.001.R
+vmm_raw_notifier_unregister.001.R
+__vmm_raw_notifier_call.001.R
+vmm_raw_notifier_call.001.R
+
+这套用例的覆盖口径是：
+
+static 核心函数：按分支完整覆盖。
+atomic/blocking/raw 外层接口：独立最小覆盖自身封装路径。
+
+
+⸻
+
+7. 注意事项
+
+不要构造：
+
+nc == NULL
+n == NULL
+nl == NULL
+notifier_call == NULL
+
+因为当前代码没有对此做防御。它们会导致空指针访问，不是可控错误返回路径。
+
+如果要测试同优先级插入顺序，可以额外增加一条：
+
+notifier_chain_register.005.R
+
+构造已有节点和新节点优先级相同，期望新节点追加到已有同优先级节点之后。当前源码判断条件是：
+
+if (n->priority > (*nl)->priority)
+
+所以同优先级不会插到已有节点前面。
