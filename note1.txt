@@ -1,0 +1,974 @@
+下面按同样格式给出 vmm_mutex.c 和 vmm_notifier.c 的单元测试设计。测试步骤和通过准则都采用可直接复制的文字描述，不放代码块。
+
+⸻
+
+一、vmm_mutex.c 单元测试设计
+
+1. 公共测试前置建议
+
+vmm_mutex.c 涉及 VCPU 当前上下文、等待队列、资源挂接、锁和断言。建议测试环境中按以下方式处理外部依赖：
+
+vmm_scheduler_current_vcpu 作为桩函数，按用例返回当前 VCPU 对象。
+vmm_scheduler_orphan_context 和 vmm_scheduler_irq_context 作为桩函数，按正常路径设置为允许当前接口执行的返回值。
+vmm_manager_vcpu_resource_add 和 vmm_manager_vcpu_resource_remove 作为记录型桩函数，用于检查资源是否被添加或移除。
+__vmm_waitqueue_sleep、__vmm_waitqueue_wakefirst、__vmm_waitqueue_wakeall 作为桩函数，按用例设置返回值。
+vmm_spin_lock_irqsave、vmm_spin_unlock_irqrestore、vmm_spin_lock_irq、vmm_spin_unlock_irq 建议替换为无副作用测试实现，避免进入真实中断或锁相关汇编。
+BUG_ON 路径不建议混入普通功能用例。若项目要求覆盖 BUG_ON，建议单独使用测试替身记录断言触发并终止当前测试流程。
+
+⸻
+
+2. __vmm_mutex_cleanup
+
+⸻
+
+用例名称：__vmm_mutex_cleanup.001.R
+
+测试目的：验证当待清理 VCPU 是互斥锁拥有者且互斥锁处于加锁状态时，清理函数能够释放互斥锁并唤醒所有等待对象。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU、有效互斥锁对象和互斥锁资源对象；互斥锁处于加锁状态，拥有者为当前传入的 VCPU；等待队列唤醒全部接口作为记录型桩函数；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造一个互斥锁对象，并通过其资源成员作为 vcpu_res 入参；step2、设置互斥锁加锁计数为非 0，设置互斥锁拥有者为传入的 VCPU；step3、调用 __vmm_mutex_cleanup；step4、观察互斥锁状态、拥有者状态以及唤醒全部等待对象桩函数调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_mutex_cleanup
+等价列表：VCPU 有效，VCPU 资源有效，互斥锁已加锁且拥有者为该 VCPU。
+其它说明：本用例覆盖清理函数释放锁并唤醒所有等待者的正常路径。
+通过准则：互斥锁加锁计数被清零，互斥锁拥有者被置空，唤醒全部等待对象接口被调用一次，函数正常返回。
+
+⸻
+
+用例名称：__vmm_mutex_cleanup.002.R
+
+测试目的：验证当互斥锁未加锁时，清理函数不会修改互斥锁状态，也不会唤醒等待队列。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU、有效互斥锁对象和互斥锁资源对象；互斥锁加锁计数为 0；等待队列唤醒全部接口作为记录型桩函数。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 0；step2、将互斥锁资源成员作为 vcpu_res 入参；step3、调用 __vmm_mutex_cleanup；step4、观察互斥锁状态和唤醒全部等待对象接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_mutex_cleanup
+等价列表：VCPU 有效，VCPU 资源有效，互斥锁未加锁。
+其它说明：本用例覆盖清理函数中互斥锁未被占用的路径。
+通过准则：互斥锁加锁计数保持为 0，互斥锁拥有者保持原值或为空，唤醒全部等待对象接口未被调用，函数正常返回。
+
+⸻
+
+用例名称：__vmm_mutex_cleanup.003.R
+
+测试目的：验证当互斥锁已加锁但拥有者不是传入 VCPU 时，清理函数不会释放该互斥锁。
+用例类别：基于需求的测试
+预置条件：构造两个不同 VCPU，互斥锁处于加锁状态且拥有者为另一个 VCPU；等待队列唤醒全部接口作为记录型桩函数。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 1；step2、设置互斥锁拥有者为非入参 VCPU；step3、调用 __vmm_mutex_cleanup 并传入另一个 VCPU；step4、观察互斥锁状态和唤醒全部等待对象接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_mutex_cleanup
+等价列表：VCPU 有效，VCPU 资源有效，互斥锁已加锁但拥有者不是该 VCPU。
+其它说明：本用例覆盖清理函数中拥有者不匹配的路径。
+通过准则：互斥锁加锁计数保持不变，互斥锁拥有者保持不变，唤醒全部等待对象接口未被调用。
+
+⸻
+
+用例名称：__vmm_mutex_cleanup.004.IN.vcpu.NEC
+
+测试目的：验证传入 VCPU 为空时，清理函数直接返回且不访问互斥锁状态。
+用例类别：接口测试
+预置条件：构造有效互斥锁资源对象，VCPU 入参设置为空；等待队列唤醒全部接口作为记录型桩函数。
+测试步骤：step1、构造有效互斥锁对象并准备其资源成员；step2、将 VCPU 入参设置为空；step3、调用 __vmm_mutex_cleanup；step4、观察函数是否直接返回以及唤醒接口是否被调用。
+用例来源：无效等价类
+追溯ID：__vmm_mutex_cleanup
+等价列表：VCPU 入参为空，VCPU 资源入参有效。
+其它说明：本用例覆盖入参 VCPU 为空的防御分支。
+通过准则：函数正常返回，互斥锁状态不发生变化，唤醒全部等待对象接口未被调用。
+
+⸻
+
+用例名称：__vmm_mutex_cleanup.005.IN.vcpu_res.NEC
+
+测试目的：验证传入 VCPU 资源为空时，清理函数直接返回且不执行互斥锁释放逻辑。
+用例类别：接口测试
+预置条件：构造有效 VCPU，VCPU 资源入参设置为空；等待队列唤醒全部接口作为记录型桩函数。
+测试步骤：step1、构造有效 VCPU；step2、将 VCPU 资源入参设置为空；step3、调用 __vmm_mutex_cleanup；step4、观察函数是否直接返回以及唤醒接口是否被调用。
+用例来源：无效等价类
+追溯ID：__vmm_mutex_cleanup
+等价列表：VCPU 入参有效，VCPU 资源入参为空。
+其它说明：本用例覆盖入参资源为空的防御分支。若当前测试环境中的 container_of 对空指针插桩不稳定，可将该用例作为代码审查覆盖说明。
+通过准则：函数正常返回，唤醒全部等待对象接口未被调用。
+
+⸻
+
+3. vmm_mutex_avail
+
+⸻
+
+用例名称：vmm_mutex_avail.001.R
+
+测试目的：验证互斥锁未被占用时，可用状态查询接口返回可用。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象，互斥锁加锁计数为 0；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 0；step2、调用 vmm_mutex_avail；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_avail
+等价列表：互斥锁对象有效，互斥锁未被占用。
+其它说明：本用例覆盖互斥锁可用路径。
+通过准则：函数返回 TRUE。
+
+⸻
+
+用例名称：vmm_mutex_avail.002.R
+
+测试目的：验证互斥锁已被占用时，可用状态查询接口返回不可用。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象，互斥锁加锁计数为非 0；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 1；step2、调用 vmm_mutex_avail；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_avail
+等价列表：互斥锁对象有效，互斥锁已被占用。
+其它说明：本用例覆盖互斥锁不可用路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+4. vmm_mutex_avail_count
+
+⸻
+
+用例名称：vmm_mutex_avail_count.001.R
+
+测试目的：验证互斥锁未被占用时，加锁计数查询接口返回 0。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象，互斥锁加锁计数为 0；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 0；step2、调用 vmm_mutex_avail_count；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_avail_count
+等价列表：互斥锁对象有效，加锁计数为 0。
+其它说明：本用例验证计数读取的未加锁场景。
+通过准则：函数返回 0。
+
+⸻
+
+用例名称：vmm_mutex_avail_count.002.R
+
+测试目的：验证互斥锁被递归加锁时，加锁计数查询接口返回当前计数。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象，互斥锁加锁计数设置为 2；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象并设置加锁计数为 2；step2、调用 vmm_mutex_avail_count；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_avail_count
+等价列表：互斥锁对象有效，加锁计数大于 0。
+其它说明：本用例验证递归加锁计数读取场景。
+通过准则：函数返回 2。
+
+⸻
+
+5. vmm_mutex_owner
+
+⸻
+
+用例名称：vmm_mutex_owner.001.R
+
+测试目的：验证互斥锁无拥有者时，拥有者查询接口返回空指针。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象，互斥锁拥有者为空；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象并设置拥有者为空；step2、调用 vmm_mutex_owner；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_owner
+等价列表：互斥锁对象有效，拥有者为空。
+其它说明：本用例验证未被占用状态下的拥有者查询。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：vmm_mutex_owner.002.R
+
+测试目的：验证互斥锁存在拥有者时，拥有者查询接口返回对应 VCPU。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁对象和有效 VCPU，互斥锁拥有者设置为该 VCPU；锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造有效互斥锁对象和有效 VCPU；step2、将互斥锁拥有者设置为该 VCPU；step3、调用 vmm_mutex_owner；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_owner
+等价列表：互斥锁对象有效，拥有者为有效 VCPU。
+其它说明：本用例验证已占用状态下的拥有者查询。
+通过准则：函数返回的 VCPU 指针与预置的拥有者 VCPU 一致。
+
+⸻
+
+6. vmm_mutex_unlock
+
+⸻
+
+用例名称：vmm_mutex_unlock.001.R
+
+测试目的：验证当前 VCPU 持有一次互斥锁时，解锁接口能够释放锁、移除资源并唤醒首个等待对象。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；调度器当前 VCPU 桩函数返回该 VCPU；互斥锁加锁计数为 1 且拥有者为该 VCPU；唤醒首个等待对象桩函数返回 VMM_OK。
+测试步骤：step1、构造有效互斥锁并设置加锁计数为 1；step2、设置互斥锁拥有者为当前 VCPU；step3、设置当前 VCPU 桩函数返回该 VCPU；step4、设置唤醒首个等待对象桩函数返回成功；step5、调用 vmm_mutex_unlock；step6、观察函数返回值、互斥锁状态、资源移除接口和唤醒接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：互斥锁对象有效，当前 VCPU 为互斥锁拥有者，加锁计数为 1，唤醒接口返回成功。
+其它说明：本用例覆盖正常释放最后一层锁的路径。
+通过准则：函数返回 VMM_OK，互斥锁加锁计数变为 0，拥有者变为空，资源移除接口被调用一次，唤醒首个等待对象接口被调用一次。
+
+⸻
+
+用例名称：vmm_mutex_unlock.002.R
+
+测试目的：验证当前 VCPU 持有一次互斥锁且等待队列无等待对象时，解锁接口能够将唤醒接口返回的 VMM_ENOENT 转换为成功。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；互斥锁加锁计数为 1 且拥有者为当前 VCPU；唤醒首个等待对象桩函数返回 VMM_ENOENT。
+测试步骤：step1、构造当前 VCPU 拥有的单层互斥锁；step2、设置唤醒首个等待对象桩函数返回无等待对象；step3、调用 vmm_mutex_unlock；step4、观察函数返回值和互斥锁状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：互斥锁对象有效，当前 VCPU 为拥有者，加锁计数为 1，唤醒接口返回无等待对象。
+其它说明：本用例覆盖 VMM_ENOENT 转换为 VMM_OK 的分支。
+通过准则：函数返回 VMM_OK，互斥锁被释放，拥有者被置空，资源移除接口被调用一次。
+
+⸻
+
+用例名称：vmm_mutex_unlock.003.FI
+
+测试目的：通过故障注入模拟唤醒首个等待对象接口返回异常错误，验证解锁接口能够返回该错误码。
+用例类别：故障注入测试
+预置条件：构造当前 VCPU 拥有的单层互斥锁；唤醒首个等待对象接口打桩返回非 VMM_OK 且非 VMM_ENOENT 的错误码。
+测试步骤：step1、构造有效互斥锁并设置加锁计数为 1，拥有者为当前 VCPU；step2、设置唤醒首个等待对象桩函数返回异常错误；step3、调用 vmm_mutex_unlock；step4、观察函数返回值和锁状态。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：当前 VCPU 为互斥锁拥有者，外部唤醒接口发生异常错误。
+其它说明：本用例覆盖唤醒接口错误传播路径。
+通过准则：函数返回唤醒首个等待对象桩函数注入的错误码，互斥锁已释放，拥有者已清空。
+
+⸻
+
+用例名称：vmm_mutex_unlock.004.R
+
+测试目的：验证当前 VCPU 递归持有互斥锁时，解锁接口仅减少加锁计数，不释放拥有者，也不唤醒等待队列。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；互斥锁加锁计数为 2 且拥有者为当前 VCPU。
+测试步骤：step1、构造当前 VCPU 拥有的递归互斥锁并设置加锁计数为 2；step2、调用 vmm_mutex_unlock；step3、观察函数返回值、互斥锁计数、拥有者和外部接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：互斥锁对象有效，当前 VCPU 为拥有者，加锁计数大于 1。
+其它说明：本用例覆盖递归锁释放但未完全释放的路径。
+通过准则：函数返回 VMM_OK，互斥锁加锁计数由 2 减少为 1，拥有者仍为当前 VCPU，资源移除接口和唤醒接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_unlock.005.IN.state.NEC
+
+测试目的：验证互斥锁未加锁时调用解锁接口，函数返回无效错误。
+用例类别：接口测试
+预置条件：构造有效互斥锁对象，互斥锁加锁计数为 0；当前 VCPU 桩函数返回有效 VCPU。
+测试步骤：step1、构造未加锁的互斥锁对象；step2、设置当前 VCPU 为有效 VCPU；step3、调用 vmm_mutex_unlock；step4、观察函数返回值和外部接口调用情况。
+用例来源：无效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：互斥锁对象有效，但锁未被占用。
+其它说明：本用例覆盖解锁前置条件不满足的路径。
+通过准则：函数返回 VMM_EINVALID，互斥锁状态不变，资源移除接口和唤醒接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_unlock.006.IN.owner.NEC
+
+测试目的：验证当前 VCPU 不是互斥锁拥有者时调用解锁接口，函数返回无效错误。
+用例类别：接口测试
+预置条件：构造互斥锁、当前 VCPU 和另一个 VCPU；互斥锁加锁计数为 1，但拥有者为另一个 VCPU。
+测试步骤：step1、构造已加锁互斥锁并设置拥有者为非当前 VCPU；step2、设置当前 VCPU 桩函数返回当前 VCPU；step3、调用 vmm_mutex_unlock；step4、观察函数返回值和互斥锁状态。
+用例来源：无效等价类
+追溯ID：vmm_mutex_unlock
+等价列表：互斥锁对象有效，互斥锁已加锁，但调用者不是拥有者。
+其它说明：本用例覆盖拥有者不匹配时解锁失败路径。
+通过准则：函数返回 VMM_EINVALID，互斥锁加锁计数和拥有者均保持不变，资源移除接口和唤醒接口未被调用。
+
+⸻
+
+7. vmm_mutex_trylock
+
+⸻
+
+用例名称：vmm_mutex_trylock.001.R
+
+测试目的：验证互斥锁未被占用时，尝试加锁接口能够立即获得锁并设置拥有者。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；调度器当前 VCPU 桩函数返回该 VCPU；调度器 orphan 上下文桩函数返回允许状态；互斥锁加锁计数为 0。
+测试步骤：step1、构造未加锁互斥锁；step2、设置当前 VCPU 桩函数返回有效 VCPU；step3、设置 orphan 上下文桩函数返回允许状态；step4、调用 vmm_mutex_trylock；step5、观察函数返回值、互斥锁状态、拥有者和资源添加接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_trylock
+等价列表：互斥锁对象有效，互斥锁未被占用，当前上下文允许尝试加锁。
+其它说明：本用例覆盖尝试加锁成功的首次获取路径。
+通过准则：函数返回 1，互斥锁加锁计数变为 1，拥有者设置为当前 VCPU，资源添加接口被调用一次。
+
+⸻
+
+用例名称：vmm_mutex_trylock.002.R
+
+测试目的：验证当前 VCPU 已持有互斥锁时，尝试加锁接口支持递归加锁。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；互斥锁加锁计数为 1 且拥有者为当前 VCPU；orphan 上下文允许。
+测试步骤：step1、构造当前 VCPU 已拥有的互斥锁；step2、设置当前 VCPU 和 orphan 上下文桩函数；step3、调用 vmm_mutex_trylock；step4、观察函数返回值和加锁计数变化。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_trylock
+等价列表：互斥锁对象有效，互斥锁已被当前 VCPU 持有。
+其它说明：本用例覆盖递归尝试加锁路径。
+通过准则：函数返回 1，互斥锁加锁计数由 1 增加为 2，拥有者保持为当前 VCPU，资源添加接口未重复调用。
+
+⸻
+
+用例名称：vmm_mutex_trylock.003.R
+
+测试目的：验证互斥锁被其他 VCPU 持有时，尝试加锁接口获取失败且不阻塞。
+用例类别：基于需求的测试
+预置条件：构造当前 VCPU 和另一个 VCPU；互斥锁加锁计数为 1，拥有者为另一个 VCPU；orphan 上下文允许。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、设置当前 VCPU 桩函数返回当前 VCPU；step3、调用 vmm_mutex_trylock；step4、观察函数返回值和互斥锁状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_trylock
+等价列表：互斥锁对象有效，互斥锁已被其他 VCPU 持有。
+其它说明：本用例覆盖 trylock 获取失败路径。
+通过准则：函数返回 0，互斥锁加锁计数和拥有者保持不变，资源添加接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_trylock.004.IN.context.NEC
+
+测试目的：验证非 orphan 上下文调用尝试加锁接口时能够触发断言式防御。
+用例类别：接口测试
+预置条件：使用测试替身接管 BUG_ON；构造有效互斥锁和当前 VCPU；orphan 上下文桩函数返回不允许状态。
+测试步骤：step1、构造有效互斥锁对象；step2、设置当前 VCPU 为有效 VCPU；step3、设置 orphan 上下文为不允许状态；step4、调用 vmm_mutex_trylock；step5、观察断言测试替身是否记录到触发事件。
+用例来源：无效等价类
+追溯ID：vmm_mutex_trylock
+等价列表：互斥锁对象有效，但当前上下文不满足接口前置条件。
+其它说明：该用例为断言路径测试，不作为普通返回值用例；若项目不要求覆盖 BUG_ON，可用覆盖率理由说明代替。
+通过准则：BUG_ON 测试替身记录到一次断言触发事件，函数未继续执行实际加锁逻辑。
+
+⸻
+
+8. vmm_mutex_lock
+
+⸻
+
+用例名称：vmm_mutex_lock.001.R
+
+测试目的：验证互斥锁未被占用时，阻塞加锁接口能够直接获得锁并设置拥有者。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；当前 VCPU 桩函数返回该 VCPU；中断上下文桩函数返回非中断上下文；互斥锁加锁计数为 0。
+测试步骤：step1、构造未加锁互斥锁；step2、设置当前 VCPU 和非中断上下文桩函数；step3、调用 vmm_mutex_lock；step4、观察函数返回值、互斥锁状态、拥有者和资源添加接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_lock
+等价列表：互斥锁对象有效，互斥锁未被占用，当前上下文允许阻塞加锁。
+其它说明：本用例覆盖阻塞加锁的直接获取路径。
+通过准则：函数返回 VMM_OK，互斥锁加锁计数变为 1，拥有者设置为当前 VCPU，资源添加接口被调用一次，等待队列睡眠接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_lock.002.R
+
+测试目的：验证当前 VCPU 已拥有互斥锁时，阻塞加锁接口支持递归加锁且不进入等待。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁和当前 VCPU；互斥锁加锁计数为 1，拥有者为当前 VCPU；当前上下文非中断上下文。
+测试步骤：step1、构造当前 VCPU 已拥有的互斥锁；step2、设置当前 VCPU 和非中断上下文桩函数；step3、调用 vmm_mutex_lock；step4、观察函数返回值、加锁计数和等待队列睡眠接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_lock
+等价列表：互斥锁对象有效，互斥锁已被当前 VCPU 持有。
+其它说明：本用例覆盖递归加锁路径。
+通过准则：函数返回 VMM_OK，互斥锁加锁计数由 1 增加为 2，拥有者保持为当前 VCPU，等待队列睡眠接口未被调用，资源添加接口未重复调用。
+
+⸻
+
+用例名称：vmm_mutex_lock.003.R
+
+测试目的：验证互斥锁被其他 VCPU 持有时，阻塞加锁接口能够进入等待队列，并在锁释放后成功获得锁。
+用例类别：基于需求的测试
+预置条件：构造当前 VCPU、另一个 VCPU 和互斥锁；互斥锁初始被另一个 VCPU 持有；等待队列睡眠接口作为桩函数，在返回成功前模拟锁变为可用；当前上下文非中断上下文。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、设置当前 VCPU 和非中断上下文桩函数；step3、设置等待队列睡眠桩函数返回成功，并在等待过程中使互斥锁变为可用；step4、调用 vmm_mutex_lock；step5、观察函数返回值、互斥锁最终状态和资源添加接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_lock
+等价列表：互斥锁对象有效，初始被其他 VCPU 持有，等待后变为可用。
+其它说明：本用例覆盖等待成功后重新获取互斥锁的路径。
+通过准则：函数返回 VMM_OK，互斥锁最终加锁计数为 1，拥有者为当前 VCPU，等待队列睡眠接口被调用一次，资源添加接口被调用一次。
+
+⸻
+
+用例名称：vmm_mutex_lock.004.FI
+
+测试目的：通过故障注入模拟等待队列睡眠接口返回错误，验证阻塞加锁接口能够返回该错误且不改变锁拥有者。
+用例类别：故障注入测试
+预置条件：构造互斥锁初始被其他 VCPU 持有；等待队列睡眠接口打桩返回非 VMM_OK 错误码；当前上下文非中断上下文。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、设置当前 VCPU 和非中断上下文桩函数；step3、设置等待队列睡眠桩函数返回错误；step4、调用 vmm_mutex_lock；step5、观察函数返回值和互斥锁状态。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_mutex_lock
+等价列表：互斥锁对象有效，初始被其他 VCPU 持有，等待队列睡眠接口发生错误。
+其它说明：本用例覆盖等待失败后的错误返回路径。
+通过准则：函数返回等待队列睡眠桩函数注入的错误码，互斥锁加锁计数和拥有者保持原状态，资源添加接口未被调用。
+
+⸻
+
+9. vmm_mutex_lock_timeout
+
+⸻
+
+用例名称：vmm_mutex_lock_timeout.001.R
+
+测试目的：验证带超时的加锁接口在互斥锁未被占用时能够直接获取锁，不使用等待超时参数。
+用例类别：基于需求的测试
+预置条件：构造有效互斥锁、当前 VCPU 和有效超时变量；互斥锁未加锁；当前上下文非中断上下文。
+测试步骤：step1、构造未加锁互斥锁；step2、构造有效超时参数；step3、设置当前 VCPU 和非中断上下文桩函数；step4、调用 vmm_mutex_lock_timeout；step5、观察函数返回值、互斥锁状态和等待队列睡眠接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_lock_timeout
+等价列表：互斥锁对象有效，超时参数有效，互斥锁未被占用。
+其它说明：本用例覆盖带超时加锁的直接获取路径。
+通过准则：函数返回 VMM_OK，互斥锁加锁计数变为 1，拥有者为当前 VCPU，等待队列睡眠接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_lock_timeout.002.R
+
+测试目的：验证带超时的加锁接口在互斥锁被其他 VCPU 持有时，会将超时参数传递给等待队列睡眠接口，并在等待成功后获得锁。
+用例类别：基于需求的测试
+预置条件：构造互斥锁初始被其他 VCPU 持有；构造有效超时变量；等待队列睡眠接口返回成功，并模拟锁释放；当前上下文非中断上下文。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、构造有效超时参数；step3、设置等待队列睡眠桩函数返回成功并模拟锁变为可用；step4、调用 vmm_mutex_lock_timeout；step5、观察等待队列睡眠接口收到的超时参数、函数返回值和锁最终状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_mutex_lock_timeout
+等价列表：互斥锁对象有效，超时参数有效，锁等待后变为可用。
+其它说明：本用例覆盖带超时参数的等待成功路径。
+通过准则：函数返回 VMM_OK，等待队列睡眠接口被调用一次且收到的超时参数地址与测试输入一致，互斥锁最终由当前 VCPU 持有。
+
+⸻
+
+用例名称：vmm_mutex_lock_timeout.003.FI
+
+测试目的：通过故障注入模拟带超时等待时等待队列睡眠接口返回错误，验证函数返回该错误码。
+用例类别：故障注入测试
+预置条件：构造互斥锁初始被其他 VCPU 持有；构造有效超时变量；等待队列睡眠接口打桩返回错误；当前上下文非中断上下文。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、构造有效超时参数；step3、设置等待队列睡眠桩函数返回错误；step4、调用 vmm_mutex_lock_timeout；step5、观察函数返回值和互斥锁状态。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_mutex_lock_timeout
+等价列表：互斥锁对象有效，超时参数有效，等待队列睡眠接口发生错误。
+其它说明：本用例覆盖带超时加锁中的等待失败路径。
+通过准则：函数返回等待队列睡眠桩函数注入的错误码，互斥锁仍由原拥有者持有，资源添加接口未被调用。
+
+⸻
+
+用例名称：vmm_mutex_lock_timeout.004.R
+
+测试目的：验证带超时加锁接口在超时参数为空时仍可执行等待流程，并将空超时参数传递给等待队列睡眠接口。
+用例类别：基于需求的测试
+预置条件：构造互斥锁初始被其他 VCPU 持有；超时参数为空；等待队列睡眠接口返回错误或返回成功并模拟锁释放；当前上下文非中断上下文。
+测试步骤：step1、构造被其他 VCPU 持有的互斥锁；step2、将超时参数设置为空；step3、设置等待队列睡眠桩函数按用例目标返回；step4、调用 vmm_mutex_lock_timeout；step5、观察等待队列睡眠接口收到的超时参数。
+用例来源：有效等价类
+追溯ID：vmm_mutex_lock_timeout
+等价列表：互斥锁对象有效，超时参数为空。
+其它说明：本用例验证当前实现对 timeout 指针仅透传，不在本函数内解引用。
+通过准则：等待队列睡眠接口被调用一次且收到的超时参数为空，函数返回值与等待队列睡眠桩函数及锁释放模拟行为一致。
+
+⸻
+
+10. vmm_mutex.c 断言路径说明
+
+以下接口均使用 BUG_ON 防御空指针或非法上下文：vmm_mutex_avail、vmm_mutex_avail_count、vmm_mutex_owner、vmm_mutex_unlock、vmm_mutex_trylock、vmm_mutex_lock、vmm_mutex_lock_timeout。普通单元测试不建议直接传入空互斥锁指针或非法上下文并期待返回值。若项目要求覆盖断言路径，应统一使用 BUG_ON 测试替身，记录断言触发并终止当前测试流程。此类用例建议单独标记为 .IN.xxx.NEC，并在其它说明中标注为断言路径验证，不与普通功能用例混用。
+
+⸻
+
+二、vmm_notifier.c 单元测试设计
+
+1. 公共测试前置建议
+
+vmm_notifier.c 的核心是维护 notifier 链表，并按优先级顺序调用回调函数。建议在 User Code 中准备若干个测试回调函数，用于记录调用顺序、调用次数、传入的 val 和 void *v 参数，并按用例返回 NOTIFY_DONE、普通通知返回值或带 NOTIFY_STOP_MASK 的返回值。
+
+测试 atomic notifier 时，vmm_spin_lock_irqsave 和 vmm_spin_unlock_irqrestore 建议使用无副作用测试实现。
+测试 blocking notifier 时，vmm_semaphore_down 和 vmm_semaphore_up 建议使用无副作用记录型桩函数。
+raw notifier 不涉及锁或信号量，主要验证链表注册、注销和调用顺序。
+本文件没有对 nc == NULL 或 n == NULL 做防御，不建议构造空链表控制对象或空 notifier block 作为无效输入用例，否则会产生空指针访问，不属于当前实现的可控错误分支。
+
+⸻
+
+2. vmm_atomic_notifier_register
+
+⸻
+
+用例名称：vmm_atomic_notifier_register.001.R
+
+测试目的：验证 atomic notifier 链为空时，注册接口能够将 notifier block 设置为链表头。
+用例类别：基于需求的测试
+预置条件：构造有效 atomic notifier chain，链表头为空；构造有效 notifier block，并设置优先级和回调函数；自旋锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造空 atomic notifier chain；step2、构造一个有效 notifier block；step3、调用 vmm_atomic_notifier_register；step4、观察函数返回值和链表头变化。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_register
+等价列表：notifier chain 有效，notifier block 有效，初始链表为空。
+其它说明：本用例覆盖空链表注册路径。
+通过准则：函数返回 VMM_OK，链表头指向新注册的 notifier block，新注册节点的 next 为空，自旋锁加锁和解锁接口各被调用一次。
+
+⸻
+
+用例名称：vmm_atomic_notifier_register.002.R
+
+测试目的：验证 atomic notifier 注册接口能够按优先级将高优先级 notifier 插入到已有低优先级 notifier 之前。
+用例类别：基于需求的测试
+预置条件：构造有效 atomic notifier chain，链表中已有一个低优先级 notifier block；构造一个更高优先级 notifier block。
+测试步骤：step1、构造已有低优先级节点的 atomic notifier chain；step2、构造高优先级 notifier block；step3、调用 vmm_atomic_notifier_register；step4、观察链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_register
+等价列表：链表已有节点，新节点优先级高于现有节点。
+其它说明：本用例覆盖按优先级插入到链表头部的路径。
+通过准则：函数返回 VMM_OK，链表头变为高优先级 notifier，高优先级 notifier 的 next 指向原低优先级 notifier。
+
+⸻
+
+3. vmm_atomic_notifier_unregister
+
+⸻
+
+用例名称：vmm_atomic_notifier_unregister.001.R
+
+测试目的：验证 atomic notifier 注销接口能够从链表中移除已注册节点。
+用例类别：基于需求的测试
+预置条件：构造有效 atomic notifier chain，链表中包含待注销 notifier block；自旋锁相关接口采用无副作用测试实现。
+测试步骤：step1、构造包含两个 notifier block 的 atomic notifier chain；step2、选择其中一个已注册节点作为注销对象；step3、调用 vmm_atomic_notifier_unregister；step4、观察函数返回值和链表结构。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_unregister
+等价列表：notifier chain 有效，待注销 notifier block 存在于链表中。
+其它说明：本用例覆盖注销成功路径。
+通过准则：函数返回 VMM_OK，待注销节点从链表中移除，其前驱节点或链表头正确指向后继节点，自旋锁加锁和解锁接口各被调用一次。
+
+⸻
+
+用例名称：vmm_atomic_notifier_unregister.002.IN.n.NEC
+
+测试目的：验证注销未注册 notifier block 时，atomic notifier 注销接口返回未找到错误。
+用例类别：接口测试
+预置条件：构造有效 atomic notifier chain，链表中不包含待注销 notifier block。
+测试步骤：step1、构造一个非空 atomic notifier chain；step2、构造一个未加入链表的 notifier block 作为注销对象；step3、调用 vmm_atomic_notifier_unregister；step4、观察函数返回值和链表结构。
+用例来源：无效等价类
+追溯ID：vmm_atomic_notifier_unregister
+等价列表：notifier chain 有效，注销对象未注册。
+其它说明：本用例覆盖注销失败路径。
+通过准则：函数返回 VMM_ENOENT，链表结构保持不变。
+
+⸻
+
+4. __vmm_atomic_notifier_call
+
+⸻
+
+用例名称：__vmm_atomic_notifier_call.001.R
+
+测试目的：验证 atomic notifier 调用接口能够按链表顺序调用所有 notifier block，并返回最后一次回调结果。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 atomic notifier chain；两个回调均返回不带停止标志的通知结果；nr_to_call 设置为允许调用全部节点；nr_calls 指向有效计数变量。
+测试步骤：step1、构造包含两个 notifier block 的 atomic notifier chain，并设置回调函数用于记录调用顺序；step2、设置调用限制为全部调用；step3、构造有效调用计数输出参数；step4、调用 __vmm_atomic_notifier_call；step5、观察回调调用顺序、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_atomic_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，未触发停止标志，调用计数参数有效。
+其它说明：本用例覆盖通知链正常全量遍历路径。
+通过准则：两个 notifier block 均被按链表顺序调用，调用计数为 2，函数返回最后一个 notifier block 的回调返回值。
+
+⸻
+
+用例名称：__vmm_atomic_notifier_call.002.R
+
+测试目的：验证 atomic notifier 调用接口在 nr_to_call 限制为 1 时，只调用第一个 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 atomic notifier chain；nr_to_call 设置为 1；nr_calls 指向有效计数变量。
+测试步骤：step1、构造包含两个 notifier block 的 atomic notifier chain；step2、设置调用限制为 1；step3、调用 __vmm_atomic_notifier_call；step4、观察实际回调调用数量、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_atomic_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，调用数量限制为 1。
+其它说明：本用例覆盖 nr_to_call 限制调用数量的路径。
+通过准则：仅第一个 notifier block 被调用，调用计数为 1，函数返回第一个 notifier block 的回调返回值。
+
+⸻
+
+用例名称：__vmm_atomic_notifier_call.003.R
+
+测试目的：验证 atomic notifier 调用接口在回调返回停止标志时，能够终止后续 notifier 调用。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 atomic notifier chain；第一个回调返回包含 NOTIFY_STOP_MASK 的结果；nr_calls 指向有效计数变量。
+测试步骤：step1、构造包含两个 notifier block 的 atomic notifier chain；step2、设置第一个回调返回停止类通知结果，第二个回调为可记录函数；step3、调用 __vmm_atomic_notifier_call；step4、观察回调调用数量和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_atomic_notifier_call
+等价列表：notifier chain 有效，首个回调返回停止标志。
+其它说明：本用例覆盖通知链遇到停止标志时中断遍历的路径。
+通过准则：仅第一个 notifier block 被调用，第二个 notifier block 未被调用，调用计数为 1，函数返回第一个回调的停止类返回值。
+
+⸻
+
+用例名称：__vmm_atomic_notifier_call.004.R
+
+测试目的：验证 atomic notifier 调用接口在空链表时返回默认通知结果且不调用任何回调。
+用例类别：基于需求的测试
+预置条件：构造有效 atomic notifier chain，链表头为空；调用计数参数有效。
+测试步骤：step1、构造空 atomic notifier chain；step2、构造调用计数输出参数；step3、调用 __vmm_atomic_notifier_call；step4、观察回调调用情况、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_atomic_notifier_call
+等价列表：notifier chain 有效，链表为空。
+其它说明：本用例覆盖空通知链调用路径。
+通过准则：无 notifier 回调被调用，调用计数保持为 0，函数返回 NOTIFY_DONE。
+
+⸻
+
+5. vmm_atomic_notifier_call
+
+⸻
+
+用例名称：vmm_atomic_notifier_call.001.R
+
+测试目的：验证 atomic notifier 简化调用接口能够调用链表中的全部 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 atomic notifier chain；两个回调均返回不带停止标志的结果。
+测试步骤：step1、构造包含两个 notifier block 的 atomic notifier chain；step2、调用 vmm_atomic_notifier_call；step3、观察回调调用顺序和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_atomic_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，简化调用接口不限制调用数量。
+其它说明：本用例验证简化接口内部使用全量调用配置。
+通过准则：两个 notifier block 均被按链表顺序调用，函数返回最后一个 notifier block 的回调返回值。
+
+⸻
+
+6. vmm_blocking_notifier_register
+
+⸻
+
+用例名称：vmm_blocking_notifier_register.001.R
+
+测试目的：验证 blocking notifier 注册接口能够在信号量保护下注册 notifier block，并按优先级维护链表。
+用例类别：基于需求的测试
+预置条件：构造有效 blocking notifier chain；构造有效 notifier block；信号量 down 和 up 接口作为记录型桩函数。
+测试步骤：step1、构造空 blocking notifier chain；step2、构造有效 notifier block；step3、调用 vmm_blocking_notifier_register；step4、观察函数返回值、链表头和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_register
+等价列表：blocking notifier chain 有效，notifier block 有效，初始链表为空。
+其它说明：本用例覆盖 blocking notifier 注册成功路径。
+通过准则：函数返回 VMM_OK，链表头指向新注册 notifier block，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+用例名称：vmm_blocking_notifier_register.002.R
+
+测试目的：验证 blocking notifier 注册接口能够将高优先级 notifier 插入到低优先级 notifier 之前。
+用例类别：基于需求的测试
+预置条件：构造已有低优先级节点的 blocking notifier chain；构造高优先级 notifier block。
+测试步骤：step1、构造已有低优先级 notifier 的 blocking notifier chain；step2、构造高优先级 notifier block；step3、调用 vmm_blocking_notifier_register；step4、观察链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_register
+等价列表：链表已有节点，新注册节点优先级更高。
+其它说明：本用例覆盖 blocking notifier 的优先级插入路径。
+通过准则：函数返回 VMM_OK，链表头变为高优先级 notifier，高优先级 notifier 的 next 指向原低优先级 notifier。
+
+⸻
+
+7. vmm_blocking_notifier_cond_register
+
+⸻
+
+用例名称：vmm_blocking_notifier_cond_register.001.R
+
+测试目的：验证 blocking notifier 条件注册接口在 notifier 未注册时能够正常插入链表。
+用例类别：基于需求的测试
+预置条件：构造有效 blocking notifier chain，链表中不包含待注册 notifier block；信号量接口作为记录型桩函数。
+测试步骤：step1、构造空 blocking notifier chain；step2、构造有效 notifier block；step3、调用 vmm_blocking_notifier_cond_register；step4、观察函数返回值和链表头。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_cond_register
+等价列表：notifier chain 有效，notifier block 有效且未注册。
+其它说明：本用例覆盖条件注册的新节点插入路径。
+通过准则：函数返回 VMM_OK，链表头指向新注册 notifier block，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+用例名称：vmm_blocking_notifier_cond_register.002.R
+
+测试目的：验证 blocking notifier 条件注册接口在 notifier 已注册时不会重复插入。
+用例类别：基于需求的测试
+预置条件：构造有效 blocking notifier chain，链表中已包含待注册 notifier block。
+测试步骤：step1、构造已包含目标 notifier block 的 blocking notifier chain；step2、再次调用 vmm_blocking_notifier_cond_register 注册同一 notifier block；step3、观察函数返回值和链表结构。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_cond_register
+等价列表：notifier chain 有效，notifier block 已存在于链表中。
+其它说明：本用例覆盖条件注册的去重路径。
+通过准则：函数返回 VMM_OK，链表中目标 notifier block 只出现一次，链表结构保持不变。
+
+⸻
+
+用例名称：vmm_blocking_notifier_cond_register.003.R
+
+测试目的：验证 blocking notifier 条件注册接口在新节点优先级高于已有节点时，能够插入到正确位置。
+用例类别：基于需求的测试
+预置条件：构造已有低优先级 notifier 的 blocking notifier chain；构造高优先级且未注册的 notifier block。
+测试步骤：step1、构造已有低优先级节点的 blocking notifier chain；step2、构造未注册的高优先级 notifier block；step3、调用 vmm_blocking_notifier_cond_register；step4、观察链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_cond_register
+等价列表：notifier block 未注册且优先级高于链表已有节点。
+其它说明：本用例覆盖条件注册中的优先级插入路径。
+通过准则：函数返回 VMM_OK，高优先级 notifier 位于低优先级 notifier 之前。
+
+⸻
+
+8. vmm_blocking_notifier_unregister
+
+⸻
+
+用例名称：vmm_blocking_notifier_unregister.001.R
+
+测试目的：验证 blocking notifier 注销接口能够从链表中移除已注册 notifier block。
+用例类别：基于需求的测试
+预置条件：构造有效 blocking notifier chain，链表中包含待注销 notifier block；信号量接口作为记录型桩函数。
+测试步骤：step1、构造包含待注销 notifier block 的 blocking notifier chain；step2、调用 vmm_blocking_notifier_unregister；step3、观察函数返回值、链表结构和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_unregister
+等价列表：notifier chain 有效，注销对象已注册。
+其它说明：本用例覆盖 blocking notifier 注销成功路径。
+通过准则：函数返回 VMM_OK，待注销 notifier block 从链表中移除，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+用例名称：vmm_blocking_notifier_unregister.002.IN.n.NEC
+
+测试目的：验证注销未注册 notifier block 时，blocking notifier 注销接口返回未找到错误。
+用例类别：接口测试
+预置条件：构造有效 blocking notifier chain，待注销 notifier block 不在链表中。
+测试步骤：step1、构造有效 blocking notifier chain；step2、构造未注册 notifier block；step3、调用 vmm_blocking_notifier_unregister；step4、观察函数返回值和链表结构。
+用例来源：无效等价类
+追溯ID：vmm_blocking_notifier_unregister
+等价列表：notifier chain 有效，注销对象未注册。
+其它说明：本用例覆盖注销失败路径。
+通过准则：函数返回 VMM_ENOENT，链表结构保持不变，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+9. __vmm_blocking_notifier_call
+
+⸻
+
+用例名称：__vmm_blocking_notifier_call.001.R
+
+测试目的：验证 blocking notifier 调用接口能够在信号量保护下按链表顺序调用所有 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 blocking notifier chain；两个回调均返回不带停止标志的结果；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 blocking notifier chain；step2、设置回调函数记录调用顺序；step3、调用 __vmm_blocking_notifier_call 并允许调用全部节点；step4、观察回调调用顺序、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_blocking_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，未触发停止标志。
+其它说明：本用例覆盖 blocking notifier 的全量调用路径。
+通过准则：两个 notifier block 均被按链表顺序调用，调用计数为 2，函数返回最后一个回调返回值，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+用例名称：__vmm_blocking_notifier_call.002.R
+
+测试目的：验证 blocking notifier 调用接口在调用数量限制为 1 时，仅调用第一个 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 blocking notifier chain；调用数量限制设置为 1；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 blocking notifier chain；step2、设置调用数量限制为 1；step3、调用 __vmm_blocking_notifier_call；step4、观察回调调用数量和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_blocking_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，调用数量限制为 1。
+其它说明：本用例覆盖调用数量受限路径。
+通过准则：仅第一个 notifier block 被调用，调用计数为 1，函数返回第一个回调返回值。
+
+⸻
+
+用例名称：__vmm_blocking_notifier_call.003.R
+
+测试目的：验证 blocking notifier 调用接口在回调返回停止标志时能够停止调用后续 notifier。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 blocking notifier chain；第一个回调返回带停止标志的通知结果；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 blocking notifier chain；step2、设置第一个回调返回停止类通知结果；step3、调用 __vmm_blocking_notifier_call；step4、观察回调调用数量、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_blocking_notifier_call
+等价列表：notifier chain 有效，首个回调返回停止标志。
+其它说明：本用例覆盖 blocking notifier 的停止遍历路径。
+通过准则：仅第一个 notifier block 被调用，后续 notifier block 未被调用，调用计数为 1，函数返回第一个回调的停止类返回值。
+
+⸻
+
+用例名称：__vmm_blocking_notifier_call.004.R
+
+测试目的：验证 blocking notifier 调用接口在空链表时返回默认通知结果且不调用回调。
+用例类别：基于需求的测试
+预置条件：构造有效 blocking notifier chain，链表头为空；调用计数参数有效。
+测试步骤：step1、构造空 blocking notifier chain；step2、构造有效调用计数输出参数；step3、调用 __vmm_blocking_notifier_call；step4、观察函数返回值、调用计数和信号量接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_blocking_notifier_call
+等价列表：notifier chain 有效，链表为空。
+其它说明：本用例覆盖空链表调用路径。
+通过准则：无回调被调用，调用计数保持为 0，函数返回 NOTIFY_DONE，信号量 down 和 up 接口各被调用一次。
+
+⸻
+
+10. vmm_blocking_notifier_call
+
+⸻
+
+用例名称：vmm_blocking_notifier_call.001.R
+
+测试目的：验证 blocking notifier 简化调用接口能够调用链表中的全部 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 blocking notifier chain；两个回调均返回不带停止标志的结果。
+测试步骤：step1、构造包含两个 notifier block 的 blocking notifier chain；step2、调用 vmm_blocking_notifier_call；step3、观察回调调用顺序和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_blocking_notifier_call
+等价列表：notifier chain 有效，链表含多个节点，简化接口不限制调用数量。
+其它说明：本用例验证 blocking notifier 简化调用接口的全量调用行为。
+通过准则：两个 notifier block 均被按链表顺序调用，函数返回最后一个 notifier block 的回调返回值。
+
+⸻
+
+11. vmm_raw_notifier_register
+
+⸻
+
+用例名称：vmm_raw_notifier_register.001.R
+
+测试目的：验证 raw notifier 注册接口能够在空链表中注册 notifier block。
+用例类别：基于需求的测试
+预置条件：构造有效 raw notifier chain，链表头为空；构造有效 notifier block。
+测试步骤：step1、构造空 raw notifier chain；step2、构造有效 notifier block；step3、调用 vmm_raw_notifier_register；step4、观察函数返回值和链表头。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_register
+等价列表：raw notifier chain 有效，notifier block 有效，初始链表为空。
+其它说明：本用例覆盖 raw notifier 空链表注册路径。
+通过准则：函数返回 VMM_OK，链表头指向新注册 notifier block，新注册节点的 next 为空。
+
+⸻
+
+用例名称：vmm_raw_notifier_register.002.R
+
+测试目的：验证 raw notifier 注册接口能够按优先级插入 notifier block。
+用例类别：基于需求的测试
+预置条件：构造已有低优先级节点的 raw notifier chain；构造高优先级 notifier block。
+测试步骤：step1、构造已有低优先级 notifier 的 raw notifier chain；step2、构造高优先级 notifier block；step3、调用 vmm_raw_notifier_register；step4、观察链表顺序。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_register
+等价列表：raw notifier chain 有效，新节点优先级高于已有节点。
+其它说明：本用例覆盖 raw notifier 优先级插入路径。
+通过准则：函数返回 VMM_OK，链表头变为高优先级 notifier，高优先级 notifier 的 next 指向原低优先级 notifier。
+
+⸻
+
+12. vmm_raw_notifier_unregister
+
+⸻
+
+用例名称：vmm_raw_notifier_unregister.001.R
+
+测试目的：验证 raw notifier 注销接口能够从链表中移除已注册 notifier block。
+用例类别：基于需求的测试
+预置条件：构造有效 raw notifier chain，链表中包含待注销 notifier block。
+测试步骤：step1、构造包含待注销 notifier block 的 raw notifier chain；step2、调用 vmm_raw_notifier_unregister；step3、观察函数返回值和链表结构。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_unregister
+等价列表：raw notifier chain 有效，注销对象已注册。
+其它说明：本用例覆盖 raw notifier 注销成功路径。
+通过准则：函数返回 VMM_OK，待注销 notifier block 从链表中移除，链表剩余节点连接正确。
+
+⸻
+
+用例名称：vmm_raw_notifier_unregister.002.IN.n.NEC
+
+测试目的：验证注销未注册 notifier block 时，raw notifier 注销接口返回未找到错误。
+用例类别：接口测试
+预置条件：构造有效 raw notifier chain，待注销 notifier block 不在链表中。
+测试步骤：step1、构造有效 raw notifier chain；step2、构造未注册 notifier block；step3、调用 vmm_raw_notifier_unregister；step4、观察函数返回值和链表结构。
+用例来源：无效等价类
+追溯ID：vmm_raw_notifier_unregister
+等价列表：raw notifier chain 有效，注销对象未注册。
+其它说明：本用例覆盖 raw notifier 注销失败路径。
+通过准则：函数返回 VMM_ENOENT，链表结构保持不变。
+
+⸻
+
+13. __vmm_raw_notifier_call
+
+⸻
+
+用例名称：__vmm_raw_notifier_call.001.R
+
+测试目的：验证 raw notifier 调用接口能够按链表顺序调用所有 notifier block，并返回最后一次回调结果。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 raw notifier chain；两个回调均返回不带停止标志的结果；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 raw notifier chain；step2、设置回调函数记录调用顺序；step3、调用 __vmm_raw_notifier_call 并允许调用全部节点；step4、观察回调调用顺序、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表含多个节点，未触发停止标志。
+其它说明：本用例覆盖 raw notifier 全量调用路径。
+通过准则：两个 notifier block 均被按链表顺序调用，调用计数为 2，函数返回最后一个回调返回值。
+
+⸻
+
+用例名称：__vmm_raw_notifier_call.002.R
+
+测试目的：验证 raw notifier 调用接口在调用数量限制为 1 时，仅调用第一个 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 raw notifier chain；调用数量限制设置为 1；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 raw notifier chain；step2、设置调用数量限制为 1；step3、调用 __vmm_raw_notifier_call；step4、观察实际回调调用数量、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表含多个节点，调用数量限制为 1。
+其它说明：本用例覆盖 raw notifier 调用数量限制路径。
+通过准则：仅第一个 notifier block 被调用，调用计数为 1，函数返回第一个回调返回值。
+
+⸻
+
+用例名称：__vmm_raw_notifier_call.003.R
+
+测试目的：验证 raw notifier 调用接口在回调返回停止标志时，能够停止调用后续 notifier。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 raw notifier chain；第一个回调返回包含 NOTIFY_STOP_MASK 的结果；调用计数参数有效。
+测试步骤：step1、构造包含两个 notifier block 的 raw notifier chain；step2、设置第一个回调返回停止类通知结果；step3、调用 __vmm_raw_notifier_call；step4、观察回调调用数量和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，首个回调返回停止标志。
+其它说明：本用例覆盖 raw notifier 停止遍历路径。
+通过准则：仅第一个 notifier block 被调用，第二个 notifier block 未被调用，调用计数为 1，函数返回第一个回调的停止类返回值。
+
+⸻
+
+用例名称：__vmm_raw_notifier_call.004.R
+
+测试目的：验证 raw notifier 调用接口在空链表时返回默认通知结果且不调用任何回调。
+用例类别：基于需求的测试
+预置条件：构造有效 raw notifier chain，链表头为空；调用计数参数有效。
+测试步骤：step1、构造空 raw notifier chain；step2、构造有效调用计数输出参数；step3、调用 __vmm_raw_notifier_call；step4、观察回调调用情况、调用计数和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表为空。
+其它说明：本用例覆盖空 raw notifier 链调用路径。
+通过准则：无 notifier 回调被调用，调用计数保持为 0，函数返回 NOTIFY_DONE。
+
+⸻
+
+14. vmm_raw_notifier_call
+
+⸻
+
+用例名称：vmm_raw_notifier_call.001.R
+
+测试目的：验证 raw notifier 简化调用接口能够调用链表中的全部 notifier block。
+用例类别：基于需求的测试
+预置条件：构造包含两个 notifier block 的 raw notifier chain；两个回调均返回不带停止标志的结果。
+测试步骤：step1、构造包含两个 notifier block 的 raw notifier chain；step2、调用 vmm_raw_notifier_call；step3、观察回调调用顺序和函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_raw_notifier_call
+等价列表：raw notifier chain 有效，链表含多个节点，简化接口不限制调用数量。
+其它说明：本用例验证 raw notifier 简化调用接口的全量调用行为。
+通过准则：两个 notifier block 均被按链表顺序调用，函数返回最后一个 notifier block 的回调返回值。
+
+⸻
+
+15. vmm_notifier.c static 核心函数覆盖说明
+
+notifier_chain_register、notifier_chain_cond_register、notifier_chain_unregister、notifier_call_chain 为 static 核心函数。普通情况下不需要单独建立独立用例，因为它们已经分别通过 atomic、blocking 和 raw notifier 的公开接口间接覆盖。
+
+若项目要求 static 函数直接建用例，可按以下方式映射：
+
+notifier_chain_register 的空链表注册、优先级插入和同优先级追加行为，可由 vmm_raw_notifier_register.001.R、vmm_raw_notifier_register.002.R 补充直接用例。
+notifier_chain_cond_register 的新节点插入和重复注册忽略行为，可由 vmm_blocking_notifier_cond_register.001.R、vmm_blocking_notifier_cond_register.002.R 补充直接用例。
+notifier_chain_unregister 的注销成功和未找到路径，可由 raw 或 atomic 注销用例补充直接用例。
+notifier_call_chain 的全量调用、调用数量限制、停止标志、空链表路径，可由 __vmm_raw_notifier_call 或 __vmm_atomic_notifier_call 用例补充直接用例。
+
+⸻
+
+三、两个文件的额外风险说明
+
+vmm_mutex.c
+
+不建议将 mut == NULL 的普通用例作为返回值用例，因为接口使用 BUG_ON 处理空指针，不是错误码返回。
+vmm_mutex_lock 和 vmm_mutex_lock_timeout 中如果等待队列睡眠桩函数返回 VMM_OK，但没有模拟锁释放，while (mut->lock) 可能持续循环。因此等待成功路径必须让等待桩函数在合适时机模拟锁变为可用，或者通过其它方式避免无限循环。
+vmm_mutex_trylock 对 orphan 上下文有断言式前置条件，非法上下文用例应作为断言路径用例，而不是普通返回值用例。
+
+vmm_notifier.c
+
+不建议构造 nc == NULL 或 n == NULL 用例，因为当前实现没有空指针防御。
+notifier 注册会按优先级降序排列，新节点优先级大于当前节点时插入到当前节点之前；优先级相等时会排在已有同优先级节点之后。若详设明确要求同优先级稳定插入，可增加一个同优先级注册用例。
+nr_to_call 为负数时表示实际不限制调用数量，因为循环条件中负数为真，遍历会直到链表结束；普通简化接口正是使用该行为。
