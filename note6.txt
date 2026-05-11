@@ -1,0 +1,1587 @@
+下面按你现在的要求生成 vmm_waitqueue.c 的单元测试设计：
+	•	每个函数独立设计用例；
+	•	每条用例包含：具体构造方法、Expected return、关键期望、可复制注释；
+	•	注释里的 step1/step2/step3 分行写；
+	•	BUG_ON 按你说的方式处理：if (x) exit(0)；
+	•	不通过外层接口间接覆盖内部函数，static 函数单独给用例。
+
+⸻
+
+一、公共 User Code 设置
+
+1. Unit Prefix User Code / Prefix User Code
+
+放到你当前能影响 vmm_waitqueue.c 的 Prefix 位置。
+
+#include <vmm_waitqueue.h>
+#include <vmm_timer.h>
+#include <vmm_scheduler.h>
+
+#ifdef BUG_ON
+#undef BUG_ON
+#endif
+
+#define BUG_ON(x)              \
+    do {                       \
+        if (x) {               \
+            exit(0);           \
+        }                      \
+    } while (0)
+
+/*
+ * vmm_waitqueue.c 内部定义了：
+ * struct vmm_waitqueue_priv {
+ *     struct vmm_waitqueue *wq;
+ *     struct vmm_timer_event *ev;
+ * };
+ *
+ * 该类型是 .c 内部类型，driver 侧可能不可见。
+ * 这里定义同布局测试结构，用于赋给 vcpu->wq_priv。
+ */
+struct vcast_wq_priv {
+    struct vmm_waitqueue *wq;
+    struct vmm_timer_event *ev;
+};
+
+static struct vcast_wq_priv vcast_wq_priv_obj;
+
+extern unsigned int vcast_wq_cleanup_called;
+
+static void vcast_wq_cleanup_cb(struct vmm_vcpu *vcpu)
+{
+    (void)vcpu;
+    vcast_wq_cleanup_called++;
+}
+
+
+⸻
+
+2. User Globals
+
+unsigned int vcast_wq_cleanup_called;
+
+
+⸻
+
+3. Test Case Init
+
+vcast_wq_cleanup_called = 0U;
+
+
+⸻
+
+4. 锁相关函数
+
+以下函数建议作为 no-op stub，避免真实锁或架构汇编：
+
+vmm_spin_lock_irq
+vmm_spin_unlock_irq
+vmm_spin_lock_irqsave
+vmm_spin_unlock_irqrestore
+
+如果它们不是 stub，可以在 Prefix 里做 no-op 宏替换。
+
+⸻
+
+二、vmm_waitqueue_count
+
+⸻
+
+用例名称：vmm_waitqueue_count.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+
+wq_obj.vcpu_count = 3U;
+
+<<vmm_waitqueue.vmm_waitqueue_count.wq>> = &wq_obj;
+
+Expected return
+
+3
+
+关键期望
+
+无额外状态检查
+
+用例注释
+
+测试目的：验证等待队列数量查询接口能够返回等待队列中的 VCPU 数量。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列对象，并设置等待 VCPU 数量为 3。
+测试步骤：
+step1、构造有效等待队列对象。
+step2、设置等待队列中的 VCPU 数量为 3。
+step3、调用 vmm_waitqueue_count。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_count
+等价列表：等待队列对象有效，等待 VCPU 数量为非 0。
+其它说明：本用例覆盖正常读取等待数量路径。
+通过准则：函数返回 3。
+
+⸻
+
+用例名称：vmm_waitqueue_count.002.IN.wq.NEC
+
+具体构造方法
+
+<<vmm_waitqueue.vmm_waitqueue_count.wq>> = NULL;
+
+Expected return
+
+无普通返回；BUG_ON 替身执行 exit(0)
+
+关键期望
+
+用例执行到 BUG_ON(!wq) 后通过 exit(0) 结束
+
+用例注释
+
+测试目的：验证等待队列对象为空时，数量查询接口能够触发断言式防御处理。
+用例类别：接口测试
+预置条件：使用测试替身接管 BUG_ON，使其在条件成立时执行 exit(0)；等待队列入参设置为空。
+测试步骤：
+step1、将等待队列入参设置为空。
+step2、调用 vmm_waitqueue_count。
+step3、观察测试是否在 BUG_ON(!wq) 处通过测试替身退出。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_count
+等价列表：等待队列对象为空，属于违反接口前置条件的无效输入。
+其它说明：该用例为断言路径测试，不验证普通返回值。
+通过准则：用例在 BUG_ON(!wq) 处执行测试替身并通过 exit(0) 结束。
+
+⸻
+
+三、waitqueue_timeout
+
+⸻
+
+用例名称：waitqueue_timeout.001.R
+
+具体构造方法
+
+static struct vmm_timer_event ev_obj;
+static struct vmm_vcpu vcpu_obj;
+
+ev_obj.priv = &vcpu_obj;
+
+<<vmm_waitqueue.waitqueue_timeout.event>> = &ev_obj;
+
+如果 vmm_waitqueue_wake 是 SBF stub：
+
+vmm_waitqueue_wake.return = VMM_OK
+
+如果 vmm_waitqueue_wake 真实执行，则需要额外构造 vcpu_obj.wq_priv 和等待队列上下文。建议该用例使用 SBF stub vmm_waitqueue_wake。
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+vmm_waitqueue_wake 被调用一次，入参为 ev_obj.priv
+
+用例注释
+
+测试目的：验证等待队列定时器超时回调能够从定时器事件中取出 VCPU 并触发唤醒。
+用例类别：基于需求的测试
+预置条件：构造有效定时器事件对象，并将其私有数据设置为目标 VCPU；vmm_waitqueue_wake 作为桩函数返回成功。
+测试步骤：
+step1、构造定时器事件对象。
+step2、设置事件私有数据为有效 VCPU。
+step3、调用 waitqueue_timeout。
+step4、观察 vmm_waitqueue_wake 的调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：waitqueue_timeout
+等价列表：定时器事件有效，事件私有数据为有效 VCPU。
+其它说明：本用例覆盖超时回调触发等待队列唤醒的路径。
+通过准则：vmm_waitqueue_wake 被调用一次，入参为事件私有数据中的 VCPU。
+
+⸻
+
+四、waitqueue_cleanup
+
+⸻
+
+用例名称：waitqueue_cleanup.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_timer_event ev_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+wq_obj.vcpu_count = 1U;
+
+vcast_wq_priv_obj.wq = &wq_obj;
+vcast_wq_priv_obj.ev = &ev_obj;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+vcpu_obj.wq_cleanup = waitqueue_cleanup;
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.waitqueue_cleanup.vcpu>> = &vcpu_obj;
+
+Stub 设置：
+
+vmm_timer_event_stop.return = VMM_OK
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+wq_obj.vcpu_count = 0
+vcpu_obj.wq_cleanup = NULL
+vmm_timer_event_stop 被调用一次
+vcpu_obj.wq_head.next = &vcpu_obj.wq_head
+vcpu_obj.wq_head.prev = &vcpu_obj.wq_head
+
+用例注释
+
+测试目的：验证等待队列清理函数在存在定时器事件时能够停止定时器、移除 VCPU 并减少等待队列计数。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和 VCPU，VCPU 处于等待队列中，等待私有数据包含有效定时器事件。
+测试步骤：
+step1、构造等待队列并加入一个 VCPU。
+step2、设置 VCPU 的等待私有数据和清理回调。
+step3、设置定时器停止接口返回成功。
+step4、调用 waitqueue_cleanup。
+step5、观察定时器停止接口、链表节点、等待计数和清理回调字段。
+用例来源：需求分析、有效等价类
+追溯ID：waitqueue_cleanup
+等价列表：VCPU 等待私有数据有效，等待队列有效，定时器事件有效。
+其它说明：本用例覆盖停止定时器、删除等待节点和减少计数的完整清理路径。
+通过准则：定时器停止接口被调用一次，VCPU 从等待队列移除，等待队列计数由 1 减少为 0，VCPU 的清理回调被置空。
+
+⸻
+
+用例名称：waitqueue_cleanup.002.R
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcpu_obj.wq_priv = NULL;
+
+<<vmm_waitqueue.waitqueue_cleanup.vcpu>> = &vcpu_obj;
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+vmm_timer_event_stop 未被调用
+
+用例注释
+
+测试目的：验证 VCPU 没有等待私有数据时，清理函数直接返回。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU，但其等待私有数据为空。
+测试步骤：
+step1、构造有效 VCPU。
+step2、设置 VCPU 的等待私有数据为空。
+step3、调用 waitqueue_cleanup。
+step4、观察函数是否直接返回。
+用例来源：需求分析、有效等价类
+追溯ID：waitqueue_cleanup
+等价列表：VCPU 有效，等待私有数据为空。
+其它说明：本用例覆盖 !p 返回路径。
+通过准则：函数无返回值，定时器停止接口未被调用，不修改等待队列。
+
+⸻
+
+用例名称：waitqueue_cleanup.003.R
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcast_wq_priv_obj.wq = NULL;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+
+<<vmm_waitqueue.waitqueue_cleanup.vcpu>> = &vcpu_obj;
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+vmm_timer_event_stop 未被调用
+
+用例注释
+
+测试目的：验证等待私有数据中等待队列为空时，清理函数直接返回。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU 和等待私有数据，但等待私有数据中的等待队列指针为空。
+测试步骤：
+step1、构造 VCPU 和等待私有数据。
+step2、设置等待私有数据中的等待队列为空。
+step3、调用 waitqueue_cleanup。
+step4、观察函数是否直接返回。
+用例来源：需求分析、有效等价类
+追溯ID：waitqueue_cleanup
+等价列表：等待私有数据有效，但等待队列为空。
+其它说明：本用例覆盖 !p->wq 返回路径。
+通过准则：函数无返回值，定时器停止接口未被调用，不执行链表删除。
+
+⸻
+
+用例名称：waitqueue_cleanup.004.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+wq_obj.vcpu_count = 0U;
+
+vcast_wq_priv_obj.wq = &wq_obj;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+vcpu_obj.wq_cleanup = waitqueue_cleanup;
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.waitqueue_cleanup.vcpu>> = &vcpu_obj;
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+wq_obj.vcpu_count = 0
+vcpu_obj.wq_cleanup = NULL
+vcpu_obj.wq_head.next = &vcpu_obj.wq_head
+vcpu_obj.wq_head.prev = &vcpu_obj.wq_head
+vmm_timer_event_stop 未被调用
+
+用例注释
+
+测试目的：验证等待队列计数已经为 0 时，清理函数删除节点但不继续减少计数。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和 VCPU，VCPU 位于等待队列中，但等待队列计数为 0。
+测试步骤：
+step1、构造等待队列并加入一个 VCPU。
+step2、设置等待队列计数为 0。
+step3、设置等待私有数据中没有定时器事件。
+step4、调用 waitqueue_cleanup。
+step5、观察等待队列计数和 VCPU 链表节点。
+用例来源：需求分析、有效等价类
+追溯ID：waitqueue_cleanup
+等价列表：等待队列有效，计数为 0。
+其它说明：本用例覆盖 if (wq->vcpu_count) 为 false 的路径。
+通过准则：VCPU 从等待队列移除，等待队列计数保持为 0，VCPU 清理回调被置空，定时器停止接口未被调用。
+
+⸻
+
+五、__vmm_waitqueue_sleep
+
+⸻
+
+用例名称：__vmm_waitqueue_sleep.001.IN.timeout_nsecs.RA.L
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static u64 timeout_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+wq_obj.vcpu_count = 0U;
+
+timeout_obj = 0U;
+
+<<vmm_waitqueue.__vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_sleep.timeout_nsecs>> = &timeout_obj;
+
+Expected return
+
+VMM_ETIMEDOUT
+
+关键期望
+
+wq_obj.vcpu_count = 0
+vmm_scheduler_current_vcpu 未被调用
+vmm_scheduler_state_change 未被调用
+
+用例注释
+
+测试目的：验证超时参数存在且值为 0 时，等待队列睡眠函数立即返回超时错误。
+用例类别：边界值分析
+预置条件：构造有效等待队列，超时参数指向 0。
+测试步骤：
+step1、构造有效等待队列。
+step2、构造超时参数并设置为 0。
+step3、调用 __vmm_waitqueue_sleep。
+step4、观察函数返回值和等待队列状态。
+用例来源：边界值分析
+追溯ID：__vmm_waitqueue_sleep
+等价列表：超时参数有效，超时值为下边界 0。
+其它说明：本用例覆盖函数开头直接返回 VMM_ETIMEDOUT 的路径。
+通过准则：函数返回 VMM_ETIMEDOUT，当前 VCPU 不加入等待队列，等待队列计数保持不变。
+
+⸻
+
+用例名称：__vmm_waitqueue_sleep.002.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+
+<<vmm_waitqueue.__vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_sleep.timeout_nsecs>> = NULL;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+wq_obj.vcpu_count = 1
+cur_vcpu.wq_lock = NULL
+cur_vcpu.wq_priv = NULL
+cur_vcpu.wq_cleanup != NULL
+vmm_scheduler_state_change 被调用一次，目标状态为 VMM_VCPU_STATE_PAUSED
+
+用例注释
+
+测试目的：验证无超时等待时，函数能够将当前 VCPU 加入等待队列并切换到暂停状态。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和当前 VCPU；调度状态切换接口返回成功；超时参数为空。
+测试步骤：
+step1、构造空等待队列。
+step2、构造当前 VCPU。
+step3、设置调度状态切换接口返回成功。
+step4、调用 __vmm_waitqueue_sleep。
+step5、观察函数返回值、等待队列计数和 VCPU 等待上下文清理情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_sleep
+等价列表：等待队列有效，当前 VCPU 有效，无超时参数。
+其它说明：本用例覆盖无超时睡眠成功路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用一次且目标状态为暂停，VCPU 等待锁和等待私有数据在函数返回前被清空。
+
+⸻
+
+用例名称：__vmm_waitqueue_sleep.003.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+static u64 timeout_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+timeout_obj = 100U;
+
+<<vmm_waitqueue.__vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_sleep.timeout_nsecs>> = &timeout_obj;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+vmm_timer_event_start2 的 expiry 输出值 = 200
+vmm_timer_timestamp.return = 150
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+timeout_obj = 50
+vmm_timer_event_start2 被调用一次
+vmm_timer_timestamp 被调用一次
+
+用例注释
+
+测试目的：验证带超时等待成功唤醒且未超时时，函数能够更新剩余超时时间。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和当前 VCPU；超时参数为非 0；定时器启动接口输出到期时间；调度状态切换接口返回成功；当前时间早于到期时间。
+测试步骤：
+step1、构造空等待队列和当前 VCPU。
+step2、设置超时参数为 100。
+step3、设置定时器启动接口输出到期时间为 200。
+step4、设置调度状态切换接口返回成功。
+step5、设置当前时间戳为 150。
+step6、调用 __vmm_waitqueue_sleep。
+step7、观察函数返回值和超时参数更新值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_sleep
+等价列表：超时参数有效且非 0，唤醒时仍有剩余时间。
+其它说明：本用例覆盖带超时等待且未超时返回的路径。
+通过准则：函数返回 VMM_OK，超时参数被更新为剩余时间 50，定时器启动接口被调用一次。
+
+⸻
+
+用例名称：__vmm_waitqueue_sleep.004.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+static u64 timeout_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+timeout_obj = 100U;
+
+<<vmm_waitqueue.__vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_sleep.timeout_nsecs>> = &timeout_obj;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+vmm_timer_event_start2 的 expiry 输出值 = 200
+vmm_timer_timestamp.return = 250
+
+Expected return
+
+VMM_ETIMEDOUT
+
+关键期望
+
+timeout_obj = 0
+
+用例注释
+
+测试目的：验证带超时等待成功唤醒但当前时间已经超过到期时间时，函数返回超时错误并将剩余时间置为 0。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和当前 VCPU；超时参数为非 0；定时器启动接口输出到期时间；调度状态切换成功；当前时间晚于到期时间。
+测试步骤：
+step1、构造等待队列和当前 VCPU。
+step2、设置超时参数为非 0。
+step3、设置定时器到期时间。
+step4、设置调度状态切换成功。
+step5、设置当前时间晚于到期时间。
+step6、调用 __vmm_waitqueue_sleep。
+step7、观察返回值和超时参数。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_sleep
+等价列表：超时参数有效，唤醒后已超时。
+其它说明：本用例覆盖超时参数更新为 0 并返回 VMM_ETIMEDOUT 的路径。
+通过准则：函数返回 VMM_ETIMEDOUT，超时参数被更新为 0。
+
+⸻
+
+用例名称：__vmm_waitqueue_sleep.005.FI
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+
+<<vmm_waitqueue.__vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_sleep.timeout_nsecs>> = NULL;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+cur_vcpu.wq_lock = NULL
+cur_vcpu.wq_priv = NULL
+
+用例注释
+
+测试目的：通过故障注入模拟调度状态切换失败，验证等待队列睡眠函数能够返回调度错误码。
+用例类别：故障注入测试
+预置条件：构造有效等待队列和当前 VCPU；调度状态切换接口打桩返回错误。
+测试步骤：
+step1、构造等待队列和当前 VCPU。
+step2、设置调度状态切换接口返回失败。
+step3、调用 __vmm_waitqueue_sleep。
+step4、观察函数返回值和 VCPU 等待上下文。
+用例来源：故障注入、无效等价类
+追溯ID：__vmm_waitqueue_sleep
+等价列表：等待队列有效，调度状态切换接口发生故障。
+其它说明：本用例覆盖调度状态切换失败路径。
+通过准则：函数返回调度状态切换接口注入的错误码，VCPU 等待锁和等待私有数据在函数返回前被清空。
+
+⸻
+
+六、vmm_waitqueue_sleep
+
+⸻
+
+用例名称：vmm_waitqueue_sleep.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+
+<<vmm_waitqueue.vmm_waitqueue_sleep.wq>> = &wq_obj;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_spin_lock_irq 被调用一次
+vmm_spin_unlock_irq 被调用一次
+
+用例注释
+
+测试目的：验证等待队列普通睡眠接口能够加锁后调用内部睡眠函数，并在成功后解锁返回。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和当前 VCPU；调度状态切换接口返回成功；锁相关接口采用无副作用测试实现。
+测试步骤：
+step1、构造空等待队列。
+step2、构造当前 VCPU。
+step3、设置调度状态切换接口返回成功。
+step4、调用 vmm_waitqueue_sleep。
+step5、观察函数返回值和锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_sleep
+等价列表：等待队列有效，无超时睡眠路径。
+其它说明：本用例覆盖 public wrapper 加锁、调用内部睡眠、解锁的路径。
+通过准则：函数返回 VMM_OK，锁和解锁接口各执行一次。
+
+⸻
+
+七、vmm_waitqueue_sleep_timeout
+
+⸻
+
+用例名称：vmm_waitqueue_sleep_timeout.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu cur_vcpu;
+static u64 timeout_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&cur_vcpu.wq_head);
+
+wq_obj.vcpu_count = 0U;
+timeout_obj = 100U;
+
+<<vmm_waitqueue.vmm_waitqueue_sleep_timeout.wq>> = &wq_obj;
+<<vmm_waitqueue.vmm_waitqueue_sleep_timeout.timeout_usecs>> = &timeout_obj;
+<<vmm_waitqueue.vmm_scheduler_current_vcpu.return>> = &cur_vcpu;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+vmm_timer_event_start2 的 expiry 输出值 = 200
+vmm_timer_timestamp.return = 150
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+timeout_obj = 50
+vmm_spin_lock_irq 被调用一次
+vmm_spin_unlock_irq 被调用一次
+
+用例注释
+
+测试目的：验证等待队列带超时睡眠接口能够加锁后调用内部睡眠函数，并传递超时参数。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和当前 VCPU；超时参数为非 0；定时器和调度接口按成功路径返回。
+测试步骤：
+step1、构造等待队列和当前 VCPU。
+step2、构造有效超时参数。
+step3、设置定时器和调度接口为成功路径。
+step4、调用 vmm_waitqueue_sleep_timeout。
+step5、观察返回值、超时参数和锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_sleep_timeout
+等价列表：等待队列有效，超时参数有效。
+其它说明：本用例覆盖 public wrapper 加锁、调用带超时内部睡眠、解锁的路径。
+通过准则：函数返回 VMM_OK，超时参数按定时器时间差更新，锁和解锁接口各执行一次。
+
+⸻
+
+八、vmm_waitqueue_forced_remove
+
+⸻
+
+用例名称：vmm_waitqueue_forced_remove.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+wq_obj.vcpu_count = 1U;
+
+vcast_wq_priv_obj.wq = &wq_obj;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+vcpu_obj.wq_lock = &wq_obj.lock;
+vcpu_obj.wq_cleanup = vcast_wq_cleanup_cb;
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.vmm_waitqueue_forced_remove.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vcpu_obj.wq_lock = NULL
+vcpu_obj.wq_priv = NULL
+vcast_wq_cleanup_called = 1
+
+用例注释
+
+测试目的：验证强制移除接口能够对处于等待队列中的 VCPU 执行清理，并清空其等待上下文。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU，VCPU 已加入等待队列且具有等待私有数据和清理回调。
+测试步骤：
+step1、构造等待队列并加入一个 VCPU。
+step2、设置 VCPU 的等待私有数据、等待锁和清理回调。
+step3、调用 vmm_waitqueue_forced_remove。
+step4、观察函数返回值、清理回调调用记录和 VCPU 等待上下文字段。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_forced_remove
+等价列表：VCPU 有效且处于等待队列上下文中。
+其它说明：本用例覆盖强制清理正常路径。
+通过准则：函数返回 VMM_OK，清理回调被调用一次，VCPU 等待锁和等待私有数据被置空。
+
+⸻
+
+用例名称：vmm_waitqueue_forced_remove.002.IN.vcpu.NEC
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcpu_obj.wq_priv = NULL;
+
+<<vmm_waitqueue.vmm_waitqueue_forced_remove.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vcast_wq_cleanup_called = 0
+
+用例注释
+
+测试目的：验证 VCPU 没有等待私有数据时，强制移除接口返回失败。
+用例类别：接口测试
+预置条件：构造有效 VCPU，但其等待私有数据为空。
+测试步骤：
+step1、构造有效 VCPU。
+step2、设置 VCPU 等待私有数据为空。
+step3、调用 vmm_waitqueue_forced_remove。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_forced_remove
+等价列表：VCPU 有效，但不处于等待队列上下文。
+其它说明：本用例覆盖 !p 返回失败路径。
+通过准则：函数返回 VMM_EFAIL，清理回调未被调用。
+
+⸻
+
+用例名称：vmm_waitqueue_forced_remove.003.IN.vcpu.NEC
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcast_wq_priv_obj.wq = NULL;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+
+<<vmm_waitqueue.vmm_waitqueue_forced_remove.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vcast_wq_cleanup_called = 0
+
+用例注释
+
+测试目的：验证 VCPU 等待私有数据存在但等待队列为空时，强制移除接口返回失败。
+用例类别：接口测试
+预置条件：构造有效 VCPU和等待私有数据，但等待私有数据中的等待队列为空。
+测试步骤：
+step1、构造 VCPU 和等待私有数据。
+step2、设置等待私有数据中的等待队列为空。
+step3、调用 vmm_waitqueue_forced_remove。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_forced_remove
+等价列表：等待私有数据有效，但等待队列对象为空。
+其它说明：本用例覆盖 !p->wq 返回失败路径。
+通过准则：函数返回 VMM_EFAIL，清理回调未被调用。
+
+⸻
+
+用例名称：vmm_waitqueue_forced_remove.004.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+vcast_wq_priv_obj.wq = &wq_obj;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+vcpu_obj.wq_lock = &wq_obj.lock;
+vcpu_obj.wq_cleanup = NULL;
+
+<<vmm_waitqueue.vmm_waitqueue_forced_remove.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vcpu_obj.wq_lock = NULL
+vcpu_obj.wq_priv = NULL
+vcast_wq_cleanup_called = 0
+
+用例注释
+
+测试目的：验证 VCPU 处于等待上下文但清理回调为空时，强制移除接口仍能清空等待上下文并返回成功。
+用例类别：基于需求的测试
+预置条件：构造有效 VCPU 和等待私有数据，等待队列有效，但 VCPU 清理回调为空。
+测试步骤：
+step1、构造有效等待队列和 VCPU。
+step2、设置 VCPU 等待私有数据有效。
+step3、将 VCPU 清理回调设置为空。
+step4、调用 vmm_waitqueue_forced_remove。
+step5、观察函数返回值和等待上下文字段。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_forced_remove
+等价列表：等待上下文有效，但清理回调为空。
+其它说明：本用例覆盖 if (vcpu->wq_cleanup) 为 false 的路径。
+通过准则：函数返回 VMM_OK，VCPU 等待锁和等待私有数据被置空，清理回调未被调用。
+
+⸻
+
+九、__vmm_waitqueue_wake
+
+⸻
+
+用例名称：__vmm_waitqueue_wake.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+<<vmm_waitqueue.__vmm_waitqueue_wake.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_scheduler_state_change 被调用一次，目标状态为 VMM_VCPU_STATE_READY
+
+用例注释
+
+测试目的：验证内部等待队列唤醒函数能够将指定 VCPU 切换为就绪状态。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列和目标 VCPU；调度状态切换接口返回成功。
+测试步骤：
+step1、构造等待队列和目标 VCPU。
+step2、设置调度状态切换接口返回成功。
+step3、调用 __vmm_waitqueue_wake。
+step4、观察函数返回值和调度状态切换接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_wake
+等价列表：等待队列有效，目标 VCPU 有效。
+其它说明：本用例覆盖内部唤醒成功路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用一次且目标状态为就绪。
+
+⸻
+
+用例名称：__vmm_waitqueue_wake.002.FI
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+<<vmm_waitqueue.__vmm_waitqueue_wake.wq>> = &wq_obj;
+<<vmm_waitqueue.__vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vmm_scheduler_state_change 被调用一次
+
+用例注释
+
+测试目的：通过故障注入模拟调度状态切换失败，验证内部等待队列唤醒函数返回调度错误码。
+用例类别：故障注入测试
+预置条件：构造有效等待队列和目标 VCPU；调度状态切换接口打桩返回错误。
+测试步骤：
+step1、构造等待队列和目标 VCPU。
+step2、设置调度状态切换接口返回失败。
+step3、调用 __vmm_waitqueue_wake。
+step4、观察函数返回值。
+用例来源：故障注入、无效等价类
+追溯ID：__vmm_waitqueue_wake
+等价列表：目标 VCPU 有效，外部调度状态切换接口发生故障。
+其它说明：本用例覆盖内部唤醒错误传播路径。
+通过准则：函数返回调度状态切换接口注入的错误码。
+
+⸻
+
+十、vmm_waitqueue_wake
+
+⸻
+
+用例名称：vmm_waitqueue_wake.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+vcast_wq_priv_obj.wq = &wq_obj;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.is_normal = FALSE;
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+
+<<vmm_waitqueue.vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_scheduler_state_change 被调用一次，目标状态为 VMM_VCPU_STATE_READY
+
+用例注释
+
+测试目的：验证等待队列唤醒接口在 VCPU 有效且处于等待上下文时，能够将 VCPU 唤醒为就绪状态。
+用例类别：基于需求的测试
+预置条件：构造非 normal VCPU，设置其等待私有数据指向有效等待队列；调度状态切换接口返回成功。
+测试步骤：
+step1、构造等待队列和 VCPU。
+step2、设置 VCPU 为非 normal。
+step3、设置 VCPU 等待私有数据指向有效等待队列。
+step4、调用 vmm_waitqueue_wake。
+step5、观察函数返回值和调度状态切换接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_wake
+等价列表：VCPU 有效、非 normal、等待私有数据有效。
+其它说明：本用例覆盖 public 唤醒接口正常路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用一次且目标状态为就绪。
+
+⸻
+
+用例名称：vmm_waitqueue_wake.002.IN.vcpu.NEC
+
+具体构造方法
+
+<<vmm_waitqueue.vmm_waitqueue_wake.vcpu>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 VCPU 入参为空时，等待队列唤醒接口返回失败。
+用例类别：接口测试
+预置条件：VCPU 入参为空。
+测试步骤：
+step1、将 VCPU 入参设置为空。
+step2、调用 vmm_waitqueue_wake。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_wake
+等价列表：VCPU 入参为空。
+其它说明：本用例覆盖 VCPU 为空的防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_waitqueue_wake.003.IN.vcpu.NEC
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcpu_obj.is_normal = TRUE;
+
+<<vmm_waitqueue.vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 normal VCPU 调用等待队列唤醒接口时返回失败。
+用例类别：接口测试
+预置条件：构造有效 VCPU，并设置其为 normal VCPU。
+测试步骤：
+step1、构造有效 VCPU。
+step2、设置 VCPU 的 normal 标志为 true。
+step3、调用 vmm_waitqueue_wake。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_wake
+等价列表：VCPU 有效但为 normal VCPU。
+其它说明：本用例覆盖 vcpu->is_normal 防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_waitqueue_wake.004.IN.vcpu.NEC
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcpu_obj.is_normal = FALSE;
+vcpu_obj.wq_priv = NULL;
+
+<<vmm_waitqueue.vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 VCPU 没有等待私有数据时，等待队列唤醒接口返回失败。
+用例类别：接口测试
+预置条件：构造非 normal VCPU，但其等待私有数据为空。
+测试步骤：
+step1、构造非 normal VCPU。
+step2、设置等待私有数据为空。
+step3、调用 vmm_waitqueue_wake。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_wake
+等价列表：VCPU 有效但未处于等待队列上下文。
+其它说明：本用例覆盖等待私有数据为空的失败路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_waitqueue_wake.005.IN.vcpu.NEC
+
+具体构造方法
+
+static struct vmm_vcpu vcpu_obj;
+
+vcast_wq_priv_obj.wq = NULL;
+vcast_wq_priv_obj.ev = NULL;
+
+vcpu_obj.is_normal = FALSE;
+vcpu_obj.wq_priv = &vcast_wq_priv_obj;
+
+<<vmm_waitqueue.vmm_waitqueue_wake.vcpu>> = &vcpu_obj;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 VCPU 等待私有数据存在但等待队列为空时，等待队列唤醒接口返回失败。
+用例类别：接口测试
+预置条件：构造非 normal VCPU，等待私有数据有效但其中等待队列为空。
+测试步骤：
+step1、构造非 normal VCPU。
+step2、设置等待私有数据存在但等待队列为空。
+step3、调用 vmm_waitqueue_wake。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_waitqueue_wake
+等价列表：等待私有数据无效，缺少等待队列对象。
+其它说明：本用例覆盖 !p->wq 防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+十一、__vmm_waitqueue_wakefirst
+
+⸻
+
+用例名称：__vmm_waitqueue_wakefirst.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakefirst.wq>> = &wq_obj;
+
+Expected return
+
+VMM_ENOENT
+
+用例注释
+
+测试目的：验证等待队列为空时，唤醒首个 VCPU 的内部接口返回无节点错误。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列并初始化 VCPU 链表为空。
+测试步骤：
+step1、构造空等待队列。
+step2、调用 __vmm_waitqueue_wakefirst。
+step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_wakefirst
+等价列表：等待队列有效但为空。
+其它说明：本用例覆盖 list_empty 为 true 的路径。
+通过准则：函数返回 VMM_ENOENT。
+
+⸻
+
+用例名称：__vmm_waitqueue_wakefirst.002.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakefirst.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+用例注释
+
+测试目的：验证等待队列非空时，唤醒首个 VCPU 的内部接口能够唤醒链表第一个 VCPU。
+用例类别：基于需求的测试
+预置条件：构造等待队列并加入一个 VCPU；调度状态切换接口返回成功。
+测试步骤：
+step1、构造等待队列。
+step2、将目标 VCPU 加入等待队列。
+step3、设置调度状态切换接口返回成功。
+step4、调用 __vmm_waitqueue_wakefirst。
+step5、观察函数返回值和调度状态切换接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_wakefirst
+等价列表：等待队列有效且非空。
+其它说明：本用例覆盖唤醒首个节点路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用一次且目标 VCPU 为等待队列首个 VCPU。
+
+⸻
+
+用例名称：__vmm_waitqueue_wakefirst.003.FI
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakefirst.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟唤醒首个 VCPU 时调度状态切换失败，验证内部唤醒首个接口返回错误码。
+用例类别：故障注入测试
+预置条件：构造包含一个 VCPU 的等待队列，调度状态切换接口返回失败。
+测试步骤：
+step1、构造等待队列。
+step2、将目标 VCPU 加入等待队列。
+step3、设置调度状态切换接口返回失败。
+step4、调用 __vmm_waitqueue_wakefirst。
+step5、观察函数返回值。
+用例来源：故障注入、无效等价类
+追溯ID：__vmm_waitqueue_wakefirst
+等价列表：等待队列非空，但外部调度状态切换接口发生故障。
+其它说明：本用例覆盖唤醒首个节点时的错误传播路径。
+通过准则：函数返回调度状态切换接口注入的错误码。
+
+⸻
+
+十二、vmm_waitqueue_wakefirst
+
+⸻
+
+用例名称：vmm_waitqueue_wakefirst.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu_obj.wq_head);
+
+list_add_tail(&vcpu_obj.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.vmm_waitqueue_wakefirst.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_spin_lock_irqsave 被调用一次
+vmm_spin_unlock_irqrestore 被调用一次
+
+用例注释
+
+测试目的：验证等待队列唤醒首个 VCPU 的 public 接口能够加锁后调用内部唤醒函数并返回结果。
+用例类别：基于需求的测试
+预置条件：构造包含一个 VCPU 的等待队列，调度状态切换接口返回成功。
+测试步骤：
+step1、构造包含一个 VCPU 的等待队列。
+step2、设置调度状态切换接口返回成功。
+step3、调用 vmm_waitqueue_wakefirst。
+step4、观察函数返回值和锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_wakefirst
+等价列表：等待队列有效且非空。
+其它说明：本用例覆盖 public wrapper 加锁、内部唤醒、解锁路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用一次，锁和解锁接口各执行一次。
+
+⸻
+
+十三、__vmm_waitqueue_wakeall
+
+⸻
+
+用例名称：__vmm_waitqueue_wakeall.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakeall.wq>> = &wq_obj;
+
+Expected return
+
+VMM_ENOENT
+
+用例注释
+
+测试目的：验证等待队列为空时，唤醒全部 VCPU 的内部接口返回无节点错误。
+用例类别：基于需求的测试
+预置条件：构造有效等待队列并初始化为空。
+测试步骤：
+step1、构造空等待队列。
+step2、调用 __vmm_waitqueue_wakeall。
+step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_wakeall
+等价列表：等待队列有效但为空。
+其它说明：本用例覆盖 list_empty 为 true 的路径。
+通过准则：函数返回 VMM_ENOENT。
+
+⸻
+
+用例名称：__vmm_waitqueue_wakeall.002.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu1;
+static struct vmm_vcpu vcpu2;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu1.wq_head);
+INIT_LIST_HEAD(&vcpu2.wq_head);
+
+list_add_tail(&vcpu1.wq_head, &wq_obj.vcpu_list);
+list_add_tail(&vcpu2.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakeall.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_scheduler_state_change 被调用两次
+
+用例注释
+
+测试目的：验证等待队列非空且所有 VCPU 唤醒成功时，内部唤醒全部接口返回成功。
+用例类别：基于需求的测试
+预置条件：构造包含两个 VCPU 的等待队列，调度状态切换接口返回成功。
+测试步骤：
+step1、构造等待队列。
+step2、将两个 VCPU 加入等待队列。
+step3、设置调度状态切换接口返回成功。
+step4、调用 __vmm_waitqueue_wakeall。
+step5、观察函数返回值和调度状态切换接口调用次数。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_waitqueue_wakeall
+等价列表：等待队列有效且包含多个 VCPU，全部唤醒成功。
+其它说明：本用例覆盖遍历唤醒所有节点的成功路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用两次。
+
+⸻
+
+用例名称：__vmm_waitqueue_wakeall.003.FI
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu1;
+static struct vmm_vcpu vcpu2;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu1.wq_head);
+INIT_LIST_HEAD(&vcpu2.wq_head);
+
+list_add_tail(&vcpu1.wq_head, &wq_obj.vcpu_list);
+list_add_tail(&vcpu2.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.__vmm_waitqueue_wakeall.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change 第 1 次 return = VMM_OK
+vmm_scheduler_state_change 第 2 次 return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vmm_scheduler_state_change 被调用两次
+
+用例注释
+
+测试目的：通过故障注入模拟唤醒某个等待 VCPU 失败，验证唤醒全部接口能够立即返回错误码。
+用例类别：故障注入测试
+预置条件：构造包含多个 VCPU 的等待队列，调度状态切换接口在某次调用时返回错误。
+测试步骤：
+step1、构造包含两个 VCPU 的等待队列。
+step2、设置调度状态切换接口第一次返回成功、第二次返回失败。
+step3、调用 __vmm_waitqueue_wakeall。
+step4、观察函数返回值和调度状态切换接口调用情况。
+用例来源：故障注入、无效等价类
+追溯ID：__vmm_waitqueue_wakeall
+等价列表：等待队列非空，外部调度状态切换接口发生故障。
+其它说明：本用例覆盖遍历过程中唤醒失败后立即返回的路径。
+通过准则：函数返回调度状态切换接口注入的错误码，失败发生后的后续处理不再继续。
+
+⸻
+
+十四、vmm_waitqueue_wakeall
+
+⸻
+
+用例名称：vmm_waitqueue_wakeall.001.R
+
+具体构造方法
+
+static struct vmm_waitqueue wq_obj;
+static struct vmm_vcpu vcpu1;
+static struct vmm_vcpu vcpu2;
+
+INIT_LIST_HEAD(&wq_obj.vcpu_list);
+INIT_LIST_HEAD(&vcpu1.wq_head);
+INIT_LIST_HEAD(&vcpu2.wq_head);
+
+list_add_tail(&vcpu1.wq_head, &wq_obj.vcpu_list);
+list_add_tail(&vcpu2.wq_head, &wq_obj.vcpu_list);
+
+<<vmm_waitqueue.vmm_waitqueue_wakeall.wq>> = &wq_obj;
+
+Stub 设置：
+
+vmm_scheduler_state_change.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_spin_lock_irqsave 被调用一次
+vmm_spin_unlock_irqrestore 被调用一次
+vmm_scheduler_state_change 被调用两次
+
+用例注释
+
+测试目的：验证等待队列唤醒全部 VCPU 的 public 接口能够加锁后调用内部唤醒全部函数并返回结果。
+用例类别：基于需求的测试
+预置条件：构造包含两个 VCPU 的等待队列，调度状态切换接口返回成功。
+测试步骤：
+step1、构造包含两个 VCPU 的等待队列。
+step2、设置调度状态切换接口返回成功。
+step3、调用 vmm_waitqueue_wakeall。
+step4、观察函数返回值和锁接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_waitqueue_wakeall
+等价列表：等待队列有效且包含等待 VCPU。
+其它说明：本用例覆盖 public wrapper 加锁、内部唤醒全部、解锁路径。
+通过准则：函数返回 VMM_OK，调度状态切换接口被调用两次，锁和解锁接口各执行一次。
+
+⸻
+
+十五、最终用例清单
+
+vmm_waitqueue_count.001.R
+vmm_waitqueue_count.002.IN.wq.NEC
+
+waitqueue_timeout.001.R
+
+waitqueue_cleanup.001.R
+waitqueue_cleanup.002.R
+waitqueue_cleanup.003.R
+waitqueue_cleanup.004.R
+
+__vmm_waitqueue_sleep.001.IN.timeout_nsecs.RA.L
+__vmm_waitqueue_sleep.002.R
+__vmm_waitqueue_sleep.003.R
+__vmm_waitqueue_sleep.004.R
+__vmm_waitqueue_sleep.005.FI
+
+vmm_waitqueue_sleep.001.R
+vmm_waitqueue_sleep_timeout.001.R
+
+vmm_waitqueue_forced_remove.001.R
+vmm_waitqueue_forced_remove.002.IN.vcpu.NEC
+vmm_waitqueue_forced_remove.003.IN.vcpu.NEC
+vmm_waitqueue_forced_remove.004.R
+
+__vmm_waitqueue_wake.001.R
+__vmm_waitqueue_wake.002.FI
+
+vmm_waitqueue_wake.001.R
+vmm_waitqueue_wake.002.IN.vcpu.NEC
+vmm_waitqueue_wake.003.IN.vcpu.NEC
+vmm_waitqueue_wake.004.IN.vcpu.NEC
+vmm_waitqueue_wake.005.IN.vcpu.NEC
+
+__vmm_waitqueue_wakefirst.001.R
+__vmm_waitqueue_wakefirst.002.R
+__vmm_waitqueue_wakefirst.003.FI
+
+vmm_waitqueue_wakefirst.001.R
+
+__vmm_waitqueue_wakeall.001.R
+__vmm_waitqueue_wakeall.002.R
+__vmm_waitqueue_wakeall.003.FI
+
+vmm_waitqueue_wakeall.001.R
