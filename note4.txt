@@ -1,0 +1,1126 @@
+下面是基于你现在的 fixture 方案重新整理的 vmm_semaphore.c 用例设计。结构为：
+	1.	公共 User Code / fixture 放置方式
+	2.	每个用例的具体构造方法
+	3.	每个用例的可复制注释
+
+⸻
+
+一、公共 fixture 设置
+
+1. Unit Appendix User Code -> vmm_semaphore
+
+把下面代码放到：
+
+Environment User Code
+  -> Unit Appendix User Code
+      -> vmm_semaphore
+
+/*
+ * VectorCAST semaphore fixture.
+ * Object definitions must be placed in Unit Appendix, not Unit Prefix.
+ */
+
+static struct vmm_semaphore vcast_sem_obj;
+static struct vmm_semaphore_resource vcast_sem_res_obj;
+static struct vmm_semaphore_resource vcast_sem_res2_obj;
+
+/*
+ * Use opaque storage for VCPU pointers.
+ * vmm_semaphore.c only compares/passes struct vmm_vcpu pointers in these paths.
+ */
+static unsigned long vcast_sem_cur_vcpu_storage;
+static unsigned long vcast_sem_other_vcpu_storage;
+
+static void vcast_sem_zero(void *ptr, unsigned long size)
+{
+    unsigned char *p;
+
+    p = (unsigned char *)ptr;
+
+    while (size > 0UL) {
+        *p = 0U;
+        ++p;
+        --size;
+    }
+}
+
+static struct vmm_vcpu *vcast_sem_cur_vcpu_ptr(void)
+{
+    return (struct vmm_vcpu *)&vcast_sem_cur_vcpu_storage;
+}
+
+static struct vmm_vcpu *vcast_sem_other_vcpu_ptr(void)
+{
+    return (struct vmm_vcpu *)&vcast_sem_other_vcpu_storage;
+}
+
+void vcast_sem_init(unsigned int value, unsigned int limit)
+{
+    vcast_sem_zero(&vcast_sem_obj, sizeof(vcast_sem_obj));
+    vcast_sem_zero(&vcast_sem_res_obj, sizeof(vcast_sem_res_obj));
+    vcast_sem_zero(&vcast_sem_res2_obj, sizeof(vcast_sem_res2_obj));
+
+    INIT_SPIN_LOCK(&vcast_sem_obj.wq.lock);
+    INIT_LIST_HEAD(&vcast_sem_obj.wq.vcpu_list);
+    INIT_LIST_HEAD(&vcast_sem_obj.res_list);
+
+    vcast_sem_obj.wq.vcpu_count = 0U;
+    vcast_sem_obj.value = value;
+    vcast_sem_obj.limit = limit;
+}
+
+void vcast_sem_set_value(unsigned int value)
+{
+    vcast_sem_obj.value = value;
+}
+
+void vcast_sem_init_current_resource(unsigned int value,
+                                     unsigned int limit,
+                                     unsigned int res_count)
+{
+    vcast_sem_init(value, limit);
+
+    INIT_LIST_HEAD(&vcast_sem_res_obj.head);
+
+    vcast_sem_res_obj.count = res_count;
+    vcast_sem_res_obj.sem = &vcast_sem_obj;
+    vcast_sem_res_obj.vcpu = vcast_sem_cur_vcpu_ptr();
+    vcast_sem_res_obj.res.name = "vmm_semaphore";
+    vcast_sem_res_obj.res.cleanup = __vmm_semaphore_cleanup;
+
+    list_add_tail(&vcast_sem_res_obj.head, &vcast_sem_obj.res_list);
+}
+
+void vcast_sem_init_other_resource(unsigned int value,
+                                   unsigned int limit,
+                                   unsigned int res_count)
+{
+    vcast_sem_init(value, limit);
+
+    INIT_LIST_HEAD(&vcast_sem_res_obj.head);
+
+    vcast_sem_res_obj.count = res_count;
+    vcast_sem_res_obj.sem = &vcast_sem_obj;
+    vcast_sem_res_obj.vcpu = vcast_sem_other_vcpu_ptr();
+    vcast_sem_res_obj.res.name = "vmm_semaphore";
+    vcast_sem_res_obj.res.cleanup = __vmm_semaphore_cleanup;
+
+    list_add_tail(&vcast_sem_res_obj.head, &vcast_sem_obj.res_list);
+}
+
+void vcast_sem_init_two_resources(unsigned int value,
+                                  unsigned int limit,
+                                  unsigned int cur_count,
+                                  unsigned int other_count)
+{
+    vcast_sem_init(value, limit);
+
+    INIT_LIST_HEAD(&vcast_sem_res_obj.head);
+    INIT_LIST_HEAD(&vcast_sem_res2_obj.head);
+
+    vcast_sem_res_obj.count = cur_count;
+    vcast_sem_res_obj.sem = &vcast_sem_obj;
+    vcast_sem_res_obj.vcpu = vcast_sem_cur_vcpu_ptr();
+    vcast_sem_res_obj.res.name = "vmm_semaphore";
+    vcast_sem_res_obj.res.cleanup = __vmm_semaphore_cleanup;
+
+    vcast_sem_res2_obj.count = other_count;
+    vcast_sem_res2_obj.sem = &vcast_sem_obj;
+    vcast_sem_res2_obj.vcpu = vcast_sem_other_vcpu_ptr();
+    vcast_sem_res2_obj.res.name = "vmm_semaphore";
+    vcast_sem_res2_obj.res.cleanup = __vmm_semaphore_cleanup;
+
+    list_add_tail(&vcast_sem_res_obj.head, &vcast_sem_obj.res_list);
+    list_add_tail(&vcast_sem_res2_obj.head, &vcast_sem_obj.res_list);
+}
+
+void vcast_sem_init_current_resource_no_sem(unsigned int res_count)
+{
+    vcast_sem_zero(&vcast_sem_res_obj, sizeof(vcast_sem_res_obj));
+
+    INIT_LIST_HEAD(&vcast_sem_res_obj.head);
+
+    vcast_sem_res_obj.count = res_count;
+    vcast_sem_res_obj.sem = 0;
+    vcast_sem_res_obj.vcpu = vcast_sem_cur_vcpu_ptr();
+    vcast_sem_res_obj.res.name = "vmm_semaphore";
+    vcast_sem_res_obj.res.cleanup = __vmm_semaphore_cleanup;
+}
+
+void vcast_sem_prepare_zalloc_resource(void)
+{
+    vcast_sem_zero(&vcast_sem_res_obj, sizeof(vcast_sem_res_obj));
+}
+
+struct vmm_semaphore *vcast_sem_get(void)
+{
+    return &vcast_sem_obj;
+}
+
+struct vmm_vcpu *vcast_sem_get_cur_vcpu(void)
+{
+    return vcast_sem_cur_vcpu_ptr();
+}
+
+struct vmm_vcpu *vcast_sem_get_other_vcpu(void)
+{
+    return vcast_sem_other_vcpu_ptr();
+}
+
+struct vmm_vcpu_resource *vcast_sem_get_resource(void)
+{
+    return &vcast_sem_res_obj.res;
+}
+
+void *vcast_sem_get_zalloc_resource(void)
+{
+    return (void *)&vcast_sem_res_obj;
+}
+
+unsigned int vcast_sem_get_value(void)
+{
+    return vcast_sem_obj.value;
+}
+
+unsigned int vcast_sem_get_limit(void)
+{
+    return vcast_sem_obj.limit;
+}
+
+unsigned int vcast_sem_get_current_resource_count(void)
+{
+    return vcast_sem_res_obj.count;
+}
+
+unsigned int vcast_sem_get_second_resource_count(void)
+{
+    return vcast_sem_res2_obj.count;
+}
+
+int vcast_sem_resource_list_empty(void)
+{
+    return list_empty(&vcast_sem_obj.res_list);
+}
+
+
+⸻
+
+2. Prefix User Code
+
+放到你当前工程中 Value User Code 能看到的 Prefix 位置。
+这里只放声明，不定义对象。
+
+struct vmm_semaphore;
+struct vmm_vcpu;
+struct vmm_vcpu_resource;
+
+extern void vcast_sem_init(unsigned int value, unsigned int limit);
+extern void vcast_sem_set_value(unsigned int value);
+
+extern void vcast_sem_init_current_resource(unsigned int value,
+                                            unsigned int limit,
+                                            unsigned int res_count);
+
+extern void vcast_sem_init_other_resource(unsigned int value,
+                                          unsigned int limit,
+                                          unsigned int res_count);
+
+extern void vcast_sem_init_two_resources(unsigned int value,
+                                         unsigned int limit,
+                                         unsigned int cur_count,
+                                         unsigned int other_count);
+
+extern void vcast_sem_init_current_resource_no_sem(unsigned int res_count);
+extern void vcast_sem_prepare_zalloc_resource(void);
+
+extern struct vmm_semaphore *vcast_sem_get(void);
+extern struct vmm_vcpu *vcast_sem_get_cur_vcpu(void);
+extern struct vmm_vcpu *vcast_sem_get_other_vcpu(void);
+extern struct vmm_vcpu_resource *vcast_sem_get_resource(void);
+extern void *vcast_sem_get_zalloc_resource(void);
+
+extern unsigned int vcast_sem_get_value(void);
+extern unsigned int vcast_sem_get_limit(void);
+extern unsigned int vcast_sem_get_current_resource_count(void);
+extern unsigned int vcast_sem_get_second_resource_count(void);
+extern int vcast_sem_resource_list_empty(void);
+
+
+⸻
+
+3. User Globals
+
+用于控制 sleep 成功后释放信号量：
+
+unsigned int vcast_sem_sleep_release;
+
+
+⸻
+
+4. Test Case Init
+
+vcast_sem_sleep_release = 0U;
+
+
+⸻
+
+5. __vmm_waitqueue_sleep Stub User Code
+
+放到：
+
+Stub User Code -> __vmm_waitqueue_sleep -> Beginning of stub
+
+extern unsigned int vcast_sem_sleep_release;
+extern void vcast_sem_set_value(unsigned int value);
+
+if (vcast_sem_sleep_release != 0U) {
+    vcast_sem_set_value(1U);
+}
+
+用途：测试 semaphore_down_common() 中 sem->value == 0 时，__vmm_waitqueue_sleep() 返回成功后，模拟等待期间信号量变为可用，避免 while 无限循环。
+
+⸻
+
+二、__semaphore_find_resource
+
+⸻
+
+用例名称：__semaphore_find_resource.001.R
+
+具体构造方法
+
+vcast_sem_init(1U, 2U);
+
+<<vmm_semaphore.__semaphore_find_resource.sem>> = vcast_sem_get();
+<<vmm_semaphore.__semaphore_find_resource.vcpu>> = vcast_sem_get_cur_vcpu();
+
+用例注释
+
+测试目的：验证信号量资源链表为空时，查找资源函数返回空指针。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，并初始化其资源链表为空。
+测试步骤：step1、构造资源链表为空的信号量对象；step2、构造有效 VCPU 指针；step3、调用 __semaphore_find_resource；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_find_resource
+等价列表：信号量对象有效，资源链表为空，查找对象有效。
+其它说明：本用例覆盖链表遍历初始为空的路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：__semaphore_find_resource.002.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(1U, 2U, 1U);
+
+<<vmm_semaphore.__semaphore_find_resource.sem>> = vcast_sem_get();
+<<vmm_semaphore.__semaphore_find_resource.vcpu>> = vcast_sem_get_cur_vcpu();
+
+用例注释
+
+测试目的：验证资源链表中存在当前 VCPU 对应资源时，查找资源函数返回该资源对象。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，资源链表中存在一个属于目标 VCPU 的资源节点。
+测试步骤：step1、构造信号量对象并加入目标 VCPU 对应资源节点；step2、将目标 VCPU 作为查找对象；step3、调用 __semaphore_find_resource；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_find_resource
+等价列表：资源链表非空，资源节点所属 VCPU 与查找 VCPU 一致。
+其它说明：本用例覆盖遍历命中资源节点的路径。
+通过准则：函数返回非空指针，返回对象为预置资源节点。
+
+⸻
+
+用例名称：__semaphore_find_resource.003.R
+
+具体构造方法
+
+vcast_sem_init_two_resources(1U, 2U, 1U, 2U);
+
+<<vmm_semaphore.__semaphore_find_resource.sem>> = vcast_sem_get();
+<<vmm_semaphore.__semaphore_find_resource.vcpu>> = vcast_sem_get_other_vcpu();
+
+用例注释
+
+测试目的：验证目标资源位于资源链表非首节点时，查找资源函数能够遍历后返回目标资源对象。
+用例类别：基于需求的测试
+预置条件：构造包含两个资源节点的信号量资源链表，第二个节点属于目标 VCPU。
+测试步骤：step1、构造包含当前 VCPU 资源和其他 VCPU 资源的信号量对象；step2、将其他 VCPU 作为查找对象；step3、调用 __semaphore_find_resource；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_find_resource
+等价列表：资源链表非空，目标资源位于非首节点。
+其它说明：本用例覆盖遍历跳过非目标节点后命中目标节点的路径。
+通过准则：函数返回非空指针，返回对象为链表中的第二个资源节点。
+
+⸻
+
+用例名称：__semaphore_find_resource.004.R
+
+具体构造方法
+
+vcast_sem_init_other_resource(1U, 2U, 1U);
+
+<<vmm_semaphore.__semaphore_find_resource.sem>> = vcast_sem_get();
+<<vmm_semaphore.__semaphore_find_resource.vcpu>> = vcast_sem_get_cur_vcpu();
+
+用例注释
+
+测试目的：验证资源链表非空但不存在目标 VCPU 对应资源时，查找资源函数返回空指针。
+用例类别：基于需求的测试
+预置条件：构造包含其他 VCPU 资源的信号量对象，目标 VCPU 没有对应资源。
+测试步骤：step1、构造信号量对象并加入其他 VCPU 对应资源；step2、将当前 VCPU 作为查找对象；step3、调用 __semaphore_find_resource；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_find_resource
+等价列表：资源链表非空，但目标 VCPU 资源不存在。
+其它说明：本用例覆盖遍历结束后仍未找到目标资源的路径。
+通过准则：函数返回空指针。
+
+⸻
+
+三、__semaphore_first_resource
+
+⸻
+
+用例名称：__semaphore_first_resource.001.R
+
+具体构造方法
+
+vcast_sem_init(1U, 2U);
+
+<<vmm_semaphore.__semaphore_first_resource.sem>> = vcast_sem_get();
+
+用例注释
+
+测试目的：验证资源链表为空时，获取首个资源函数返回空指针。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，并初始化资源链表为空。
+测试步骤：step1、构造资源链表为空的信号量对象；step2、调用 __semaphore_first_resource；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_first_resource
+等价列表：信号量对象有效，资源链表为空。
+其它说明：本用例覆盖 list_empty 为 true 的路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：__semaphore_first_resource.002.R
+
+具体构造方法
+
+vcast_sem_init_two_resources(1U, 2U, 1U, 2U);
+
+<<vmm_semaphore.__semaphore_first_resource.sem>> = vcast_sem_get();
+
+用例注释
+
+测试目的：验证资源链表非空时，获取首个资源函数返回链表中的第一个资源对象。
+用例类别：基于需求的测试
+预置条件：构造包含两个资源节点的信号量资源链表。
+测试步骤：step1、构造包含两个资源节点的信号量对象；step2、调用 __semaphore_first_resource；step3、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：__semaphore_first_resource
+等价列表：信号量对象有效，资源链表非空。
+其它说明：本用例覆盖 list_empty 为 false 的路径。
+通过准则：函数返回非空指针，返回对象为资源链表中的首个资源节点。
+
+⸻
+
+四、__vmm_semaphore_cleanup
+
+⸻
+
+用例名称：__vmm_semaphore_cleanup.001.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(1U, 5U, 2U);
+
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu>> = vcast_sem_get_cur_vcpu();
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu_res>> = vcast_sem_get_resource();
+
+Stub 设置：
+
+__vmm_waitqueue_wakeall.return = VMM_OK
+
+用例注释
+
+测试目的：验证 VCPU 清理信号量资源时，若资源持有计数非 0，函数能够归还信号量计数、删除资源并唤醒等待队列。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象和信号量资源对象，资源对象属于传入 VCPU，资源持有计数非 0，信号量归还后不超过上限。
+测试步骤：step1、构造信号量对象并设置当前可用值和上限；step2、构造属于目标 VCPU 的信号量资源对象并加入资源链表；step3、调用 __vmm_semaphore_cleanup；step4、观察信号量值、资源计数、资源链表和等待队列唤醒情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_semaphore_cleanup
+等价列表：资源对象有效，资源所属 VCPU 与入参 VCPU 一致，资源持有计数大于 0。
+其它说明：本用例覆盖资源归还和唤醒全部等待对象路径。
+通过准则：信号量可用值由 1 增加为 3，资源持有计数清零，资源节点从资源链表删除，释放接口被调用，唤醒全部等待对象接口被调用一次。
+
+⸻
+
+用例名称：__vmm_semaphore_cleanup.002.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(4U, 5U, 3U);
+
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu>> = vcast_sem_get_cur_vcpu();
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu_res>> = vcast_sem_get_resource();
+
+Stub 设置：
+
+__vmm_waitqueue_wakeall.return = VMM_OK
+
+用例注释
+
+测试目的：验证资源清理归还信号量后超过信号量上限时，函数能够将可用值限制在上限。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，当前可用值接近上限，资源持有计数使归还后超过上限。
+测试步骤：step1、构造信号量对象并设置可用值为 4、上限为 5；step2、构造属于目标 VCPU 的资源对象并设置持有计数为 3；step3、调用 __vmm_semaphore_cleanup；step4、观察信号量可用值是否被限制在上限。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_semaphore_cleanup
+等价列表：资源归还后信号量可用值超过上限。
+其它说明：本用例覆盖 sem->value > sem->limit 的修正路径。
+通过准则：信号量可用值最终等于信号量上限 5，资源节点被删除，释放接口被调用，唤醒全部等待对象接口被调用一次。
+
+⸻
+
+用例名称：__vmm_semaphore_cleanup.003.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(2U, 5U, 0U);
+
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu>> = vcast_sem_get_cur_vcpu();
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu_res>> = vcast_sem_get_resource();
+
+用例注释
+
+测试目的：验证资源持有计数为 0 时，清理函数只删除资源，不归还信号量，也不唤醒等待队列。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象和属于目标 VCPU 的资源对象，资源持有计数为 0。
+测试步骤：step1、构造信号量对象并设置当前可用值；step2、构造资源对象并设置持有计数为 0；step3、调用 __vmm_semaphore_cleanup；step4、观察信号量值、资源链表和唤醒接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：__vmm_semaphore_cleanup
+等价列表：资源对象有效，资源持有计数为 0。
+其它说明：本用例覆盖不需要归还信号量且不唤醒等待队列的路径。
+通过准则：信号量可用值保持为 2，资源节点被删除，释放接口被调用，唤醒全部等待对象接口未被调用。
+
+⸻
+
+用例名称：__vmm_semaphore_cleanup.004.IN.vcpu.NEC
+
+具体构造方法
+
+vcast_sem_init_current_resource(1U, 5U, 2U);
+
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu>> = vcast_sem_get_other_vcpu();
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu_res>> = vcast_sem_get_resource();
+
+用例注释
+
+测试目的：验证资源所属 VCPU 与入参 VCPU 不一致时，清理函数直接返回，不释放资源。
+用例类别：接口测试
+预置条件：构造有效信号量资源对象，但资源所属 VCPU 与传入 VCPU 不一致。
+测试步骤：step1、构造信号量和资源对象；step2、设置资源对象所属 VCPU 为当前 VCPU，调用入参 VCPU 为其他 VCPU；step3、调用 __vmm_semaphore_cleanup；step4、观察信号量值和资源链表是否保持不变。
+用例来源：无效等价类
+追溯ID：__vmm_semaphore_cleanup
+等价列表：资源对象有效，但资源所属 VCPU 与清理 VCPU 不匹配。
+其它说明：本用例覆盖初始合法性判断中 VCPU 不匹配的返回路径。
+通过准则：函数直接返回，信号量可用值保持为 1，资源节点仍在资源链表中，释放接口和唤醒全部等待对象接口均未被调用。
+
+⸻
+
+用例名称：__vmm_semaphore_cleanup.005.IN.sem.NEC
+
+具体构造方法
+
+vcast_sem_init_current_resource_no_sem(2U);
+
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu>> = vcast_sem_get_cur_vcpu();
+<<vmm_semaphore.__vmm_semaphore_cleanup.vcpu_res>> = vcast_sem_get_resource();
+
+用例注释
+
+测试目的：验证资源对象中的信号量指针为空时，清理函数直接返回。
+用例类别：接口测试
+预置条件：构造有效资源对象，资源对象所属 VCPU 与入参 VCPU 一致，但资源对象中的信号量指针为空。
+测试步骤：step1、构造资源对象并设置其信号量指针为空；step2、设置资源对象所属 VCPU 与入参 VCPU 一致；step3、调用 __vmm_semaphore_cleanup；step4、观察函数是否直接返回。
+用例来源：无效等价类
+追溯ID：__vmm_semaphore_cleanup
+等价列表：资源对象有效，但其关联信号量为空。
+其它说明：本用例覆盖 !sem 返回路径。
+通过准则：函数直接返回，不调用释放接口，不调用唤醒全部等待对象接口。
+
+⸻
+
+五、vmm_semaphore_avail
+
+⸻
+
+用例名称：vmm_semaphore_avail.001.R
+
+具体构造方法
+
+vcast_sem_init(3U, 5U);
+
+<<vmm_semaphore.vmm_semaphore_avail.sem>> = vcast_sem_get();
+
+用例注释
+
+测试目的：验证信号量可用值查询接口能够返回当前可用计数。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，并设置可用值为 3。
+测试步骤：step1、构造有效信号量对象；step2、设置其当前可用值为 3；step3、调用 vmm_semaphore_avail；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_avail
+等价列表：信号量对象有效，当前可用值为非 0。
+其它说明：本用例覆盖正常读取可用值路径。
+通过准则：函数返回 3。
+
+⸻
+
+六、vmm_semaphore_limit
+
+⸻
+
+用例名称：vmm_semaphore_limit.001.R
+
+具体构造方法
+
+vcast_sem_init(3U, 5U);
+
+<<vmm_semaphore.vmm_semaphore_limit.sem>> = vcast_sem_get();
+
+用例注释
+
+测试目的：验证信号量上限查询接口能够返回信号量上限值。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，并设置上限为 5。
+测试步骤：step1、构造有效信号量对象；step2、设置信号量上限为 5；step3、调用 vmm_semaphore_limit；step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_limit
+等价列表：信号量对象有效，信号量上限为有效非 0 值。
+其它说明：本用例覆盖正常读取上限路径。
+通过准则：函数返回 5。
+
+⸻
+
+七、vmm_semaphore_up
+
+⸻
+
+用例名称：vmm_semaphore_up.001.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(0U, 2U, 1U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_wakefirst.return = VMM_OK
+
+用例注释
+
+测试目的：验证信号量未达到上限且当前 VCPU 持有一个信号量资源时，释放操作能够增加可用值、释放资源并唤醒一个等待对象。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，当前可用值小于上限；构造当前 VCPU 对应的资源对象，资源持有计数为 1；唤醒首个等待对象接口返回成功。
+测试步骤：step1、构造信号量对象并设置可用值小于上限；step2、构造当前 VCPU 对应的资源节点并加入资源链表；step3、设置唤醒首个等待对象接口返回成功；step4、调用 vmm_semaphore_up；step5、观察返回值、信号量值、资源链表和资源移除情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_up
+等价列表：信号量对象有效，当前值小于上限，当前 VCPU 持有一个资源，唤醒接口返回成功。
+其它说明：本用例覆盖资源计数递减为 0 后移除资源并唤醒成功的路径。
+通过准则：函数返回 VMM_OK，信号量可用值增加为 1，资源节点被移除并释放，资源移除接口被调用一次，唤醒首个等待对象接口被调用一次。
+
+⸻
+
+用例名称：vmm_semaphore_up.002.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(0U, 3U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_wakefirst.return = VMM_OK
+
+用例注释
+
+测试目的：验证当前 VCPU 持有多个信号量资源时，释放一次仅减少资源持有计数，不删除资源对象。
+用例类别：基于需求的测试
+预置条件：构造当前 VCPU 对应的资源对象，资源持有计数为 2；信号量当前值小于上限。
+测试步骤：step1、构造有效信号量对象；step2、构造当前 VCPU 资源节点并设置持有计数为 2；step3、调用 vmm_semaphore_up；step4、观察资源持有计数和信号量可用值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_up
+等价列表：当前 VCPU 持有多个资源计数。
+其它说明：本用例覆盖资源计数递减后仍非 0 的路径。
+通过准则：函数返回 VMM_OK，信号量可用值增加为 1，资源持有计数由 2 减少为 1，资源节点仍保留在资源链表中。
+
+⸻
+
+用例名称：vmm_semaphore_up.003.R
+
+具体构造方法
+
+vcast_sem_init_other_resource(0U, 2U, 1U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_wakefirst.return = VMM_OK
+
+用例注释
+
+测试目的：验证当前 VCPU 没有资源但资源链表存在其他资源时，释放操作能够处理资源链表中的首个资源。
+用例类别：基于需求的测试
+预置条件：构造信号量资源链表，链表中不存在当前 VCPU 对应资源，但存在其他 VCPU 资源。
+测试步骤：step1、构造信号量对象并设置可用值小于上限；step2、构造其他 VCPU 的资源对象并加入资源链表；step3、设置当前 VCPU 为不同对象；step4、调用 vmm_semaphore_up；step5、观察首个资源是否被处理。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_up
+等价列表：当前 VCPU 无资源，资源链表非空。
+其它说明：本用例覆盖未找到当前 VCPU 资源后使用首个资源的路径。
+通过准则：函数返回 VMM_OK，信号量可用值增加为 1，首个资源节点被移除并释放，资源移除接口使用该资源所属 VCPU 被调用。
+
+⸻
+
+用例名称：vmm_semaphore_up.004.R
+
+具体构造方法
+
+vcast_sem_init(0U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_wakefirst.return = VMM_ENOENT
+
+用例注释
+
+测试目的：验证资源链表为空且唤醒接口返回无等待对象时，释放操作能够将无等待对象结果转换为成功。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，当前可用值小于上限，资源链表为空；唤醒首个等待对象接口返回 VMM_ENOENT。
+测试步骤：step1、构造资源链表为空的信号量对象；step2、设置唤醒首个等待对象接口返回无等待对象；step3、调用 vmm_semaphore_up；step4、观察函数返回值和信号量可用值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_up
+等价列表：资源链表为空，唤醒接口返回无等待对象。
+其它说明：本用例覆盖 VMM_ENOENT 转换为 VMM_OK 的路径。
+通过准则：函数返回 VMM_OK，信号量可用值增加为 1，资源链表保持为空。
+
+⸻
+
+用例名称：vmm_semaphore_up.005.FI
+
+具体构造方法
+
+vcast_sem_init(0U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_wakefirst.return = VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟唤醒首个等待对象接口返回异常错误，验证信号量释放函数能够返回该错误码。
+用例类别：故障注入测试
+预置条件：构造有效信号量对象，当前值小于上限；唤醒首个等待对象接口打桩返回异常错误。
+测试步骤：step1、构造有效信号量对象并设置可用值小于上限；step2、设置唤醒接口返回异常错误；step3、调用 vmm_semaphore_up；step4、观察函数返回值和信号量值。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_semaphore_up
+等价列表：信号量可释放，外部唤醒接口发生异常错误。
+其它说明：本用例覆盖唤醒接口错误传播路径。
+通过准则：函数返回唤醒接口注入的错误码，信号量可用值已增加为 1。
+
+⸻
+
+用例名称：vmm_semaphore_up.006.IN.state.NEC
+
+具体构造方法
+
+vcast_sem_init(2U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_up.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+用例注释
+
+测试目的：验证信号量当前可用值已达到上限时，释放操作返回无效错误且不修改状态。
+用例类别：接口测试
+预置条件：构造有效信号量对象，并设置当前可用值等于信号量上限。
+测试步骤：step1、构造信号量对象；step2、设置当前可用值等于上限；step3、调用 vmm_semaphore_up；step4、观察函数返回值和信号量状态。
+用例来源：无效等价类
+追溯ID：vmm_semaphore_up
+等价列表：信号量已达到上限，继续释放属于非法状态。
+其它说明：本用例覆盖 sem->value < sem->limit 为 false 的路径。
+通过准则：函数返回 VMM_EINVALID，信号量可用值保持为 2，唤醒接口和资源处理接口均未被调用。
+
+⸻
+
+八、semaphore_down_common
+
+⸻
+
+用例名称：semaphore_down_common.001.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+vcast_sem_init(1U, 2U);
+
+<<vmm_semaphore.semaphore_down_common.sem>> = vcast_sem_get();
+<<vmm_semaphore.semaphore_down_common.timeout>> = NULL;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+用例注释
+
+测试目的：验证信号量可用值大于 0 且当前 VCPU 尚无资源时，获取操作能够创建资源并减少信号量可用值。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，可用值为 1；当前 VCPU 没有已存在资源；内存分配桩函数返回有效资源对象。
+测试步骤：step1、构造信号量对象并设置可用值为 1；step2、构造当前 VCPU；step3、设置资源分配桩函数返回有效资源对象；step4、调用 semaphore_down_common 且超时参数为空；step5、观察函数返回值、信号量值、资源链表和资源添加接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：semaphore_down_common
+等价列表：信号量对象有效，可用值大于 0，当前 VCPU 无资源。
+其它说明：本用例覆盖无等待、创建新资源并获取信号量的路径。
+通过准则：函数返回 VMM_OK，信号量可用值由 1 减少为 0，新资源加入资源链表，新资源计数为 1，资源添加接口被调用一次。
+
+⸻
+
+用例名称：semaphore_down_common.002.R
+
+具体构造方法
+
+vcast_sem_init_current_resource(2U, 3U, 1U);
+
+<<vmm_semaphore.semaphore_down_common.sem>> = vcast_sem_get();
+<<vmm_semaphore.semaphore_down_common.timeout>> = NULL;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+用例注释
+
+测试目的：验证当前 VCPU 已存在信号量资源时，再次获取信号量能够增加已有资源计数而不重新分配资源。
+用例类别：基于需求的测试
+预置条件：构造信号量对象，可用值大于 0；资源链表中已有当前 VCPU 对应资源。
+测试步骤：step1、构造信号量对象并设置可用值为 2；step2、构造当前 VCPU 已有资源并加入资源链表；step3、调用 semaphore_down_common；step4、观察已有资源计数和信号量可用值。
+用例来源：需求分析、有效等价类
+追溯ID：semaphore_down_common
+等价列表：信号量可用，当前 VCPU 已有资源记录。
+其它说明：本用例覆盖找到已有资源后复用资源的路径。
+通过准则：函数返回 VMM_OK，信号量可用值由 2 减少为 1，已有资源计数由 1 增加为 2，资源分配接口和资源添加接口均未被调用。
+
+⸻
+
+用例名称：semaphore_down_common.003.FI
+
+具体构造方法
+
+vcast_sem_init(0U, 2U);
+
+<<vmm_semaphore.semaphore_down_common.sem>> = vcast_sem_get();
+<<vmm_semaphore.semaphore_down_common.timeout>> = NULL;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_sleep.return = VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟等待队列睡眠接口返回错误，验证获取信号量函数返回错误且不创建资源。
+用例类别：故障注入测试
+预置条件：构造有效信号量对象，可用值为 0；等待队列睡眠接口打桩返回错误。
+测试步骤：step1、构造信号量对象并设置可用值为 0；step2、设置等待队列睡眠接口返回失败；step3、调用 semaphore_down_common；step4、观察函数返回值、信号量值和资源链表。
+用例来源：故障注入、无效等价类
+追溯ID：semaphore_down_common
+等价列表：信号量暂不可用，等待队列睡眠接口发生错误。
+其它说明：本用例覆盖等待失败后退出路径。
+通过准则：函数返回等待队列睡眠接口注入的错误码，信号量可用值保持为 0，不创建资源，不调用资源添加接口。
+
+⸻
+
+用例名称：semaphore_down_common.004.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+vcast_sem_init(0U, 2U);
+
+vcast_sem_sleep_release = 1U;
+
+<<vmm_semaphore.semaphore_down_common.sem>> = vcast_sem_get();
+<<vmm_semaphore.semaphore_down_common.timeout>> = NULL;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+Stub 设置：
+
+__vmm_waitqueue_sleep.return = VMM_OK
+
+用例注释
+
+测试目的：验证信号量初始不可用时，等待成功且信号量变为可用后，获取函数能够继续创建资源并获得信号量。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，初始可用值为 0；等待队列睡眠接口返回成功，并在等待期间模拟信号量变为可用；资源分配接口返回有效资源对象。
+测试步骤：step1、构造信号量对象并设置初始可用值为 0；step2、设置等待队列睡眠桩函数返回成功并模拟信号量变为可用；step3、设置资源分配桩函数返回有效资源对象；step4、调用 semaphore_down_common；step5、观察函数返回值、信号量值和资源链表。
+用例来源：需求分析、有效等价类
+追溯ID：semaphore_down_common
+等价列表：信号量初始不可用，等待后可用，当前 VCPU 无资源。
+其它说明：本用例覆盖等待成功后继续获得信号量的路径。
+通过准则：函数返回 VMM_OK，等待队列睡眠接口被调用一次，信号量最终减少为 0，新资源加入资源链表且计数为 1。
+
+⸻
+
+用例名称：semaphore_down_common.005.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+static u64 timeout_obj;
+
+vcast_sem_init(1U, 2U);
+
+timeout_obj = 1000U;
+
+<<vmm_semaphore.semaphore_down_common.sem>> = vcast_sem_get();
+<<vmm_semaphore.semaphore_down_common.timeout>> = &timeout_obj;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+用例注释
+
+测试目的：验证带超时参数调用信号量获取公共函数时，在信号量可用的情况下能够直接获取信号量，不进入等待。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，可用值大于 0；构造有效超时参数；资源分配接口返回有效资源对象。
+测试步骤：step1、构造信号量对象并设置可用值为 1；step2、构造有效超时参数；step3、调用 semaphore_down_common；step4、观察函数返回值、信号量值和等待接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：semaphore_down_common
+等价列表：信号量可用，超时参数有效。
+其它说明：本用例覆盖超时参数非空但无需等待的路径。
+通过准则：函数返回 VMM_OK，信号量可用值减少为 0，等待队列睡眠接口未被调用，新资源加入资源链表。
+
+⸻
+
+九、vmm_semaphore_down
+
+⸻
+
+用例名称：vmm_semaphore_down.001.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+vcast_sem_init(1U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_down.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+用例注释
+
+测试目的：验证信号量普通获取接口能够在信号量可用时调用公共获取逻辑并成功获得信号量。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，可用值大于 0；当前 VCPU 无资源；资源分配接口返回有效资源对象。
+测试步骤：step1、构造信号量对象并设置可用值为 1；step2、构造当前 VCPU 和资源分配返回对象；step3、调用 vmm_semaphore_down；step4、观察函数返回值、信号量值和资源链表。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_down
+等价列表：信号量对象有效，普通无超时获取路径。
+其它说明：本用例用于覆盖 public wrapper 向公共逻辑传递空超时参数的路径。
+通过准则：函数返回 VMM_OK，信号量可用值减少为 0，新资源加入资源链表。
+
+⸻
+
+用例名称：vmm_semaphore_down.002.FI
+
+具体构造方法
+
+vcast_sem_init(0U, 2U);
+
+<<vmm_semaphore.vmm_semaphore_down.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+Stub 设置：
+
+__vmm_waitqueue_sleep.return = VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟普通信号量获取时等待队列睡眠失败，验证 wrapper 返回公共逻辑的错误码。
+用例类别：故障注入测试
+预置条件：构造有效信号量对象，可用值为 0；等待队列睡眠接口返回错误。
+测试步骤：step1、构造不可用信号量对象；step2、设置等待队列睡眠接口返回错误；step3、调用 vmm_semaphore_down；step4、观察函数返回值和信号量状态。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_semaphore_down
+等价列表：信号量对象有效，但等待队列睡眠接口发生故障。
+其它说明：本用例覆盖 public wrapper 的错误传播路径。
+通过准则：函数返回等待队列睡眠接口注入的错误码，信号量可用值保持为 0。
+
+⸻
+
+十、vmm_semaphore_down_timeout
+
+⸻
+
+用例名称：vmm_semaphore_down_timeout.001.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+static u64 timeout_obj;
+
+vcast_sem_init(1U, 2U);
+
+timeout_obj = 1000U;
+
+<<vmm_semaphore.vmm_semaphore_down_timeout.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_semaphore_down_timeout.timeout>> = &timeout_obj;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+用例注释
+
+测试目的：验证带超时信号量获取接口能够向公共获取逻辑传递有效超时参数并成功获得信号量。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，可用值大于 0；构造有效超时参数；资源分配接口返回有效资源对象。
+测试步骤：step1、构造信号量对象并设置可用值为 1；step2、构造有效超时参数；step3、调用 vmm_semaphore_down_timeout；step4、观察函数返回值和信号量状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_semaphore_down_timeout
+等价列表：信号量对象有效，带超时参数获取路径。
+其它说明：本用例用于覆盖 public wrapper 向公共逻辑传递非空超时参数的路径。
+通过准则：函数返回 VMM_OK，信号量可用值减少为 0，新资源加入资源链表。
+
+⸻
+
+用例名称：vmm_semaphore_down_timeout.002.R
+
+具体构造方法
+
+sem 参数 Value User Code：
+
+vcast_sem_init(0U, 2U);
+
+vcast_sem_sleep_release = 1U;
+
+<<vmm_semaphore.vmm_semaphore_down_timeout.sem>> = vcast_sem_get();
+<<vmm_semaphore.vmm_semaphore_down_timeout.timeout>> = NULL;
+<<vmm_semaphore.vmm_scheduler_current_vcpu.return>> = vcast_sem_get_cur_vcpu();
+
+vmm_zalloc.return Value User Code：
+
+vcast_sem_prepare_zalloc_resource();
+
+<<vmm_semaphore.vmm_zalloc.return>> = vcast_sem_get_zalloc_resource();
+
+Stub 设置：
+
+__vmm_waitqueue_sleep.return = VMM_OK
+
+用例注释
+
+测试目的：验证带超时信号量获取接口在超时参数为空时，也能将空指针透传给公共获取逻辑并在等待成功后获得信号量。
+用例类别：基于需求的测试
+预置条件：构造有效信号量对象，初始可用值为 0；超时参数为空；等待队列睡眠接口返回成功并模拟信号量变为可用；资源分配接口返回有效资源对象。
+测试步骤：step1、构造初始不可用的信号量对象；step2、将超时参数设置为空；step3、设置等待队列睡眠接口返回成功并模拟信号量变为可用；step4、调用 vmm_semaphore_down_timeout；step5、观察函数返回值和信号量状态。
+用例来源：有效等价类
+追溯ID：vmm_semaphore_down_timeout
+等价列表：信号量对象有效，超时参数为空，等待后可用。
+其它说明：本用例验证当前实现对超时参数仅透传，不在 wrapper 内部解引用。
+通过准则：函数返回 VMM_OK，信号量最终被获取，新资源加入资源链表。
+
+⸻
+
+十一、不建议普通执行的用例说明
+
+以下路径不建议作为普通返回值用例直接执行：
+
+sem == NULL
+sem->limit == 0
+vmm_zalloc 返回 NULL
+vcpu_res == NULL 传入 __vmm_semaphore_cleanup
+
+原因：
+
+sem == NULL 和 sem->limit == 0 由 BUG_ON 处理，不是普通错误码返回路径。
+vmm_zalloc 返回 NULL 后代码会执行 BUG_ON(!sres)，同样属于断言路径。
+__vmm_semaphore_cleanup 在检查 vcpu_res 之前先执行 container_of(vcpu_res, ...)，因此 vcpu_res == NULL 存在未定义指针运算风险，不建议普通运行构造。
+
+如果项目强制要求覆盖这些断言路径，建议统一使用 BUG_ON 测试替身，记录断言触发并终止当前用例，不与普通功能用例混用。
+
+⸻
+
+十二、最终用例清单
+
+__semaphore_find_resource.001.R
+__semaphore_find_resource.002.R
+__semaphore_find_resource.003.R
+__semaphore_find_resource.004.R
+
+__semaphore_first_resource.001.R
+__semaphore_first_resource.002.R
+
+__vmm_semaphore_cleanup.001.R
+__vmm_semaphore_cleanup.002.R
+__vmm_semaphore_cleanup.003.R
+__vmm_semaphore_cleanup.004.IN.vcpu.NEC
+__vmm_semaphore_cleanup.005.IN.sem.NEC
+
+vmm_semaphore_avail.001.R
+vmm_semaphore_limit.001.R
+
+vmm_semaphore_up.001.R
+vmm_semaphore_up.002.R
+vmm_semaphore_up.003.R
+vmm_semaphore_up.004.R
+vmm_semaphore_up.005.FI
+vmm_semaphore_up.006.IN.state.NEC
+
+semaphore_down_common.001.R
+semaphore_down_common.002.R
+semaphore_down_common.003.FI
+semaphore_down_common.004.R
+semaphore_down_common.005.R
+
+vmm_semaphore_down.001.R
+vmm_semaphore_down.002.FI
+
+vmm_semaphore_down_timeout.001.R
+vmm_semaphore_down_timeout.002.R
