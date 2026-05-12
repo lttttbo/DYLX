@@ -1,0 +1,2462 @@
+下面按当前模板整理 vmm_workqueue.c：
+	•	每个函数独立设计；
+	•	给出具体构造方法；
+	•	给出 Expected return 和关键期望；
+	•	注释中步骤分行写；
+	•	workqueue_main 是无限循环函数，单独给受控退出方案；
+	•	部分同文件调用建议用 SBF，否则会变成其它函数的间接覆盖。
+
+⸻
+
+一、公共 fixture 设置
+
+struct vmm_workqueue 和 wqctrl 都是 vmm_workqueue.c 内部定义，Value User Code 侧通常不能直接定义或展开。因此建议把对象定义和少量构造函数放到 Unit Appendix User Code -> vmm_workqueue。
+
+1. Unit Appendix User Code -> vmm_workqueue
+
+/*
+ * VectorCAST workqueue fixture.
+ * struct vmm_workqueue and wqctrl are private to vmm_workqueue.c,
+ * so object definitions and list manipulation helpers are placed here.
+ */
+
+static struct vmm_workqueue vcast_wq1_obj;
+static struct vmm_workqueue vcast_wq2_obj;
+static struct vmm_thread vcast_wq_thread1_obj;
+static struct vmm_thread vcast_wq_thread2_obj;
+
+/* Direct pointer handles used by Value User Code */
+struct vmm_workqueue *vcast_wq1 = &vcast_wq1_obj;
+struct vmm_workqueue *vcast_wq2 = &vcast_wq2_obj;
+struct vmm_thread *vcast_wq_thread1 = &vcast_wq_thread1_obj;
+struct vmm_thread *vcast_wq_thread2 = &vcast_wq_thread2_obj;
+
+static void vcast_wq_zero(void *ptr, unsigned long size)
+{
+    unsigned char *p = (unsigned char *)ptr;
+
+    while (size > 0UL) {
+        *p = 0U;
+        ++p;
+        --size;
+    }
+}
+
+void vcast_wq_fixture_reset(void)
+{
+    vcast_wq_zero(&vcast_wq1_obj, sizeof(vcast_wq1_obj));
+    vcast_wq_zero(&vcast_wq2_obj, sizeof(vcast_wq2_obj));
+    vcast_wq_zero(&vcast_wq_thread1_obj, sizeof(vcast_wq_thread1_obj));
+    vcast_wq_zero(&vcast_wq_thread2_obj, sizeof(vcast_wq_thread2_obj));
+    vcast_wq_zero(&wqctrl, sizeof(wqctrl));
+
+    INIT_SPIN_LOCK(&vcast_wq1_obj.lock);
+    INIT_LIST_HEAD(&vcast_wq1_obj.head);
+    INIT_LIST_HEAD(&vcast_wq1_obj.work_list);
+    INIT_COMPLETION(&vcast_wq1_obj.work_avail);
+    vcast_wq1_obj.thread = &vcast_wq_thread1_obj;
+
+    INIT_SPIN_LOCK(&vcast_wq2_obj.lock);
+    INIT_LIST_HEAD(&vcast_wq2_obj.head);
+    INIT_LIST_HEAD(&vcast_wq2_obj.work_list);
+    INIT_COMPLETION(&vcast_wq2_obj.work_avail);
+    vcast_wq2_obj.thread = &vcast_wq_thread2_obj;
+
+    INIT_SPIN_LOCK(&wqctrl.lock);
+    INIT_LIST_HEAD(&wqctrl.wq_list);
+    wqctrl.wq_count = 0U;
+}
+
+void vcast_wq_global_empty(void)
+{
+    vcast_wq_fixture_reset();
+}
+
+void vcast_wq_global_one(void)
+{
+    vcast_wq_fixture_reset();
+
+    list_add_tail(&vcast_wq1_obj.head, &wqctrl.wq_list);
+    wqctrl.wq_count = 1U;
+}
+
+void vcast_wq_global_two(void)
+{
+    vcast_wq_fixture_reset();
+
+    list_add_tail(&vcast_wq1_obj.head, &wqctrl.wq_list);
+    list_add_tail(&vcast_wq2_obj.head, &wqctrl.wq_list);
+    wqctrl.wq_count = 2U;
+}
+
+void vcast_wq_set_count(unsigned int count)
+{
+    wqctrl.wq_count = count;
+}
+
+void vcast_wq_install_syswq0(void)
+{
+    wqctrl.syswq[0] = &vcast_wq1_obj;
+}
+
+void vcast_wq_add_work_to_wq1(struct vmm_work *work)
+{
+    if (!work) {
+        return;
+    }
+
+    INIT_LIST_HEAD(&work->head);
+    work->wq = &vcast_wq1_obj;
+
+    list_add_tail(&work->head, &vcast_wq1_obj.work_list);
+}
+
+void vcast_wq_clear_work_list(struct vmm_workqueue *wq)
+{
+    if (wq) {
+        INIT_LIST_HEAD(&wq->work_list);
+    }
+}
+
+
+⸻
+
+2. Prefix User Code
+
+放到 Value User Code 能看到的位置。
+
+struct vmm_workqueue;
+struct vmm_thread;
+struct vmm_work;
+
+extern struct vmm_workqueue *vcast_wq1;
+extern struct vmm_workqueue *vcast_wq2;
+extern struct vmm_thread *vcast_wq_thread1;
+extern struct vmm_thread *vcast_wq_thread2;
+
+extern void vcast_wq_fixture_reset(void);
+extern void vcast_wq_global_empty(void);
+extern void vcast_wq_global_one(void);
+extern void vcast_wq_global_two(void);
+extern void vcast_wq_set_count(unsigned int count);
+extern void vcast_wq_install_syswq0(void);
+extern void vcast_wq_add_work_to_wq1(struct vmm_work *work);
+extern void vcast_wq_clear_work_list(struct vmm_workqueue *wq);
+
+extern unsigned int vcast_work_func_called;
+extern unsigned int vcast_wakeup_called;
+extern unsigned int vcast_yield_called;
+extern unsigned int vcast_wq_main_wait_count;
+
+static void vcast_work_func(struct vmm_work *work)
+{
+    (void)work;
+    vcast_work_func_called++;
+}
+
+
+⸻
+
+3. User Globals
+
+unsigned int vcast_work_func_called;
+unsigned int vcast_wakeup_called;
+unsigned int vcast_yield_called;
+unsigned int vcast_wq_main_wait_count;
+
+struct vmm_work *vcast_stop_work_target;
+struct vmm_workqueue *vcast_flush_wq_target;
+
+
+⸻
+
+4. Test Case Init
+
+vcast_work_func_called = 0U;
+vcast_wakeup_called = 0U;
+vcast_yield_called = 0U;
+vcast_wq_main_wait_count = 0U;
+
+vcast_stop_work_target = 0;
+vcast_flush_wq_target = 0;
+
+
+⸻
+
+5. 建议 Stub User Code
+
+vmm_udelay -> Beginning of stub
+
+用于 vmm_workqueue_stop_work.004.R，避免执行中状态无限等待。
+
+extern struct vmm_work *vcast_stop_work_target;
+
+if (vcast_stop_work_target != (struct vmm_work *)0) {
+    vcast_stop_work_target->flags &= ~VMM_WORK_STATE_INPROGRESS;
+}
+
+vmm_threads_wakeup -> Beginning of stub
+
+extern unsigned int vcast_wakeup_called;
+
+vcast_wakeup_called++;
+
+vmm_scheduler_yield -> Beginning of stub
+
+用于 vmm_workqueue_flush.003.R，让循环退出。
+
+extern unsigned int vcast_yield_called;
+extern struct vmm_workqueue *vcast_flush_wq_target;
+extern void vcast_wq_clear_work_list(struct vmm_workqueue *wq);
+
+vcast_yield_called++;
+
+if (vcast_flush_wq_target != (struct vmm_workqueue *)0) {
+    vcast_wq_clear_work_list(vcast_flush_wq_target);
+}
+
+vmm_completion_wait -> Beginning of stub
+
+仅用于 workqueue_main.002.R 的受控退出。该函数在主循环中会反复被调用，第二次调用时让测试退出。
+
+extern unsigned int vcast_wq_main_wait_count;
+
+vcast_wq_main_wait_count++;
+
+if (vcast_wq_main_wait_count > 1U) {
+    exit(0);
+}
+
+
+⸻
+
+二、vmm_workqueue_work_isnew
+
+⸻
+
+用例名称：vmm_workqueue_work_isnew.001.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = VMM_WORK_STATE_CREATED;
+
+<<vmm_workqueue.vmm_workqueue_work_isnew.work>> = &work_obj;
+
+Expected return
+
+TRUE
+
+关键期望
+
+无额外状态检查
+
+用例注释
+
+测试目的：验证工作对象处于新建状态时，新建状态查询接口返回真。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并设置其状态标志包含新建状态。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象状态为新建状态。
+step3、调用 vmm_workqueue_work_isnew。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_isnew
+等价列表：工作对象有效，状态包含新建标志。
+其它说明：本用例覆盖新建状态判断为 true 的路径。
+通过准则：函数返回 TRUE。
+
+⸻
+
+用例名称：vmm_workqueue_work_isnew.002.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_work_isnew.work>> = &work_obj;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象不包含新建状态时，新建状态查询接口返回假。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，状态标志不包含新建状态。
+测试步骤：
+step1、构造有效工作对象。
+step2、清除工作对象新建状态标志。
+step3、调用 vmm_workqueue_work_isnew。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_isnew
+等价列表：工作对象有效，状态不包含新建标志。
+其它说明：本用例覆盖新建状态判断为 false 的路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+用例名称：vmm_workqueue_work_isnew.003.IN.work.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_work_isnew.work>> = NULL;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象为空时，新建状态查询接口返回假。
+用例类别：接口测试
+预置条件：工作对象入参为空。
+测试步骤：
+step1、将工作对象入参设置为空。
+step2、调用 vmm_workqueue_work_isnew。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_work_isnew
+等价列表：工作对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+三、vmm_workqueue_work_inprogress
+
+⸻
+
+用例名称：vmm_workqueue_work_inprogress.001.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = VMM_WORK_STATE_INPROGRESS;
+
+<<vmm_workqueue.vmm_workqueue_work_inprogress.work>> = &work_obj;
+
+Expected return
+
+TRUE
+
+用例注释
+
+测试目的：验证工作对象处于执行中状态时，执行中状态查询接口返回真。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并设置状态标志包含执行中状态。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象状态为执行中。
+step3、调用 vmm_workqueue_work_inprogress。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_inprogress
+等价列表：工作对象有效，状态包含执行中标志。
+其它说明：本用例覆盖执行中状态判断为 true 的路径。
+通过准则：函数返回 TRUE。
+
+⸻
+
+用例名称：vmm_workqueue_work_inprogress.002.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_work_inprogress.work>> = &work_obj;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象不包含执行中状态时，执行中状态查询接口返回假。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，状态标志不包含执行中状态。
+测试步骤：
+step1、构造有效工作对象。
+step2、清除工作对象执行中状态标志。
+step3、调用 vmm_workqueue_work_inprogress。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_inprogress
+等价列表：工作对象有效，状态不包含执行中标志。
+其它说明：本用例覆盖执行中状态判断为 false 的路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+用例名称：vmm_workqueue_work_inprogress.003.IN.work.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_work_inprogress.work>> = NULL;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象为空时，执行中状态查询接口返回假。
+用例类别：接口测试
+预置条件：工作对象入参为空。
+测试步骤：
+step1、将工作对象入参设置为空。
+step2、调用 vmm_workqueue_work_inprogress。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_work_inprogress
+等价列表：工作对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+四、vmm_workqueue_work_completed
+
+⸻
+
+用例名称：vmm_workqueue_work_completed.001.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = VMM_WORK_STATE_CREATED;
+
+<<vmm_workqueue.vmm_workqueue_work_completed.work>> = &work_obj;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象仍处于新建状态时，完成状态查询接口返回未完成。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并设置新建状态标志。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象状态包含新建标志。
+step3、调用 vmm_workqueue_work_completed。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_completed
+等价列表：工作对象有效，状态包含新建标志。
+其它说明：本用例覆盖新建状态优先判断路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+用例名称：vmm_workqueue_work_completed.002.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = VMM_WORK_STATE_INPROGRESS;
+
+<<vmm_workqueue.vmm_workqueue_work_completed.work>> = &work_obj;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象处于执行中状态时，完成状态查询接口返回未完成。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并设置执行中状态标志。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象状态包含执行中标志。
+step3、调用 vmm_workqueue_work_completed。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_completed
+等价列表：工作对象有效，状态包含执行中标志。
+其它说明：本用例覆盖执行中状态导致未完成的路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+用例名称：vmm_workqueue_work_completed.003.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = VMM_WORK_STATE_SCHEDULED;
+
+<<vmm_workqueue.vmm_workqueue_work_completed.work>> = &work_obj;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象处于已调度但未执行完成状态时，完成状态查询接口返回未完成。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并设置已调度状态标志。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象状态包含已调度标志。
+step3、调用 vmm_workqueue_work_completed。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_completed
+等价列表：工作对象有效，状态包含已调度标志。
+其它说明：本用例覆盖已调度状态导致未完成的路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+用例名称：vmm_workqueue_work_completed.004.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+work_obj.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_work_completed.work>> = &work_obj;
+
+Expected return
+
+TRUE
+
+用例注释
+
+测试目的：验证工作对象不处于新建、执行中或已调度状态时，完成状态查询接口返回已完成。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，并清除新建、执行中和已调度状态标志。
+测试步骤：
+step1、构造有效工作对象。
+step2、清除工作对象相关状态标志。
+step3、调用 vmm_workqueue_work_completed。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_work_completed
+等价列表：工作对象有效，且不包含新建、执行中、已调度状态。
+其它说明：本用例覆盖完成状态判断为 true 的路径。
+通过准则：函数返回 TRUE。
+
+⸻
+
+用例名称：vmm_workqueue_work_completed.005.IN.work.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_work_completed.work>> = NULL;
+
+Expected return
+
+FALSE
+
+用例注释
+
+测试目的：验证工作对象为空时，完成状态查询接口返回未完成。
+用例类别：接口测试
+预置条件：工作对象入参为空。
+测试步骤：
+step1、将工作对象入参设置为空。
+step2、调用 vmm_workqueue_work_completed。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_work_completed
+等价列表：工作对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 FALSE。
+
+⸻
+
+五、vmm_workqueue_stop_work
+
+⸻
+
+用例名称：vmm_workqueue_stop_work.001.IN.work.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_stop_work.work>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证停止工作对象接口在工作对象为空时返回失败。
+用例类别：接口测试
+预置条件：工作对象入参为空。
+测试步骤：
+step1、将工作对象入参设置为空。
+step2、调用 vmm_workqueue_stop_work。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_stop_work
+等价列表：工作对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_stop_work.002.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+INIT_LIST_HEAD(&work_obj.head);
+
+work_obj.flags = VMM_WORK_STATE_CREATED;
+work_obj.wq = NULL;
+
+<<vmm_workqueue.vmm_workqueue_stop_work.work>> = &work_obj;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+work_obj.flags 不包含 VMM_WORK_STATE_CREATED
+work_obj.flags 不包含 VMM_WORK_STATE_INPROGRESS
+work_obj.flags 不包含 VMM_WORK_STATE_SCHEDULED
+work_obj.wq = NULL
+
+用例注释
+
+测试目的：验证未调度且未执行中的工作对象停止后，所有状态标志被清除。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象，状态为新建，未关联工作队列。
+测试步骤：
+step1、构造有效工作对象。
+step2、设置工作对象为新建状态且不关联工作队列。
+step3、调用 vmm_workqueue_stop_work。
+step4、观察函数返回值和工作对象状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_stop_work
+等价列表：工作对象有效，未执行中，未调度。
+其它说明：本用例覆盖不需要等待执行结束且不需要从队列删除的停止路径。
+通过准则：函数返回 VMM_OK，新建、执行中和已调度状态均被清除，工作对象的工作队列指针被置空。
+
+⸻
+
+用例名称：vmm_workqueue_stop_work.003.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+
+work_obj.flags = VMM_WORK_STATE_SCHEDULED;
+vcast_wq_add_work_to_wq1(&work_obj);
+
+<<vmm_workqueue.vmm_workqueue_stop_work.work>> = &work_obj;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+work_obj.flags 不包含 VMM_WORK_STATE_SCHEDULED
+work_obj.wq = NULL
+
+用例注释
+
+测试目的：验证已调度但未执行的工作对象停止时，函数能够将其从工作队列链表中删除并清除状态。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列和工作对象，工作对象处于已调度状态并已加入工作队列链表。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造工作对象并设置为已调度状态。
+step3、将工作对象加入测试工作队列链表。
+step4、调用 vmm_workqueue_stop_work。
+step5、观察工作对象状态和工作队列指针。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_stop_work
+等价列表：工作对象有效，已调度但未执行。
+其它说明：本用例覆盖从工作队列链表删除已调度工作对象的路径。
+通过准则：函数返回 VMM_OK，工作对象从工作队列链表删除，工作对象状态标志被清除，工作队列指针被置空。
+
+⸻
+
+用例名称：vmm_workqueue_stop_work.004.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+INIT_LIST_HEAD(&work_obj.head);
+
+work_obj.flags = VMM_WORK_STATE_INPROGRESS;
+work_obj.wq = NULL;
+
+vcast_stop_work_target = &work_obj;
+
+<<vmm_workqueue.vmm_workqueue_stop_work.work>> = &work_obj;
+
+vmm_udelay stub 会清除 INPROGRESS 标志，避免无限循环。
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_udelay 被调用一次
+work_obj.flags 不包含 VMM_WORK_STATE_INPROGRESS
+
+用例注释
+
+测试目的：验证工作对象处于执行中状态时，停止接口会等待执行结束后再清除状态。
+用例类别：基于需求的测试
+预置条件：构造有效工作对象并设置为执行中状态；延时接口作为测试替身，在等待过程中模拟工作执行结束。
+测试步骤：
+step1、构造有效工作对象并设置执行中状态。
+step2、设置延时桩函数在被调用时清除执行中状态。
+step3、调用 vmm_workqueue_stop_work。
+step4、观察函数返回值、延时接口调用情况和工作对象状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_stop_work
+等价列表：工作对象有效且处于执行中状态，等待后执行结束。
+其它说明：本用例覆盖执行中状态导致重试等待的路径。
+通过准则：函数最终返回 VMM_OK，延时接口至少被调用一次，工作对象的执行中、新建和已调度状态均被清除。
+
+⸻
+
+六、vmm_workqueue_stop_delayed_work
+
+⸻
+
+用例名称：vmm_workqueue_stop_delayed_work.001.IN.work.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_stop_delayed_work.work>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证停止延迟工作接口在延迟工作对象为空时返回失败。
+用例类别：接口测试
+预置条件：延迟工作对象入参为空。
+测试步骤：
+step1、将延迟工作对象入参设置为空。
+step2、调用 vmm_workqueue_stop_delayed_work。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_stop_delayed_work
+等价列表：延迟工作对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_stop_delayed_work.002.FI
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+
+dwork_obj.work.flags = 0U;
+dwork_obj.work.wq = NULL;
+
+<<vmm_workqueue.vmm_workqueue_stop_delayed_work.work>> = &dwork_obj;
+
+Stub 设置：
+
+vmm_timer_event_stop.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟停止定时器事件失败，验证停止延迟工作接口直接返回定时器错误码。
+用例类别：故障注入测试
+预置条件：构造有效延迟工作对象，定时器停止接口打桩返回错误。
+测试步骤：
+step1、构造有效延迟工作对象。
+step2、设置定时器停止接口返回失败。
+step3、调用 vmm_workqueue_stop_delayed_work。
+step4、观察函数返回值和普通工作停止接口是否被执行。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_stop_delayed_work
+等价列表：延迟工作对象有效，外部定时器停止接口发生故障。
+其它说明：本用例覆盖定时器停止失败后直接返回的路径。
+通过准则：函数返回定时器停止接口注入的错误码，普通工作停止逻辑不继续执行。
+
+⸻
+
+用例名称：vmm_workqueue_stop_delayed_work.003.R
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+
+dwork_obj.work.flags = VMM_WORK_STATE_CREATED;
+dwork_obj.work.wq = NULL;
+
+<<vmm_workqueue.vmm_workqueue_stop_delayed_work.work>> = &dwork_obj;
+
+Stub 设置：
+
+vmm_timer_event_stop.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+用例注释
+
+测试目的：验证定时器停止成功时，停止延迟工作接口能够继续停止内部普通工作对象。
+用例类别：基于需求的测试
+预置条件：构造有效延迟工作对象，定时器停止接口返回成功，内部工作对象未执行且未调度。
+测试步骤：
+step1、构造延迟工作对象。
+step2、设置定时器停止接口返回成功。
+step3、调用 vmm_workqueue_stop_delayed_work。
+step4、观察函数返回值和内部工作对象状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_stop_delayed_work
+等价列表：延迟工作对象有效，定时器停止成功。
+其它说明：本用例覆盖定时器停止成功后调用普通工作停止逻辑的路径。
+通过准则：函数返回 VMM_OK，内部工作对象的新建、执行中和已调度状态均被清除。
+
+⸻
+
+七、vmm_workqueue_get_thread
+
+⸻
+
+用例名称：vmm_workqueue_get_thread.001.R
+
+具体构造方法
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.vmm_workqueue_get_thread.wq>> = vcast_wq1;
+
+Expected return
+
+vcast_wq_thread1
+
+用例注释
+
+测试目的：验证工作队列对象有效时，获取线程接口返回工作队列绑定的线程对象。
+用例类别：基于需求的测试
+预置条件：初始化测试工作队列，并为其设置线程对象。
+测试步骤：
+step1、初始化测试工作队列。
+step2、将测试工作队列作为入参。
+step3、调用 vmm_workqueue_get_thread。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_get_thread
+等价列表：工作队列对象有效，线程指针有效。
+其它说明：本用例覆盖工作队列非空路径。
+通过准则：函数返回预置的线程对象指针。
+
+⸻
+
+用例名称：vmm_workqueue_get_thread.002.IN.wq.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_get_thread.wq>> = NULL;
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：验证工作队列对象为空时，获取线程接口返回空指针。
+用例类别：接口测试
+预置条件：工作队列入参为空。
+测试步骤：
+step1、将工作队列入参设置为空。
+step2、调用 vmm_workqueue_get_thread。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_get_thread
+等价列表：工作队列对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回空指针。
+
+⸻
+
+八、vmm_workqueue_index2workqueue
+
+⸻
+
+用例名称：vmm_workqueue_index2workqueue.001.IN.index.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_index2workqueue.index>> = -1;
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：验证索引为负数时，按索引获取工作队列接口返回空指针。
+用例类别：接口测试
+预置条件：索引入参为负数。
+测试步骤：
+step1、将索引参数设置为负数。
+step2、调用 vmm_workqueue_index2workqueue。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_index2workqueue
+等价列表：索引参数为负数。
+其它说明：本用例覆盖索引小于 0 的防御路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：vmm_workqueue_index2workqueue.002.R
+
+具体构造方法
+
+vcast_wq_global_empty();
+
+<<vmm_workqueue.vmm_workqueue_index2workqueue.index>> = 0;
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：验证工作队列列表为空时，按索引获取工作队列接口返回空指针。
+用例类别：基于需求的测试
+预置条件：全局工作队列列表为空，工作队列数量为 0。
+测试步骤：
+step1、初始化全局工作队列列表为空。
+step2、设置索引参数为 0。
+step3、调用 vmm_workqueue_index2workqueue。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_index2workqueue
+等价列表：索引非负，但工作队列列表为空。
+其它说明：本用例覆盖遍历后未找到工作队列的路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：vmm_workqueue_index2workqueue.003.R
+
+具体构造方法
+
+vcast_wq_global_two();
+
+<<vmm_workqueue.vmm_workqueue_index2workqueue.index>> = 1;
+
+Expected return
+
+vcast_wq2
+
+用例注释
+
+测试目的：验证工作队列列表中存在多个节点时，按索引获取接口能够返回指定位置的工作队列。
+用例类别：基于需求的测试
+预置条件：全局工作队列列表中存在两个工作队列对象。
+测试步骤：
+step1、构造两个工作队列对象并按顺序加入全局工作队列列表。
+step2、设置索引参数为 1。
+step3、调用 vmm_workqueue_index2workqueue。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_index2workqueue
+等价列表：索引非负且位于工作队列列表有效范围内。
+其它说明：本用例覆盖遍历后命中非首节点的路径。
+通过准则：函数返回第二个工作队列对象指针。
+
+⸻
+
+用例名称：vmm_workqueue_index2workqueue.004.IN.index.NEC
+
+具体构造方法
+
+vcast_wq_global_two();
+
+<<vmm_workqueue.vmm_workqueue_index2workqueue.index>> = 2;
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：验证索引超过工作队列列表长度时，按索引获取接口返回空指针。
+用例类别：接口测试
+预置条件：全局工作队列列表中存在两个工作队列对象，索引参数超出有效范围。
+测试步骤：
+step1、构造包含两个工作队列对象的全局列表。
+step2、设置索引参数为 2。
+step3、调用 vmm_workqueue_index2workqueue。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_index2workqueue
+等价列表：索引非负但超出当前工作队列数量。
+其它说明：本用例覆盖遍历结束后未找到目标索引的路径。
+通过准则：函数返回空指针。
+
+⸻
+
+九、vmm_workqueue_count
+
+⸻
+
+用例名称：vmm_workqueue_count.001.R
+
+具体构造方法
+
+vcast_wq_fixture_reset();
+vcast_wq_set_count(3U);
+
+Expected return
+
+3
+
+用例注释
+
+测试目的：验证工作队列数量查询接口能够返回全局工作队列数量。
+用例类别：基于需求的测试
+预置条件：设置全局工作队列数量为 3。
+测试步骤：
+step1、初始化全局工作队列控制结构。
+step2、设置全局工作队列数量为 3。
+step3、调用 vmm_workqueue_count。
+step4、观察函数返回值。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_count
+等价列表：全局工作队列数量为非 0。
+其它说明：本用例覆盖工作队列数量读取路径。
+通过准则：函数返回 3。
+
+⸻
+
+十、vmm_workqueue_flush
+
+⸻
+
+用例名称：vmm_workqueue_flush.001.IN.wq.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_flush.wq>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证工作队列刷新接口在工作队列为空时返回失败。
+用例类别：接口测试
+预置条件：工作队列入参为空。
+测试步骤：
+step1、将工作队列入参设置为空。
+step2、调用 vmm_workqueue_flush。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_flush
+等价列表：工作队列对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_flush.002.R
+
+具体构造方法
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.vmm_workqueue_flush.wq>> = vcast_wq1;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vcast_wakeup_called = 0
+vcast_yield_called = 0
+
+用例注释
+
+测试目的：验证工作队列为空时，刷新接口直接返回成功。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列，并初始化工作链表为空。
+测试步骤：
+step1、初始化测试工作队列。
+step2、保持工作链表为空。
+step3、调用 vmm_workqueue_flush。
+step4、观察函数返回值和外部唤醒、调度让出接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_flush
+等价列表：工作队列有效，工作链表为空。
+其它说明：本用例覆盖 while 条件初始为 false 的路径。
+通过准则：函数返回 VMM_OK，线程唤醒接口和调度让出接口均未被调用。
+
+⸻
+
+用例名称：vmm_workqueue_flush.003.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&work_obj.head);
+vcast_wq_add_work_to_wq1(&work_obj);
+
+vcast_flush_wq_target = vcast_wq1;
+
+<<vmm_workqueue.vmm_workqueue_flush.wq>> = vcast_wq1;
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vcast_wakeup_called >= 1
+vcast_yield_called >= 1
+
+用例注释
+
+测试目的：验证工作队列非空时，刷新接口能够唤醒工作线程并让出调度，直到工作链表为空后返回成功。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列，工作链表中存在一个工作对象；调度让出接口作为测试替身，在执行时模拟工作链表被处理为空。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造工作对象并加入工作队列链表。
+step3、设置调度让出桩函数在调用时清空工作链表。
+step4、调用 vmm_workqueue_flush。
+step5、观察函数返回值、线程唤醒接口和调度让出接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_flush
+等价列表：工作队列有效，刷新开始时工作链表非空，随后变为空。
+其它说明：本用例覆盖 while 循环进入并退出的路径。
+通过准则：函数返回 VMM_OK，线程唤醒接口至少被调用一次，调度让出接口至少被调用一次，工作链表最终为空。
+
+⸻
+
+十一、vmm_workqueue_schedule_work
+
+⸻
+
+用例名称：vmm_workqueue_schedule_work.001.IN.work.NEC
+
+具体构造方法
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.vmm_workqueue_schedule_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_work.work>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证调度工作接口在工作对象为空时返回失败。
+用例类别：接口测试
+预置条件：工作对象入参为空。
+测试步骤：
+step1、初始化测试工作队列。
+step2、将工作对象入参设置为空。
+step3、调用 vmm_workqueue_schedule_work。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_schedule_work
+等价列表：工作对象为空。
+其它说明：本用例覆盖工作对象为空的防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_work.002.IN.state.NEC
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&work_obj.head);
+work_obj.flags = VMM_WORK_STATE_SCHEDULED;
+
+<<vmm_workqueue.vmm_workqueue_schedule_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_work.work>> = &work_obj;
+
+Expected return
+
+VMM_EALREADY
+
+用例注释
+
+测试目的：验证工作对象已处于调度状态时，调度接口返回已存在错误。
+用例类别：接口测试
+预置条件：构造有效工作对象，并设置其已调度状态标志。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造工作对象。
+step3、设置工作对象已调度。
+step4、调用 vmm_workqueue_schedule_work。
+step5、观察函数返回值和工作队列链表。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_schedule_work
+等价列表：工作对象有效但已经被调度。
+其它说明：本用例覆盖重复调度防御路径。
+通过准则：函数返回 VMM_EALREADY，工作对象不重复加入工作队列链表。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_work.003.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&work_obj.head);
+
+work_obj.flags = VMM_WORK_STATE_CREATED;
+work_obj.wq = NULL;
+
+<<vmm_workqueue.vmm_workqueue_schedule_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_work.work>> = &work_obj;
+
+Stub 设置：
+
+vmm_completion_complete.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+work_obj.flags 包含 VMM_WORK_STATE_SCHEDULED
+work_obj.flags 不包含 VMM_WORK_STATE_CREATED
+work_obj.wq = vcast_wq1
+vmm_completion_complete 被调用一次
+
+用例注释
+
+测试目的：验证传入明确工作队列时，调度接口能够将工作对象加入该工作队列并标记为已调度。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列和未调度工作对象；完成量通知接口作为桩函数。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造工作对象并设置为新建状态。
+step3、调用 vmm_workqueue_schedule_work。
+step4、观察函数返回值、工作状态、工作队列指针和工作链表。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_schedule_work
+等价列表：工作队列有效，工作对象有效且未调度。
+其它说明：本用例覆盖显式工作队列调度成功路径。
+通过准则：函数返回 VMM_OK，工作对象新建状态被清除，已调度状态被设置，工作对象的工作队列指针指向传入工作队列，完成量通知接口被调用一次。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_work.004.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+vcast_wq_install_syswq0();
+
+INIT_LIST_HEAD(&work_obj.head);
+
+work_obj.flags = VMM_WORK_STATE_CREATED;
+work_obj.wq = NULL;
+
+<<vmm_workqueue.vmm_workqueue_schedule_work.wq>> = NULL;
+<<vmm_workqueue.vmm_workqueue_schedule_work.work>> = &work_obj;
+
+Stub 设置：
+
+vmm_smp_processor_id.return = 0
+vmm_completion_complete.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+work_obj.wq = vcast_wq1
+work_obj.flags 包含 VMM_WORK_STATE_SCHEDULED
+
+用例注释
+
+测试目的：验证未传入工作队列时，调度接口能够使用当前 CPU 对应的系统工作队列。
+用例类别：基于需求的测试
+预置条件：构造当前 CPU 的系统工作队列并设置到全局控制结构中；工作对象有效且未调度。
+测试步骤：
+step1、初始化测试工作队列。
+step2、将测试工作队列配置为 CPU0 的系统工作队列。
+step3、设置当前 CPU 为 CPU0。
+step4、将工作队列入参设置为空。
+step5、调用 vmm_workqueue_schedule_work。
+step6、观察工作对象关联的工作队列和状态。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_schedule_work
+等价列表：工作队列入参为空，当前 CPU 系统工作队列有效。
+其它说明：本用例覆盖默认系统工作队列路径。
+通过准则：函数返回 VMM_OK，工作对象被加入 CPU0 的系统工作队列，工作对象的工作队列指针指向该系统工作队列。
+
+⸻
+
+十二、delayed_work_timer_event
+
+⸻
+
+用例名称：delayed_work_timer_event.001.R
+
+具体构造方法
+
+static struct vmm_timer_event ev_obj;
+static struct vmm_delayed_work dwork_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+
+dwork_obj.work.flags = 0U;
+dwork_obj.work.wq = vcast_wq1;
+
+ev_obj.priv = &dwork_obj;
+
+<<vmm_workqueue.delayed_work_timer_event.ev>> = &ev_obj;
+
+Stub 设置：
+
+vmm_completion_complete.return = VMM_OK
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+dwork_obj.work.flags 包含 VMM_WORK_STATE_SCHEDULED
+dwork_obj.work.wq = vcast_wq1
+
+用例注释
+
+测试目的：验证延迟工作定时器回调能够将延迟工作中的普通工作对象调度到其工作队列中。
+用例类别：基于需求的测试
+预置条件：构造有效定时器事件，事件私有数据指向延迟工作对象；延迟工作对象内部工作队列有效。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造延迟工作对象。
+step3、将定时器事件私有数据设置为延迟工作对象。
+step4、调用 delayed_work_timer_event。
+step5、观察内部工作对象是否被调度到工作队列。
+用例来源：需求分析、有效等价类
+追溯ID：delayed_work_timer_event
+等价列表：定时器事件有效，私有数据为有效延迟工作对象。
+其它说明：本用例覆盖定时器回调调度延迟工作的路径。
+通过准则：函数无返回值，延迟工作中的普通工作对象被设置为已调度状态，并关联到其工作队列。
+
+⸻
+
+十三、vmm_workqueue_schedule_delayed_work
+
+⸻
+
+用例名称：vmm_workqueue_schedule_delayed_work.001.IN.work.NEC
+
+具体构造方法
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.work>> = NULL;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.nsecs>> = 100U;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证延迟工作对象为空时，调度延迟工作接口返回失败。
+用例类别：接口测试
+预置条件：延迟工作对象入参为空。
+测试步骤：
+step1、初始化测试工作队列。
+step2、将延迟工作对象入参设置为空。
+step3、设置延迟时间为非 0。
+step4、调用 vmm_workqueue_schedule_delayed_work。
+step5、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_schedule_delayed_work
+等价列表：延迟工作对象为空。
+其它说明：本用例覆盖延迟工作对象为空的防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_delayed_work.002.R
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+dwork_obj.work.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.work>> = &dwork_obj;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.nsecs>> = 0U;
+
+Stub 设置：
+
+vmm_completion_complete.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+用例注释
+
+测试目的：验证延迟时间为 0 时，调度延迟工作接口立即调度内部普通工作对象。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列和延迟工作对象，延迟时间为 0。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造延迟工作对象。
+step3、设置延迟时间为 0。
+step4、调用 vmm_workqueue_schedule_delayed_work。
+step5、观察内部普通工作对象是否被立即调度。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_schedule_delayed_work
+等价列表：延迟工作对象有效，延迟时间为 0。
+其它说明：本用例覆盖零延迟时直接调用普通工作调度路径。
+通过准则：函数返回 VMM_OK，内部普通工作对象被设置为已调度并加入工作队列。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_delayed_work.003.R
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+dwork_obj.work.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.work>> = &dwork_obj;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.nsecs>> = 1000U;
+
+Stub 设置:
+
+vmm_timer_event_start.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+dwork_obj.work.wq = vcast_wq1
+vmm_timer_event_start 被调用一次
+
+用例注释
+
+测试目的：验证延迟时间非 0 时，调度延迟工作接口能够初始化定时器事件并启动定时器。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列和延迟工作对象，延迟时间为非 0；定时器启动接口返回成功。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造延迟工作对象。
+step3、设置延迟时间为非 0。
+step4、设置定时器启动接口返回成功。
+step5、调用 vmm_workqueue_schedule_delayed_work。
+step6、观察函数返回值、工作队列指针和定时器启动接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_schedule_delayed_work
+等价列表：延迟工作对象有效，延迟时间非 0。
+其它说明：本用例覆盖初始化定时器并启动延迟调度的路径。
+通过准则：函数返回 VMM_OK，延迟工作内部工作对象的工作队列指针指向传入工作队列，定时器启动接口被调用一次。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_delayed_work.004.R
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+vcast_wq_fixture_reset();
+vcast_wq_install_syswq0();
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+dwork_obj.work.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.wq>> = NULL;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.work>> = &dwork_obj;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.nsecs>> = 1000U;
+
+Stub 设置：
+
+vmm_smp_processor_id.return = 0
+vmm_timer_event_start.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+dwork_obj.work.wq = vcast_wq1
+
+用例注释
+
+测试目的：验证未传入工作队列时，调度延迟工作接口能够使用当前 CPU 对应的系统工作队列。
+用例类别：基于需求的测试
+预置条件：构造 CPU0 的系统工作队列并配置到全局控制结构中，延迟工作对象有效。
+测试步骤：
+step1、初始化测试工作队列。
+step2、将测试工作队列设置为 CPU0 的系统工作队列。
+step3、设置当前 CPU 为 CPU0。
+step4、将工作队列入参设置为空。
+step5、调用 vmm_workqueue_schedule_delayed_work。
+step6、观察延迟工作对象关联的工作队列。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_schedule_delayed_work
+等价列表：工作队列入参为空，当前 CPU 系统工作队列有效。
+其它说明：本用例覆盖默认系统工作队列路径。
+通过准则：函数返回定时器启动接口返回值，延迟工作内部工作对象的工作队列指针指向 CPU0 的系统工作队列。
+
+⸻
+
+用例名称：vmm_workqueue_schedule_delayed_work.005.FI
+
+具体构造方法
+
+static struct vmm_delayed_work dwork_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&dwork_obj.work.head);
+dwork_obj.work.flags = 0U;
+
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.wq>> = vcast_wq1;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.work>> = &dwork_obj;
+<<vmm_workqueue.vmm_workqueue_schedule_delayed_work.nsecs>> = 1000U;
+
+Stub 设置：
+
+vmm_timer_event_start.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟延迟工作定时器启动失败，验证调度延迟工作接口返回定时器错误码。
+用例类别：故障注入测试
+预置条件：构造有效工作队列和延迟工作对象，延迟时间为非 0；定时器启动接口返回失败。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造有效延迟工作对象。
+step3、设置延迟时间为非 0。
+step4、设置定时器启动接口返回失败。
+step5、调用 vmm_workqueue_schedule_delayed_work。
+step6、观察函数返回值。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_schedule_delayed_work
+等价列表：延迟工作对象有效，外部定时器启动接口发生故障。
+其它说明：本用例覆盖定时器启动错误传播路径。
+通过准则：函数返回定时器启动接口注入的错误码。
+
+⸻
+
+十四、workqueue_main
+
+⸻
+
+用例名称：workqueue_main.001.IN.data.NEC
+
+具体构造方法
+
+<<vmm_workqueue.workqueue_main.data>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 worker 主函数在工作队列参数为空时返回失败。
+用例类别：接口测试
+预置条件：工作队列参数为空。
+测试步骤：
+step1、将 worker 主函数入参设置为空。
+step2、调用 workqueue_main。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：workqueue_main
+等价列表：worker 主函数入参为空。
+其它说明：本用例覆盖工作队列参数为空的防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：workqueue_main.002.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_wq_fixture_reset();
+
+INIT_LIST_HEAD(&work_obj.head);
+work_obj.flags = VMM_WORK_STATE_SCHEDULED;
+work_obj.func = vcast_work_func;
+work_obj.wq = vcast_wq1;
+
+vcast_wq_add_work_to_wq1(&work_obj);
+
+<<vmm_workqueue.workqueue_main.data>> = vcast_wq1;
+
+Stub 设置：
+
+vmm_completion_wait 使用公共 stub：第一次返回，第二次 exit(0)
+
+Expected return
+
+无普通返回；第二次进入 vmm_completion_wait 时 exit(0)
+
+关键期望
+
+vcast_work_func_called = 1
+work_obj.flags 不包含 VMM_WORK_STATE_INPROGRESS
+
+用例注释
+
+测试目的：验证 worker 主函数在工作队列非空时，能够取出已调度工作对象、设置执行中状态、调用工作函数并清除执行中状态。
+用例类别：基于需求的测试
+预置条件：使用受控退出方式测试 worker 主循环；工作队列中预置一个已调度工作对象；完成等待桩函数第一次返回，第二次通过 exit(0) 结束测试。
+测试步骤：
+step1、初始化测试工作队列。
+step2、构造一个已调度工作对象，并设置其工作函数为测试回调函数。
+step3、将工作对象加入工作队列链表。
+step4、调用 workqueue_main。
+step5、观察工作函数调用次数和工作对象状态。
+用例来源：需求分析、有效等价类
+追溯ID：workqueue_main
+等价列表：worker 主函数入参有效，工作链表存在一个已调度工作对象。
+其它说明：该函数包含无限循环，本用例使用测试桩受控退出，不验证自然返回。
+通过准则：测试回调函数被调用一次，工作对象执行中状态在执行后被清除，用例通过受控 exit(0) 结束。
+
+⸻
+
+十五、vmm_workqueue_create
+
+⸻
+
+用例名称：vmm_workqueue_create.001.IN.name.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_create.name>> = NULL;
+<<vmm_workqueue.vmm_workqueue_create.priority>> = 1U;
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：验证工作队列名称为空时，创建接口返回空指针。
+用例类别：接口测试
+预置条件：工作队列名称入参为空。
+测试步骤：
+step1、将工作队列名称入参设置为空。
+step2、设置线程优先级为有效值。
+step3、调用 vmm_workqueue_create。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_create
+等价列表：工作队列名称为空。
+其它说明：本用例覆盖名称为空的防御路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：vmm_workqueue_create.002.FI
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_create.name>> = "wq_test";
+<<vmm_workqueue.vmm_workqueue_create.priority>> = 1U;
+
+Stub 设置：
+
+vmm_zalloc.return = NULL
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：通过故障注入模拟工作队列对象分配失败，验证创建接口返回空指针。
+用例类别：故障注入测试
+预置条件：工作队列名称有效，内存分配接口打桩返回空指针。
+测试步骤：
+step1、设置有效工作队列名称。
+step2、设置线程优先级为有效值。
+step3、设置工作队列内存分配接口返回失败。
+step4、调用 vmm_workqueue_create。
+step5、观察函数返回值。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_create
+等价列表：名称有效，但外部内存分配失败。
+其它说明：本用例覆盖工作队列对象分配失败路径。
+通过准则：函数返回空指针。
+
+⸻
+
+用例名称：vmm_workqueue_create.003.FI
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_create.name>> = "wq_test";
+<<vmm_workqueue.vmm_workqueue_create.priority>> = 1U;
+<<vmm_workqueue.vmm_zalloc.return>> = vcast_wq1;
+
+Stub 设置：
+
+vmm_threads_create.return = NULL
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：通过故障注入模拟工作线程创建失败，验证创建接口释放已分配工作队列并返回空指针。
+用例类别：故障注入测试
+预置条件：工作队列名称有效，工作队列内存分配成功，工作线程创建接口返回空指针。
+测试步骤：
+step1、设置有效工作队列名称。
+step2、设置内存分配接口返回有效工作队列对象。
+step3、设置线程创建接口返回失败。
+step4、调用 vmm_workqueue_create。
+step5、观察函数返回值和释放接口调用情况。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_create
+等价列表：内存分配成功，但线程创建失败。
+其它说明：本用例覆盖线程创建失败后的资源释放路径。
+通过准则：函数返回空指针，释放接口被调用一次且释放对象为已分配工作队列。
+
+⸻
+
+用例名称：vmm_workqueue_create.004.FI
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_create.name>> = "wq_test";
+<<vmm_workqueue.vmm_workqueue_create.priority>> = 1U;
+<<vmm_workqueue.vmm_zalloc.return>> = vcast_wq1;
+<<vmm_workqueue.vmm_threads_create.return>> = vcast_wq_thread1;
+
+Stub 设置：
+
+vmm_threads_start.return = VMM_EFAIL
+
+Expected return
+
+NULL
+
+用例注释
+
+测试目的：通过故障注入模拟工作线程启动失败，验证创建接口销毁线程并释放工作队列。
+用例类别：故障注入测试
+预置条件：工作队列内存分配成功，工作线程创建成功，线程启动接口返回错误。
+测试步骤：
+step1、设置工作队列名称有效。
+step2、设置内存分配和线程创建接口返回有效对象。
+step3、设置线程启动接口返回失败。
+step4、调用 vmm_workqueue_create。
+step5、观察函数返回值、线程销毁接口和释放接口调用情况。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_create
+等价列表：线程创建成功，但线程启动失败。
+其它说明：本用例覆盖线程启动失败后的清理路径。
+通过准则：函数返回空指针，线程销毁接口被调用一次，工作队列释放接口被调用一次。
+
+⸻
+
+用例名称：vmm_workqueue_create.005.R
+
+具体构造方法
+
+vcast_wq_global_empty();
+
+<<vmm_workqueue.vmm_workqueue_create.name>> = "wq_test";
+<<vmm_workqueue.vmm_workqueue_create.priority>> = 1U;
+<<vmm_workqueue.vmm_zalloc.return>> = vcast_wq1;
+<<vmm_workqueue.vmm_threads_create.return>> = vcast_wq_thread1;
+
+Stub 设置：
+
+vmm_threads_start.return = VMM_OK
+
+Expected return
+
+vcast_wq1
+
+关键期望
+
+vmm_workqueue_count() = 1
+
+用例注释
+
+测试目的：验证工作队列创建接口在全部依赖成功时，能够初始化工作队列、创建并启动线程，并将工作队列加入全局列表。
+用例类别：基于需求的测试
+预置条件：工作队列名称有效，内存分配成功，线程创建成功，线程启动成功，全局工作队列列表为空。
+测试步骤：
+step1、初始化全局工作队列列表为空。
+step2、设置工作队列名称和优先级。
+step3、设置内存分配、线程创建和线程启动接口均成功。
+step4、调用 vmm_workqueue_create。
+step5、观察返回值、工作队列内部链表、线程指针和全局工作队列列表。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_create
+等价列表：创建入参有效，全部外部依赖成功。
+其它说明：本用例覆盖工作队列创建成功路径。
+通过准则：函数返回新工作队列对象，工作队列工作链表和控制链表完成初始化，线程指针为创建接口返回对象，工作队列加入全局列表，全局工作队列数量增加为 1。
+
+⸻
+
+十六、vmm_workqueue_destroy
+
+⸻
+
+用例名称：vmm_workqueue_destroy.001.IN.wq.NEC
+
+具体构造方法
+
+<<vmm_workqueue.vmm_workqueue_destroy.wq>> = NULL;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证工作队列销毁接口在工作队列为空时返回失败。
+用例类别：接口测试
+预置条件：工作队列入参为空。
+测试步骤：
+step1、将工作队列入参设置为空。
+step2、调用 vmm_workqueue_destroy。
+step3、观察函数返回值。
+用例来源：无效等价类
+追溯ID：vmm_workqueue_destroy
+等价列表：工作队列对象为空。
+其它说明：本用例覆盖空指针防御路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：vmm_workqueue_destroy.002.FI
+
+具体构造方法
+
+该用例建议使用 SBF，使同文件函数 vmm_workqueue_flush 作为 stub。
+
+vcast_wq_global_one();
+
+<<vmm_workqueue.vmm_workqueue_destroy.wq>> = vcast_wq1;
+
+SBF Stub 设置：
+
+vmm_workqueue_flush.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟工作队列刷新失败，验证销毁接口返回刷新错误且不继续销毁线程。
+用例类别：故障注入测试
+预置条件：工作队列对象有效，刷新接口通过 SBF 返回错误。
+测试步骤：
+step1、构造有效工作队列对象。
+step2、设置刷新接口返回失败。
+step3、调用 vmm_workqueue_destroy。
+step4、观察函数返回值和后续线程销毁接口调用情况。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_destroy
+等价列表：工作队列对象有效，刷新阶段发生故障。
+其它说明：本用例适合在 SBF 模式下执行；核心刷新逻辑由 vmm_workqueue_flush 独立用例覆盖。
+通过准则：函数返回刷新接口注入的错误码，线程销毁接口和释放接口未被调用。
+
+⸻
+
+用例名称：vmm_workqueue_destroy.003.FI
+
+具体构造方法
+
+vcast_wq_global_one();
+
+<<vmm_workqueue.vmm_workqueue_destroy.wq>> = vcast_wq1;
+
+Stub 设置：
+
+vmm_threads_destroy.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vmm_free 未被调用
+
+用例注释
+
+测试目的：通过故障注入模拟工作线程销毁失败，验证工作队列销毁接口返回线程销毁错误且不释放工作队列对象。
+用例类别：故障注入测试
+预置条件：构造有效工作队列对象，工作链表为空，线程销毁接口返回错误。
+测试步骤：
+step1、构造工作链表为空的工作队列对象并加入全局列表。
+step2、设置线程销毁接口返回失败。
+step3、调用 vmm_workqueue_destroy。
+step4、观察函数返回值、全局列表和释放接口调用情况。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_destroy
+等价列表：工作队列有效，刷新成功，线程销毁失败。
+其它说明：本用例覆盖线程销毁失败后的错误返回路径。
+通过准则：函数返回线程销毁接口注入的错误码，工作队列仍保留在全局列表中，全局工作队列数量不减少，释放接口未被调用。
+
+⸻
+
+用例名称：vmm_workqueue_destroy.004.R
+
+具体构造方法
+
+vcast_wq_global_one();
+
+<<vmm_workqueue.vmm_workqueue_destroy.wq>> = vcast_wq1;
+
+Stub 设置：
+
+vmm_threads_destroy.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_workqueue_count() = 0
+vmm_free 被调用一次
+
+用例注释
+
+测试目的：验证工作队列销毁接口在刷新和线程销毁均成功时，能够从全局列表移除工作队列并释放内存。
+用例类别：基于需求的测试
+预置条件：构造有效工作队列对象，工作链表为空，工作队列已加入全局列表，线程销毁接口返回成功。
+测试步骤：
+step1、构造空工作队列并加入全局工作队列列表。
+step2、设置线程销毁接口返回成功。
+step3、调用 vmm_workqueue_destroy。
+step4、观察函数返回值、全局列表、工作队列数量和释放接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_destroy
+等价列表：工作队列有效，刷新成功，线程销毁成功。
+其它说明：本用例覆盖销毁成功路径。
+通过准则：函数返回 VMM_OK，工作队列从全局列表删除，全局工作队列数量减少，释放接口被调用一次。
+
+⸻
+
+十七、workqueue_startup
+
+此函数建议使用 SBF，让 vmm_workqueue_create 作为 stub。否则会间接覆盖 create。
+
+⸻
+
+用例名称：workqueue_startup.001.FI
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+<<vmm_workqueue.workqueue_startup.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_startup.cpu>> = 0U;
+
+SBF Stub 设置：
+
+vmm_workqueue_create.return = NULL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟系统工作队列创建失败，验证 CPU 启动回调返回失败。
+用例类别：故障注入测试
+预置条件：构造有效 CPU 热插拔通知对象，工作队列创建接口通过 SBF 返回空指针。
+测试步骤：
+step1、构造 CPU 热插拔通知对象。
+step2、设置 CPU 编号为 0。
+step3、设置工作队列创建接口返回失败。
+step4、调用 workqueue_startup。
+step5、观察函数返回值和全局系统工作队列数组。
+用例来源：故障注入、无效等价类
+追溯ID：workqueue_startup
+等价列表：CPU 编号有效，系统工作队列创建失败。
+其它说明：本用例覆盖创建系统工作队列失败路径。
+通过准则：函数返回 VMM_EFAIL，对应 CPU 的系统工作队列指针为空。
+
+⸻
+
+用例名称：workqueue_startup.002.R
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.workqueue_startup.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_startup.cpu>> = 0U;
+
+SBF Stub 设置：
+
+vmm_workqueue_create.return = vcast_wq1
+vmm_threads_set_affinity.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+用例注释
+
+测试目的：验证 CPU 启动回调在系统工作队列创建成功时，能够保存系统工作队列并设置线程 CPU 亲和性。
+用例类别：基于需求的测试
+预置条件：构造有效 CPU 热插拔通知对象，工作队列创建接口返回有效工作队列，工作队列中线程指针有效，线程亲和性设置接口返回成功。
+测试步骤：
+step1、初始化测试工作队列。
+step2、设置 CPU 编号为 0。
+step3、设置工作队列创建接口返回有效工作队列。
+step4、设置线程亲和性设置接口返回成功。
+step5、调用 workqueue_startup。
+step6、观察函数返回值和全局系统工作队列数组。
+用例来源：需求分析、有效等价类
+追溯ID：workqueue_startup
+等价列表：CPU 编号有效，系统工作队列创建成功，亲和性设置成功。
+其它说明：本用例覆盖 CPU 启动回调成功路径。
+通过准则：函数返回 VMM_OK，对应 CPU 的系统工作队列指针指向创建接口返回的工作队列，线程亲和性设置接口被调用一次。
+
+⸻
+
+用例名称：workqueue_startup.003.FI
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.workqueue_startup.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_startup.cpu>> = 0U;
+
+SBF Stub 设置：
+
+vmm_workqueue_create.return = vcast_wq1
+vmm_threads_set_affinity.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟线程亲和性设置失败，验证 CPU 启动回调返回亲和性设置错误码。
+用例类别：故障注入测试
+预置条件：系统工作队列创建成功，线程亲和性设置接口返回错误。
+测试步骤：
+step1、初始化测试工作队列。
+step2、设置 CPU 编号为 0。
+step3、设置工作队列创建接口返回有效工作队列。
+step4、设置线程亲和性设置接口返回错误。
+step5、调用 workqueue_startup。
+step6、观察函数返回值。
+用例来源：故障注入、无效等价类
+追溯ID：workqueue_startup
+等价列表：系统工作队列创建成功，但外部线程亲和性设置失败。
+其它说明：本用例覆盖亲和性设置错误传播路径。
+通过准则：函数返回线程亲和性设置接口注入的错误码。
+
+⸻
+
+十八、workqueue_teardown
+
+建议使用 SBF，让 vmm_workqueue_destroy 作为 stub。
+
+⸻
+
+用例名称：workqueue_teardown.001.IN.cpu.NEC
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+vcast_wq_fixture_reset();
+
+<<vmm_workqueue.workqueue_teardown.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_teardown.cpu>> = 0U;
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：验证 CPU 对应系统工作队列为空时，CPU 关闭回调返回失败。
+用例类别：接口测试
+预置条件：全局系统工作队列数组中指定 CPU 的工作队列为空。
+测试步骤：
+step1、初始化全局工作队列控制结构。
+step2、保持 CPU0 的系统工作队列指针为空。
+step3、调用 workqueue_teardown。
+step4、观察函数返回值。
+用例来源：无效等价类
+追溯ID：workqueue_teardown
+等价列表：CPU 编号有效，但对应系统工作队列不存在。
+其它说明：本用例覆盖系统工作队列为空的失败路径。
+通过准则：函数返回 VMM_EFAIL。
+
+⸻
+
+用例名称：workqueue_teardown.002.R
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+vcast_wq_fixture_reset();
+vcast_wq_install_syswq0();
+
+<<vmm_workqueue.workqueue_teardown.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_teardown.cpu>> = 0U;
+
+SBF Stub 设置：
+
+vmm_workqueue_destroy.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+用例注释
+
+测试目的：验证 CPU 关闭回调能够销毁指定 CPU 的系统工作队列并清空全局指针。
+用例类别：基于需求的测试
+预置条件：指定 CPU 的系统工作队列存在，工作队列销毁接口返回成功。
+测试步骤：
+step1、初始化测试工作队列。
+step2、设置 CPU0 的系统工作队列指针为有效工作队列。
+step3、设置工作队列销毁接口返回成功。
+step4、调用 workqueue_teardown。
+step5、观察函数返回值和全局系统工作队列指针。
+用例来源：需求分析、有效等价类
+追溯ID：workqueue_teardown
+等价列表：CPU 编号有效，系统工作队列存在，销毁接口成功。
+其它说明：本用例覆盖 CPU 关闭回调成功路径。
+通过准则：函数返回 VMM_OK，CPU0 的系统工作队列指针被置空。
+
+⸻
+
+用例名称：workqueue_teardown.003.FI
+
+具体构造方法
+
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+vcast_wq_fixture_reset();
+vcast_wq_install_syswq0();
+
+<<vmm_workqueue.workqueue_teardown.cpuhp>> = &cpuhp_obj;
+<<vmm_workqueue.workqueue_teardown.cpu>> = 0U;
+
+SBF Stub 设置：
+
+vmm_workqueue_destroy.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+用例注释
+
+测试目的：通过故障注入模拟系统工作队列销毁失败，验证 CPU 关闭回调返回销毁错误码并清空全局指针。
+用例类别：故障注入测试
+预置条件：指定 CPU 的系统工作队列存在，工作队列销毁接口返回错误。
+测试步骤：
+step1、初始化测试工作队列。
+step2、设置 CPU0 的系统工作队列指针为有效对象。
+step3、设置工作队列销毁接口返回失败。
+step4、调用 workqueue_teardown。
+step5、观察函数返回值和全局系统工作队列指针。
+用例来源：故障注入、无效等价类
+追溯ID：workqueue_teardown
+等价列表：系统工作队列存在，但销毁接口失败。
+其它说明：本用例覆盖销毁错误返回路径；当前实现无论销毁结果如何都会清空全局系统工作队列指针。
+通过准则：函数返回工作队列销毁接口注入的错误码，CPU0 的系统工作队列指针被置空。
+
+⸻
+
+十九、vmm_workqueue_init
+
+⸻
+
+用例名称：vmm_workqueue_init.001.R
+
+具体构造方法
+
+vcast_wq_global_two();
+
+Stub 设置：
+
+vmm_cpuhp_register.return = VMM_OK
+
+Expected return
+
+VMM_OK
+
+关键期望
+
+vmm_workqueue_count() = 0
+vmm_cpuhp_register 被调用一次
+
+用例注释
+
+测试目的：验证工作队列子系统初始化函数能够重置全局控制结构并注册 CPU 热插拔通知对象。
+用例类别：基于需求的测试
+预置条件：全局工作队列控制结构预先设置为非初始状态，CPU 热插拔注册接口返回成功。
+测试步骤：
+step1、将全局工作队列控制结构设置为非初始状态。
+step2、设置 CPU 热插拔注册接口返回成功。
+step3、调用 vmm_workqueue_init。
+step4、观察全局控制结构、工作队列列表、工作队列数量和 CPU 热插拔注册接口调用情况。
+用例来源：需求分析、有效等价类
+追溯ID：vmm_workqueue_init
+等价列表：初始化前全局控制结构存在历史状态，注册接口成功。
+其它说明：本用例覆盖初始化成功路径。
+通过准则：函数返回 VMM_OK，全局控制结构被清零，工作队列列表初始化为空，工作队列数量为 0，CPU 热插拔注册接口被调用一次且注册对象名称为 WORKQUEUE。
+
+⸻
+
+用例名称：vmm_workqueue_init.002.FI
+
+具体构造方法
+
+vcast_wq_global_two();
+
+Stub 设置：
+
+vmm_cpuhp_register.return = VMM_EFAIL
+
+Expected return
+
+VMM_EFAIL
+
+关键期望
+
+vmm_workqueue_count() = 0
+
+用例注释
+
+测试目的：通过故障注入模拟 CPU 热插拔注册失败，验证工作队列初始化函数返回注册接口错误码。
+用例类别：故障注入测试
+预置条件：全局工作队列控制结构预先设置为非初始状态，CPU 热插拔注册接口返回错误。
+测试步骤：
+step1、将全局控制结构设置为非初始状态。
+step2、设置 CPU 热插拔注册接口返回失败。
+step3、调用 vmm_workqueue_init。
+step4、观察函数返回值和全局控制结构初始化结果。
+用例来源：故障注入、无效等价类
+追溯ID：vmm_workqueue_init
+等价列表：初始化前存在历史状态，外部 CPU 热插拔注册接口失败。
+其它说明：本用例覆盖初始化阶段外部注册接口错误传播路径。
+通过准则：函数返回 CPU 热插拔注册接口注入的错误码，全局工作队列列表已初始化为空，工作队列数量为 0。
+
+⸻
+
+二十、测试回调 vcast_work_func
+
+如果它出现在覆盖率报告里，补一条。
+
+⸻
+
+用例名称：vcast_work_func.001.R
+
+具体构造方法
+
+static struct vmm_work work_obj;
+
+vcast_work_func_called = 0U;
+
+<<vmm_workqueue.vcast_work_func.work>> = &work_obj;
+
+Expected return
+
+无，void 函数
+
+关键期望
+
+vcast_work_func_called = 1
+
+用例注释
+
+测试目的：验证测试工作回调函数 vcast_work_func 被调用后，能够正确记录一次工作函数执行事件。
+用例类别：基于需求的测试
+预置条件：使用测试全局变量 vcast_work_func_called 记录回调触发次数，并在调用前将其清零。
+测试步骤：
+step1、构造有效工作对象。
+step2、将 vcast_work_func_called 清零。
+step3、将工作对象作为 vcast_work_func 的入参。
+step4、调用 vcast_work_func。
+step5、观察 vcast_work_func_called 的值。
+用例来源：需求分析、有效等价类
+追溯ID：vcast_work_func
+等价列表：回调入参为有效工作对象。
+其它说明：该用例仅用于覆盖测试夹具回调函数，不属于产品功能验证目标。
+通过准则：函数无返回值，vcast_work_func_called 由 0 增加为 1。
+
+⸻
+
+二十一、最终用例清单
+
+vmm_workqueue_work_isnew.001.R
+vmm_workqueue_work_isnew.002.R
+vmm_workqueue_work_isnew.003.IN.work.NEC
+
+vmm_workqueue_work_inprogress.001.R
+vmm_workqueue_work_inprogress.002.R
+vmm_workqueue_work_inprogress.003.IN.work.NEC
+
+vmm_workqueue_work_completed.001.R
+vmm_workqueue_work_completed.002.R
+vmm_workqueue_work_completed.003.R
+vmm_workqueue_work_completed.004.R
+vmm_workqueue_work_completed.005.IN.work.NEC
+
+vmm_workqueue_stop_work.001.IN.work.NEC
+vmm_workqueue_stop_work.002.R
+vmm_workqueue_stop_work.003.R
+vmm_workqueue_stop_work.004.R
+
+vmm_workqueue_stop_delayed_work.001.IN.work.NEC
+vmm_workqueue_stop_delayed_work.002.FI
+vmm_workqueue_stop_delayed_work.003.R
+
+vmm_workqueue_get_thread.001.R
+vmm_workqueue_get_thread.002.IN.wq.NEC
+
+vmm_workqueue_index2workqueue.001.IN.index.NEC
+vmm_workqueue_index2workqueue.002.R
+vmm_workqueue_index2workqueue.003.R
+vmm_workqueue_index2workqueue.004.IN.index.NEC
+
+vmm_workqueue_count.001.R
+
+vmm_workqueue_flush.001.IN.wq.NEC
+vmm_workqueue_flush.002.R
+vmm_workqueue_flush.003.R
+
+vmm_workqueue_schedule_work.001.IN.work.NEC
+vmm_workqueue_schedule_work.002.IN.state.NEC
+vmm_workqueue_schedule_work.003.R
+vmm_workqueue_schedule_work.004.R
+
+delayed_work_timer_event.001.R
+
+vmm_workqueue_schedule_delayed_work.001.IN.work.NEC
+vmm_workqueue_schedule_delayed_work.002.R
+vmm_workqueue_schedule_delayed_work.003.R
+vmm_workqueue_schedule_delayed_work.004.R
+vmm_workqueue_schedule_delayed_work.005.FI
+
+workqueue_main.001.IN.data.NEC
+workqueue_main.002.R
+
+vmm_workqueue_create.001.IN.name.NEC
+vmm_workqueue_create.002.FI
+vmm_workqueue_create.003.FI
+vmm_workqueue_create.004.FI
+vmm_workqueue_create.005.R
+
+vmm_workqueue_destroy.001.IN.wq.NEC
+vmm_workqueue_destroy.002.FI
+vmm_workqueue_destroy.003.FI
+vmm_workqueue_destroy.004.R
+
+workqueue_startup.001.FI
+workqueue_startup.002.R
+workqueue_startup.003.FI
+
+workqueue_teardown.001.IN.cpu.NEC
+workqueue_teardown.002.R
+workqueue_teardown.003.FI
+
+vmm_workqueue_init.001.R
+vmm_workqueue_init.002.FI
+
+vcast_work_func.001.R
