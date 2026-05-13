@@ -1,0 +1,1569 @@
+下面按当前模板生成这个文件的单元测试设计。这个文件很大，且有条件编译、内联汇编和大量外部依赖，所以我按“最小辅助函数、变量可用、每个函数独立覆盖”来设计。
+注意：你给的代码里 cpu_vcpu_emulate_vmrs、cpu_vcpu_emulate_fpexec_a32、cpu_vcpu_emulate_fpexec_a64 出现了重复定义。如果实际文件也是这样，VectorCAST 编译会直接报重定义；如果只是你粘贴时重复，可以忽略。
+ 
+⸻
+ 
+一、公共测试设置
+1. 不建议新增复杂 helper 函数
+本文件不建议为了构造方便新增很多 user code 函数。大部分用例直接在 Value User Code 中构造：
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+然后设置：
+regs_obj.pc
+regs_obj.pstate
+regs_obj.gpr[]
+ 
+⸻
+ 
+2. Prefix User Code 建议
+只处理可能造成测试卡死或非法指令的问题。不要定义大量 helper。
+#include <vmm_error.h>
+#include <vmm_types.h>
+#include <cpu_vcpu_emulate.h>
+
+#ifdef BUG_ON
+#undef BUG_ON
+#endif
+
+#define BUG_ON(x)              \
+    do {                       \
+        if (x) {               \
+            exit(0);           \
+        }                      \
+    } while (0)
+如果 vmm_invoke_smc_fn() 的支持分支会执行真实：
+smc #0
+普通 host 单元测试不要执行该分支。通过构造不支持的 func_id 覆盖安全路径；真实 SMC 分支建议做目标板测试或覆盖率排除说明。
+ 
+⸻
+ 
+3. 常用 ISS 构造说明
+后面用例中常用：
+条件成立
+iss = ISS_CV_MASK | (0xEU << ISS_COND_SHIFT);
+0xE 是 AL 条件，通常 cpu_vcpu_condition_check() 返回 TRUE。
+条件不成立
+iss = ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+regs_obj.pstate = 0U;
+cond = 0 表示 EQ，Z 标志未置位，因此条件不成立。
+指令长度
+il = 1 -> pc 增加 4
+il = 0 -> pc 增加 2
+ 
+⸻
+ 
+二、
+cpu_vcpu_condition_check
+该函数分支较多。为了直接覆盖 static 函数，建议至少覆盖以下用例。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_ZERO_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码为 EQ 且 Z 标志置位时，条件检查函数返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 PSTATE 中的 Z 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 Z 标志。 step3、构造带有效条件码的 ISS，并将条件码设置为 EQ。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 EQ，Z 标志置位。 其它说明：本用例覆盖 cond >> 1 为 0 且条件成立路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+Expected return
+FALSE
+用例注释
+测试目的：验证条件码为 EQ 但 Z 标志未置位时，条件检查函数返回假。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并清除 PSTATE 中的 Z 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、清除 PSTATE 中的 Z 标志。 step3、构造带有效条件码的 ISS，并将条件码设置为 EQ。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 EQ，Z 标志未置位。 其它说明：本用例覆盖 cond >> 1 为 0 且条件不成立路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_ZERO_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x1U << ISS_COND_SHIFT);
+Expected return
+FALSE
+用例注释
+测试目的：验证条件码低位取反逻辑生效，NE 条件在 Z 标志置位时返回假。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置 Z 标志，并设置条件码为 NE。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 Z 标志。 step3、构造带有效条件码的 ISS，并将条件码设置为 NE。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 NE，Z 标志置位。 其它说明：本用例覆盖 cond & 0x1 的取反路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.004.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> = 0U;
+Expected return
+TRUE
+用例注释
+测试目的：验证 ISS 中无有效条件码且 IT 状态为 0 时，条件检查函数按无条件指令处理并返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，PSTATE 中 IT 状态为 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、清除 PSTATE 中的 IT 状态。 step3、构造不带有效条件码的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：ISS 无有效条件码，IT 状态为 0。 其它说明：本用例覆盖 Thumb IT 状态为 0 时直接返回真路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.005.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+/* 构造非 0 IT 状态，使 cond = 0xE */
+regs_obj.pstate = (0xEU << 12);
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> = 0U;
+Expected return
+TRUE
+用例注释
+测试目的：验证 ISS 中无有效条件码但 PSTATE 中存在 IT 状态时，函数能够从 IT 状态推导条件码并完成判断。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 PSTATE 中的 IT 状态为非 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 IT 状态为非 0。 step3、构造不带有效条件码的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：ISS 无有效条件码，IT 状态非 0。 其它说明：本用例覆盖从 IT 状态推导条件码的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.006.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_CARRY_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x2U << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 CS/HS 在 C 标志置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 PSTATE 中的 C 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 C 标志。 step3、构造条件码为 CS/HS 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 CS/HS，C 标志置位。 其它说明：本用例覆盖 cond >> 1 为 1 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.007.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_NEGATIVE_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x4U << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 MI 在 N 标志置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 PSTATE 中的 N 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 N 标志。 step3、构造条件码为 MI 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 MI，N 标志置位。 其它说明：本用例覆盖 cond >> 1 为 2 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.008.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x6U << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 VS 在 V 标志置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 PSTATE 中的 V 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 V 标志。 step3、构造条件码为 VS 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 VS，V 标志置位。 其它说明：本用例覆盖 cond >> 1 为 3 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.009.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_CARRY_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0x8U << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 HI 在 C 标志置位且 Z 标志未置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置 C 标志并清除 Z 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 C 标志，并保持 Z 标志未置位。 step3、构造条件码为 HI 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 HI，C 标志置位且 Z 标志未置位。 其它说明：本用例覆盖 cond >> 1 为 4 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.010.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_NEGATIVE_MASK | PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0xAU << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 GE 在 N 标志和 V 标志同为置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 N 标志和 V 标志。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 N 标志和 V 标志。 step3、构造条件码为 GE 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 GE，N 与 V 相等。 其它说明：本用例覆盖 cond >> 1 为 5 且 N 分支为 true 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.011.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = PSR_NEGATIVE_MASK | PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0xCU << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 GT 在 N 与 V 相等且 Z 标志未置位时返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 N 标志和 V 标志，并保持 Z 标志未置位。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 N 标志和 V 标志，并保持 Z 标志未置位。 step3、构造条件码为 GT 的 ISS。 step4、调用 cpu_vcpu_condition_check。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 GT，N 与 V 相等且 Z 未置位。 其它说明：本用例覆盖 cond >> 1 为 6 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_condition_check.012.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_condition_check.iss>> =
+    ISS_CV_MASK | (0xEU << ISS_COND_SHIFT);
+Expected return
+TRUE
+用例注释
+测试目的：验证条件码 AL 时，条件检查函数返回真。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，条件码设置为 AL。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、构造条件码为 AL 的 ISS。 step3、调用 cpu_vcpu_condition_check。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_condition_check 等价列表：条件码有效，条件为 AL。 其它说明：本用例覆盖 cond >> 1 为 7 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+三、
+cpu_vcpu_update_itstate
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_update_itstate.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.regs>> = &regs_obj;
+Expected return
+无，void 函数
+关键期望
+regs_obj.pstate = 0
+用例注释
+测试目的：验证 PSTATE 中没有 IT 状态时，IT 状态更新函数直接返回且不修改 PSTATE。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并清除 PSTATE 中的 IT 状态。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中 IT 状态为 0。 step3、调用 cpu_vcpu_update_itstate。 step4、观察 PSTATE 是否保持不变。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_update_itstate 等价列表：IT 状态为空。 其它说明：本用例覆盖无 IT 状态时直接返回路径。 通过准则：函数无返回值，PSTATE 保持为 0。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_update_itstate.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+/* cond 非 0，itbits 低 3 位为 0，触发 itbits = cond = 0 */
+regs_obj.pstate = (5U << 13) | (0x8U << 8);
+
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.regs>> = &regs_obj;
+Expected return
+无，void 函数
+关键期望
+regs_obj.pstate 中 PSR_IT_MASK 对应位被清除
+用例注释
+测试目的：验证 IT 状态推进到结束状态时，函数能够清除 IT 条件和 IT 位。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置 PSTATE 中的 IT 状态，并使 IT bits 低 3 位为 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 IT 状态为即将结束状态。 step3、调用 cpu_vcpu_update_itstate。 step4、观察 PSTATE 中 IT 状态是否被清除。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_update_itstate 等价列表：IT 状态有效，IT bits 低 3 位为 0。 其它说明：本用例覆盖 if ((itbits & 0x7) == 0) 为 true 的路径。 通过准则：函数无返回值，PSTATE 中 IT 状态被清除。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_update_itstate.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+/* 构造 itbits 低 3 位非 0，触发左移推进 */
+regs_obj.pstate = (5U << 13) | (1U << 25);
+
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_update_itstate.regs>> = &regs_obj;
+Expected return
+无，void 函数
+关键期望
+regs_obj.pstate 发生变化，且仍保留非 0 IT 状态
+用例注释
+测试目的：验证 IT 状态未结束时，函数能够推进 IT bits 并更新 PSTATE。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置 PSTATE 中的 IT 状态，并使 IT bits 低 3 位非 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSTATE 中的 IT 状态为未结束状态。 step3、调用 cpu_vcpu_update_itstate。 step4、观察 PSTATE 中 IT 状态是否被推进更新。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_update_itstate 等价列表：IT 状态有效，IT bits 低 3 位非 0。 其它说明：本用例覆盖 IT bits 左移推进路径。 通过准则：函数无返回值，PSTATE 发生更新并保留推进后的 IT 状态。
+ 
+⸻
+ 
+四、
+cpu_vcpu_emulate_wfi_wfe
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_wfi_wfe.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x1000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.iss>> =
+    ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x1004
+vmm_scheduler_yield 未被调用
+vmm_vcpu_irq_wait_timeout 未被调用
+用例注释
+测试目的：验证 WFI/WFE 指令条件检查失败时，函数跳过当前指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置条件码为 EQ 且不置位 Z 标志，使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x1000。 step3、构造条件检查失败的 ISS。 step4、调用 cpu_vcpu_emulate_wfi_wfe。 step5、观察返回值、PC 更新和外部等待接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_wfi_wfe 等价列表：指令条件不成立。 其它说明：本用例覆盖条件检查失败后的跳过路径。 通过准则：函数返回 VMM_OK，PC 增加 4，未调用调度让出接口和 IRQ 等待接口。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_wfi_wfe.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x1000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.iss>> =
+    ISS_CV_MASK |
+    (0xEU << ISS_COND_SHIFT) |
+    ISS_WFI_WFE_TI_MASK;
+Stub 设置：
+#ifndef CONFIG_WFE_WFI_IDLE_MODE
+vmm_scheduler_current_ready_vcpu_count.return = 2
+#endif
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x1004
+vmm_scheduler_yield 被调用一次
+vmm_vcpu_irq_wait_timeout 未被调用
+用例注释
+测试目的：验证 WFE 指令陷入时，函数执行调度让出并跳过指令。 用例类别：基于需求的测试 预置条件：构造条件检查成立的 ISS，并设置 WFE 标志；若未启用 WFE/WFI idle 模式，当前 ready VCPU 数量设置为 2。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x1000。 step3、构造条件成立且表示 WFE 的 ISS。 step4、设置调度 ready VCPU 数量满足继续执行条件。 step5、调用 cpu_vcpu_emulate_wfi_wfe。 step6、观察返回值、PC 更新和调度让出接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_wfi_wfe 等价列表：条件成立，WFE 指令陷入。 其它说明：本用例覆盖 WFE 分支。 通过准则：函数返回 VMM_OK，PC 增加 4，调度让出接口被调用一次，IRQ 等待接口未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_wfi_wfe.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x1000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.iss>> =
+    ISS_CV_MASK | (0xEU << ISS_COND_SHIFT);
+Stub 设置：
+#ifndef CONFIG_WFE_WFI_IDLE_MODE
+vmm_scheduler_current_ready_vcpu_count.return = 2
+#endif
+vmm_vcpu_irq_wait_timeout.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x1002
+vmm_vcpu_irq_wait_timeout 被调用一次
+用例注释
+测试目的：验证 WFI 指令陷入时，函数调用 IRQ 等待接口并按指令长度推进 PC。 用例类别：基于需求的测试 预置条件：构造条件检查成立的 ISS，且不设置 WFE 标志；若未启用 WFE/WFI idle 模式，当前 ready VCPU 数量设置为 2。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x1000。 step3、构造条件成立且表示 WFI 的 ISS。 step4、设置指令长度为 16 位。 step5、调用 cpu_vcpu_emulate_wfi_wfe。 step6、观察返回值、PC 更新和 IRQ 等待接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_wfi_wfe 等价列表：条件成立，WFI 指令陷入。 其它说明：本用例覆盖 WFI 等待路径和 il = 0 的 PC 推进。 通过准则：函数返回 VMM_OK，PC 增加 2，IRQ 等待接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_wfi_wfe.004.R
+具体构造方法
+仅在未定义 CONFIG_WFE_WFI_IDLE_MODE 时建立。
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x1000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_wfi_wfe.iss>> =
+    ISS_CV_MASK | (0xEU << ISS_COND_SHIFT);
+Stub 设置：
+vmm_scheduler_current_ready_vcpu_count.return = 1
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x1000
+vmm_vcpu_irq_wait_timeout 未被调用
+vmm_scheduler_yield 未被调用
+用例注释
+测试目的：验证未启用 WFE/WFI idle 模式且当前 ready VCPU 数量小于等于 1 时，函数直接返回成功且不推进 PC。 用例类别：基于需求的测试 预置条件：未定义 CONFIG_WFE_WFI_IDLE_MODE；构造条件检查成立的 WFI 场景；当前 ready VCPU 数量设置为 1。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x1000。 step3、构造条件成立的 ISS。 step4、设置当前 ready VCPU 数量为 1。 step5、调用 cpu_vcpu_emulate_wfi_wfe。 step6、观察返回值、PC 和外部接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_wfi_wfe 等价列表：条件成立，但当前 ready VCPU 数量不足以继续执行等待逻辑。 其它说明：本用例覆盖 ready VCPU 数量小于等于 1 时的提前返回路径。 通过准则：函数返回 VMM_OK，PC 保持不变，未调用调度让出接口和 IRQ 等待接口。
+ 
+⸻
+ 
+五、
+cpu_vcpu_emulate_mcr_mrc_cp15
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp15.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x2000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> =
+    ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x2004
+cpu_vcpu_cp15_read 未被调用
+cpu_vcpu_cp15_write 未被调用
+用例注释
+测试目的：验证 CP15 MCR/MRC 指令条件检查失败时，函数跳过指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置条件码为 EQ 且不置位 Z 标志，使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x2000。 step3、构造条件检查失败的 ISS。 step4、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step5、观察返回值、PC 和 CP15 访问接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15 等价列表：条件不成立。 其它说明：本用例覆盖条件检查失败后的 done 路径。 通过准则：函数返回 VMM_OK，PC 增加 4，未调用 CP15 读写接口。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp15.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x2000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> =
+    ISS_CV_MASK |
+    (0xEU << ISS_COND_SHIFT) |
+    ISS_MCR_MRC_DIR_MASK |
+    (1U << ISS_MCR_MRC_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_cp15_read.return = TRUE
+cpu_vcpu_cp15_read 输出参数 t = 0x55
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x2004
+cpu_vcpu_reg64_write 被调用一次，Rt = 1，data = 0x55
+用例注释
+测试目的：验证 CP15 MRC 读操作成功时，函数将读出的值写入目标通用寄存器并推进 PC。 用例类别：基于需求的测试 预置条件：构造条件成立的 MRC ISS；CP15 读接口返回成功并输出测试数据。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x2000。 step3、构造条件成立且方向为 MRC 的 ISS。 step4、设置 CP15 读接口返回成功并输出 0x55。 step5、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step6、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15 等价列表：条件成立，CP15 MRC 读成功。 其它说明：本用例覆盖 MRC 成功路径。 通过准则：函数返回 VMM_OK，PC 增加 4，通用寄存器写接口被调用一次且写入值为 CP15 读出的数据。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp15.003.FI
+具体构造方法
+同 cpu_vcpu_emulate_mcr_mrc_cp15.002.R。
+Stub 设置：
+cpu_vcpu_cp15_read.return = FALSE
+Expected return
+VMM_EFAIL
+关键期望
+regs_obj.pc = 0x2000
+cpu_vcpu_reg64_write 未被调用
+用例注释
+测试目的：通过故障注入模拟 CP15 MRC 读失败，验证函数返回失败且不推进 PC。 用例类别：故障注入测试 预置条件：构造条件成立且方向为 MRC 的 ISS；CP15 读接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x2000。 step3、构造条件成立且方向为 MRC 的 ISS。 step4、设置 CP15 读接口返回失败。 step5、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step6、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15 等价列表：条件成立，CP15 MRC 读失败。 其它说明：本用例覆盖 CP15 读失败路径。 通过准则：函数返回 VMM_EFAIL，PC 保持不变，通用寄存器写接口未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp15.004.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x2000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> =
+    ISS_CV_MASK |
+    (0xEU << ISS_COND_SHIFT) |
+    (1U << ISS_MCR_MRC_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x66
+cpu_vcpu_cp15_write.return = TRUE
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x2002
+cpu_vcpu_cp15_write 被调用一次，写入 data = 0x66
+用例注释
+测试目的：验证 CP15 MCR 写操作成功时，函数读取目标通用寄存器值并写入 CP15，然后按 16 位指令长度推进 PC。 用例类别：基于需求的测试 预置条件：构造条件成立且方向为 MCR 的 ISS；通用寄存器读接口返回测试数据；CP15 写接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x2000。 step3、构造条件成立且方向为 MCR 的 ISS。 step4、设置通用寄存器读接口返回 0x66。 step5、设置 CP15 写接口返回成功。 step6、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step7、观察返回值、PC 和 CP15 写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15 等价列表：条件成立，CP15 MCR 写成功。 其它说明：本用例覆盖 MCR 成功路径和 il = 0 的 PC 推进。 通过准则：函数返回 VMM_OK，PC 增加 2，CP15 写接口被调用一次且写入数据来自通用寄存器读接口。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp15.005.FI
+具体构造方法
+同 cpu_vcpu_emulate_mcr_mrc_cp15.004.R。
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x66
+cpu_vcpu_cp15_write.return = FALSE
+Expected return
+VMM_EFAIL
+关键期望
+regs_obj.pc = 0x2000
+用例注释
+测试目的：通过故障注入模拟 CP15 MCR 写失败，验证函数返回失败且不推进 PC。 用例类别：故障注入测试 预置条件：构造条件成立且方向为 MCR 的 ISS；通用寄存器读接口返回测试数据；CP15 写接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x2000。 step3、构造条件成立且方向为 MCR 的 ISS。 step4、设置通用寄存器读接口返回测试数据。 step5、设置 CP15 写接口返回失败。 step6、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step7、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15 等价列表：条件成立，CP15 MCR 写失败。 其它说明：本用例覆盖 CP15 写失败路径。 通过准则：函数返回 VMM_EFAIL，PC 保持不变。
+ 
+⸻
+ 
+六、
+cpu_vcpu_emulate_mcrr_mrrc_cp15
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcrr_mrrc_cp15.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp15.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp15.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp15.iss>> = 0U;
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：验证暂未实现的 CP15 MCRR/MRRC 仿真接口返回失败。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令长度和 ISS 为任意有效输入。 step3、调用 cpu_vcpu_emulate_mcrr_mrrc_cp15。 step4、观察函数返回值。 用例来源：需求分析 追溯ID：cpu_vcpu_emulate_mcrr_mrrc_cp15 等价列表：接口当前未实现。 其它说明：本用例覆盖 TODO 返回失败路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+七、
+cpu_vcpu_emulate_mcr_mrc_cp14
+该函数与 CP15 结构一致，将 CP15 stub 替换为 CP14 stub。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp14.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x3000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> =
+    ISS_CV_MASK |
+    (0xEU << ISS_COND_SHIFT) |
+    ISS_MCR_MRC_DIR_MASK |
+    (1U << ISS_MCR_MRC_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_cp14_read.return = TRUE
+cpu_vcpu_cp14_read 输出参数 t = 0x77
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x3004
+cpu_vcpu_reg64_write 被调用一次，data = 0x77
+用例注释
+测试目的：验证 CP14 MRC 读操作成功时，函数将读出的值写入目标通用寄存器并推进 PC。 用例类别：基于需求的测试 预置条件：构造条件成立的 CP14 MRC ISS；CP14 读接口返回成功并输出测试数据。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x3000。 step3、构造条件成立且方向为 MRC 的 ISS。 step4、设置 CP14 读接口返回成功并输出 0x77。 step5、调用 cpu_vcpu_emulate_mcr_mrc_cp14。 step6、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14 等价列表：条件成立，CP14 MRC 读成功。 其它说明：本用例覆盖 CP14 MRC 成功路径。 通过准则：函数返回 VMM_OK，PC 增加 4，通用寄存器写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp14.002.FI
+具体构造方法
+同 cpu_vcpu_emulate_mcr_mrc_cp14.001.R。
+Stub 设置：
+cpu_vcpu_cp14_read.return = FALSE
+Expected return
+VMM_EFAIL
+关键期望
+regs_obj.pc = 0x3000
+cpu_vcpu_reg64_write 未被调用
+用例注释
+测试目的：通过故障注入模拟 CP14 MRC 读失败，验证函数返回失败且不推进 PC。 用例类别：故障注入测试 预置条件：构造条件成立且方向为 MRC 的 ISS；CP14 读接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x3000。 step3、构造条件成立且方向为 MRC 的 ISS。 step4、设置 CP14 读接口返回失败。 step5、调用 cpu_vcpu_emulate_mcr_mrc_cp14。 step6、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14 等价列表：条件成立，CP14 MRC 读失败。 其它说明：本用例覆盖 CP14 读失败路径。 通过准则：函数返回 VMM_EFAIL，PC 保持不变，通用寄存器写接口未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp14.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x3000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> =
+    ISS_CV_MASK |
+    (0xEU << ISS_COND_SHIFT) |
+    (1U << ISS_MCR_MRC_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x88
+cpu_vcpu_cp14_write.return = TRUE
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x3002
+cpu_vcpu_cp14_write 被调用一次，data = 0x88
+用例注释
+测试目的：验证 CP14 MCR 写操作成功时，函数读取目标通用寄存器值并写入 CP14，然后按 16 位指令长度推进 PC。 用例类别：基于需求的测试 预置条件：构造条件成立且方向为 MCR 的 ISS；通用寄存器读接口返回测试数据；CP14 写接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x3000。 step3、构造条件成立且方向为 MCR 的 ISS。 step4、设置通用寄存器读接口返回 0x88。 step5、设置 CP14 写接口返回成功。 step6、调用 cpu_vcpu_emulate_mcr_mrc_cp14。 step7、观察返回值、PC 和 CP14 写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14 等价列表：条件成立，CP14 MCR 写成功。 其它说明：本用例覆盖 CP14 MCR 成功路径和 il = 0 的 PC 推进。 通过准则：函数返回 VMM_OK，PC 增加 2，CP14 写接口被调用一次且写入数据来自通用寄存器读接口。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcr_mrc_cp14.004.FI
+同上，设置：
+cpu_vcpu_reg64_read.return = 0x88
+cpu_vcpu_cp14_write.return = FALSE
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：通过故障注入模拟 CP14 MCR 写失败，验证函数返回失败且不推进 PC。 用例类别：故障注入测试 预置条件：构造条件成立且方向为 MCR 的 ISS；通用寄存器读接口返回测试数据；CP14 写接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值。 step3、构造条件成立且方向为 MCR 的 ISS。 step4、设置通用寄存器读接口返回测试数据。 step5、设置 CP14 写接口返回失败。 step6、调用 cpu_vcpu_emulate_mcr_mrc_cp14。 step7、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14 等价列表：条件成立，CP14 MCR 写失败。 其它说明：本用例覆盖 CP14 写失败路径。 通过准则：函数返回 VMM_EFAIL，PC 保持不变。
+ 
+⸻
+ 
+八、未实现 CP14 接口
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_mcrr_mrrc_cp14.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp14.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp14.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcrr_mrrc_cp14.iss>> = 0U;
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：验证暂未实现的 CP14 MCRR/MRRC 仿真接口返回失败。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令长度和 ISS 为任意有效输入。 step3、调用 cpu_vcpu_emulate_mcrr_mrrc_cp14。 step4、观察函数返回值。 用例来源：需求分析 追溯ID：cpu_vcpu_emulate_mcrr_mrrc_cp14 等价列表：接口当前未实现。 其它说明：本用例覆盖 TODO 返回失败路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_ldc_stc_cp14.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_ldc_stc_cp14.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_ldc_stc_cp14.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_ldc_stc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_ldc_stc_cp14.iss>> = 0U;
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：验证暂未实现的 CP14 LDC/STC 仿真接口返回失败。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令长度和 ISS 为任意有效输入。 step3、调用 cpu_vcpu_emulate_ldc_stc_cp14。 step4、观察函数返回值。 用例来源：需求分析 追溯ID：cpu_vcpu_emulate_ldc_stc_cp14 等价列表：接口当前未实现。 其它说明：本用例覆盖 TODO 返回失败路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+九、VFP 转发类函数
+适用于：
+cpu_vcpu_emulate_simd_fp_regs
+cpu_vcpu_emulate_vmrs
+cpu_vcpu_emulate_fpexec_a32
+cpu_vcpu_emulate_fpexec_a64
+每个函数建议两条：条件失败跳过、条件成立转发到 cpu_vcpu_vfp_trap。
+下面给出 cpu_vcpu_emulate_simd_fp_regs 详细模板，其它三个函数只替换函数名即可。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_simd_fp_regs.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x4000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.iss>> =
+    ISS_CV_MASK | (0x0U << ISS_COND_SHIFT);
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x4004
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 SIMD/FP 寄存器访问指令条件检查失败时，函数跳过指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置条件码为 EQ 且不置位 Z 标志，使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x4000。 step3、构造条件检查失败的 ISS。 step4、调用 cpu_vcpu_emulate_simd_fp_regs。 step5、观察返回值、PC 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_simd_fp_regs 等价列表：条件不成立。 其它说明：本用例覆盖条件失败后的跳过路径。 通过准则：函数返回 VMM_OK，PC 增加 4，VFP trap 接口未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_simd_fp_regs.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x4000U;
+regs_obj.pstate = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.iss>> =
+    ISS_CV_MASK | (0xEU << ISS_COND_SHIFT);
+Stub 设置：
+cpu_vcpu_vfp_trap.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_vfp_trap 被调用一次
+用例注释
+测试目的：验证 SIMD/FP 寄存器访问指令条件检查成立时，函数将处理转发给 VFP trap 处理函数。 用例类别：基于需求的测试 预置条件：构造条件检查成立的 ISS，VFP trap 接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、构造条件检查成立的 ISS。 step3、设置 VFP trap 接口返回成功。 step4、调用 cpu_vcpu_emulate_simd_fp_regs。 step5、观察函数返回值和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_simd_fp_regs 等价列表：条件成立，VFP trap 接口返回成功。 其它说明：本用例覆盖 VFP trap 转发路径。 通过准则：函数返回 VMM_OK，VFP trap 接口被调用一次。
+ 
+⸻
+ 
+其它 VFP 类函数用例
+按上面两条复制构造，替换函数名：
+cpu_vcpu_emulate_vmrs.001.R
+cpu_vcpu_emulate_vmrs.002.R
+
+cpu_vcpu_emulate_fpexec_a32.001.R
+cpu_vcpu_emulate_fpexec_a32.002.R
+
+cpu_vcpu_emulate_fpexec_a64.001.R
+cpu_vcpu_emulate_fpexec_a64.002.R
+Expected 与构造原则一致：
+.001.R: 条件失败，return = VMM_OK，pc 增加，cpu_vcpu_vfp_trap 未调用
+.002.R: 条件成立，return = cpu_vcpu_vfp_trap.return，cpu_vcpu_vfp_trap 被调用
+ 
+⸻
+ 
+十、
+do_psci_call
+及 HVC/SMC wrapper
+ 
+⸻
+ 
+用例名称：
+do_psci_call.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.do_psci_call.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.do_psci_call.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.do_psci_call.il>> = 1U;
+<<cpu_vcpu_emulate.do_psci_call.iss>> = 0U;
+<<cpu_vcpu_emulate.do_psci_call.is_smc>> = FALSE;
+Stub 设置：
+emulate_psci_call.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_inject_undef 未被调用
+用例注释
+测试目的：验证 PSCI 调用仿真成功时，函数返回成功且不注入未定义异常。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，PSCI 仿真接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置调用类型为 HVC。 step3、设置 PSCI 仿真接口返回成功。 step4、调用 do_psci_call。 step5、观察函数返回值和未定义异常注入接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：do_psci_call 等价列表：PSCI 调用仿真成功。 其它说明：本用例覆盖 PSCI 成功路径。 通过准则：函数返回 VMM_OK，未定义异常注入接口未被调用。
+ 
+⸻
+ 
+用例名称：
+do_psci_call.002.FI
+具体构造方法
+同 do_psci_call.001.R。
+Stub 设置：
+emulate_psci_call.return = VMM_EFAIL
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_inject_undef 被调用一次
+用例注释
+测试目的：通过故障注入模拟 PSCI 调用仿真失败，验证函数注入未定义异常并返回成功。 用例类别：故障注入测试 预置条件：构造有效 VCPU 和寄存器对象，PSCI 仿真接口返回错误。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PSCI 仿真接口返回失败。 step3、调用 do_psci_call。 step4、观察函数返回值和未定义异常注入接口调用情况。 用例来源：故障注入、无效等价类 追溯ID：do_psci_call 等价列表：PSCI 调用仿真失败。 其它说明：本用例覆盖失败时注入未定义异常路径。 通过准则：函数返回 VMM_OK，未定义异常注入接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_hvc32.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc32.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc32.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc32.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc32.iss>> = 0U;
+Stub 设置：
+emulate_psci_call.return = VMM_OK
+Expected return
+VMM_OK
+用例注释
+测试目的：验证 HVC32 仿真接口将调用转发到 PSCI 处理路径并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，PSCI 仿真接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令长度和 ISS。 step3、设置 PSCI 仿真接口返回成功。 step4、调用 cpu_vcpu_emulate_hvc32。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_hvc32 等价列表：HVC32 PSCI 调用成功。 其它说明：本用例覆盖 HVC32 wrapper 路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_hvc64.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.iss>> = HYPERCALL_ISS;
+Stub 设置：
+dispatch_hcall.return = VMM_OK
+Expected return
+VMM_OK
+用例注释
+测试目的：验证 HVC64 ISS 为 hypercall 时，函数调用 hypercall 分发接口。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，ISS 设置为 HYPERCALL_ISS，hypercall 分发接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 ISS 为 HYPERCALL_ISS。 step3、设置 hypercall 分发接口返回成功。 step4、调用 cpu_vcpu_emulate_hvc64。 step5、观察函数返回值和分发接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_hvc64 等价列表：HVC64 hypercall 路径。 其它说明：本用例覆盖 iss == HYPERCALL_ISS 分支。 通过准则：函数返回 hypercall 分发接口返回值，分发接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_hvc64.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_hvc64.iss>> = 0U;
+Stub 设置：
+emulate_psci_call.return = VMM_OK
+Expected return
+VMM_OK
+用例注释
+测试目的：验证 HVC64 ISS 不是 hypercall 时，函数转入 PSCI 调用路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，ISS 不等于 HYPERCALL_ISS，PSCI 仿真接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 ISS 为非 hypercall 值。 step3、设置 PSCI 仿真接口返回成功。 step4、调用 cpu_vcpu_emulate_hvc64。 step5、观察函数返回值和 PSCI 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_hvc64 等价列表：HVC64 PSCI 路径。 其它说明：本用例覆盖 iss != HYPERCALL_ISS 分支。 通过准则：函数返回 VMM_OK，PSCI 仿真接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_smc32.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc32.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc32.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc32.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc32.iss>> = 0U;
+Stub 设置：
+emulate_psci_call.return = VMM_OK
+Expected return
+VMM_OK
+用例注释
+测试目的：验证 SMC32 仿真接口将调用转发到 PSCI 处理路径并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，PSCI 仿真接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令长度和 ISS。 step3、设置 PSCI 仿真接口返回成功。 step4、调用 cpu_vcpu_emulate_smc32。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_smc32 等价列表：SMC32 PSCI 调用成功。 其它说明：本用例覆盖 SMC32 wrapper 路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+十一、
+vmm_invoke_smc_fn
+真实支持分支会执行 smc #0，普通 host 单元测试不建议执行。这里设计安全路径。
+ 
+⸻
+ 
+用例名称：
+vmm_invoke_smc_fn.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x5000U;
+regs_obj.pstate = 0U;
+regs_obj.gpr[0] = 0x12345678U;
+regs_obj.gpr[1] = 0U;
+regs_obj.gpr[2] = 0U;
+regs_obj.gpr[3] = 0U;
+
+<<cpu_vcpu_emulate.vmm_invoke_smc_fn.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.vmm_invoke_smc_fn.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.vmm_invoke_smc_fn.il>> = 1U;
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x5004
+cpu_vcpu_reg64_write 被调用一次，Rt = 0，data = VMM_OK
+vmm_printf 被调用一次
+用例注释
+测试目的：验证 SMC 函数号不属于支持列表时，函数打印不支持信息、写回返回值并推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，将 gpr0 设置为不支持的 SMC 函数号。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 gpr0 为不支持的 SMC 函数号。 step3、设置 PC 初值为 0x5000。 step4、调用 vmm_invoke_smc_fn。 step5、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_invoke_smc_fn 等价列表：SMC 函数号不支持。 其它说明：本用例覆盖安全的非 SMC 汇编路径；支持函数号路径会执行真实 smc #0，普通 host 单元测试不建议执行。 通过准则：函数返回 VMM_OK，PC 增加 4，返回值写回 gpr0 对应寄存器。
+ 
+⸻
+ 
+支持函数号分支覆盖说明
+func_id == ARM_SVC_READ_SEC_REG || func_id == ARM_SVC_WRITE_SEC_REG
+该分支会执行真实：
+smc #0
+普通 host 单元测试可能触发非法指令或异常，不建议通过普通 VectorCAST 用例执行。建议作为目标板测试覆盖，或在覆盖率报告中说明该分支需要目标执行环境支持 SMC 指令。
+ 
+⸻
+ 
+十二、
+cpu_vcpu_emulate_smc64
+按配置分支设计。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_smc64.001.R
+适用于未定义 CONFIG_SMC_EMU 或 iss != SMC_ISS 的 PSCI 路径。
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.iss>> = 0U;
+Stub 设置：
+emulate_psci_call.return = VMM_OK
+Expected return
+VMM_OK
+用例注释
+测试目的：验证 SMC64 在不进入特殊 SMC 处理分支时，函数转入 PSCI 调用路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，ISS 不匹配特殊 SMC 分支，PSCI 仿真接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 ISS 为非特殊 SMC 值。 step3、设置 PSCI 仿真接口返回成功。 step4、调用 cpu_vcpu_emulate_smc64。 step5、观察函数返回值和 PSCI 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_smc64 等价列表：SMC64 PSCI 路径。 其它说明：本用例覆盖默认 PSCI 调用路径。 通过准则：函数返回 VMM_OK，PSCI 仿真接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_smc64.002.R
+仅在定义 CONFIG_SMC_EMU 时建立。
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x5000U;
+regs_obj.pstate = 0U;
+regs_obj.gpr[0] = 0x12345678U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_smc64.iss>> = SMC_ISS;
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x5004
+用例注释
+测试目的：验证启用 SMC 仿真配置且 ISS 为 SMC 时，SMC64 仿真接口调用 vmm_invoke_smc_fn 处理。 用例类别：基于需求的测试 预置条件：定义 CONFIG_SMC_EMU；构造有效 VCPU 和寄存器对象；设置 ISS 为 SMC_ISS；设置 gpr0 为不触发真实 SMC 汇编的非支持函数号。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 ISS 为 SMC_ISS。 step3、设置 gpr0 为不支持的 SMC 函数号。 step4、调用 cpu_vcpu_emulate_smc64。 step5、观察返回值和 PC 更新。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_smc64 等价列表：CONFIG_SMC_EMU 已启用，SMC ISS 匹配。 其它说明：本用例通过不支持函数号覆盖安全的 SMC 仿真入口路径，避免执行真实 smc #0。 通过准则：函数返回 VMM_OK，PC 按指令长度推进。
+ 
+⸻
+ 
+十三、
+cpu_vcpu_emulate_msr_mrs_system
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_msr_mrs_system.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x6000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.iss>> =
+    ISS_SYSREG_READ | (1U << ISS_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_sysregs_read.return = TRUE
+cpu_vcpu_sysregs_read 输出 data = 0x99
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x6004
+cpu_vcpu_reg64_write 被调用一次，Xt = 1，data = 0x99
+用例注释
+测试目的：验证系统寄存器读操作成功时，函数将读取数据写入目标通用寄存器并推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，ISS 表示系统寄存器读操作，系统寄存器读接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x6000。 step3、构造系统寄存器读操作 ISS。 step4、设置系统寄存器读接口返回成功并输出 0x99。 step5、调用 cpu_vcpu_emulate_msr_mrs_system。 step6、观察返回值、PC 和通用寄存器写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_msr_mrs_system 等价列表：系统寄存器读成功。 其它说明：本用例覆盖 read 成功路径。 通过准则：函数返回 VMM_OK，PC 增加 4，通用寄存器写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_msr_mrs_system.002.FI
+同上，设置：
+cpu_vcpu_sysregs_read.return = FALSE
+Expected return
+VMM_ENOTAVAIL
+用例注释
+测试目的：通过故障注入模拟系统寄存器读失败，验证函数返回不可用错误且不推进 PC。 用例类别：故障注入测试 预置条件：构造系统寄存器读操作 ISS，系统寄存器读接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值。 step3、构造系统寄存器读操作 ISS。 step4、设置系统寄存器读接口返回失败。 step5、调用 cpu_vcpu_emulate_msr_mrs_system。 step6、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_msr_mrs_system 等价列表：系统寄存器读失败。 其它说明：本用例覆盖 read 失败路径。 通过准则：函数返回 VMM_ENOTAVAIL，PC 保持不变。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_msr_mrs_system.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x6000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_msr_mrs_system.iss>> =
+    (1U << ISS_RT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0xAA
+cpu_vcpu_sysregs_write.return = TRUE
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x6004
+cpu_vcpu_sysregs_write 被调用一次，data = 0xAA
+用例注释
+测试目的：验证系统寄存器写操作成功时，函数从通用寄存器读取数据并写入系统寄存器，然后推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象，ISS 表示系统寄存器写操作，通用寄存器读和系统寄存器写接口均返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x6000。 step3、构造系统寄存器写操作 ISS。 step4、设置通用寄存器读接口返回 0xAA。 step5、设置系统寄存器写接口返回成功。 step6、调用 cpu_vcpu_emulate_msr_mrs_system。 step7、观察返回值、PC 和系统寄存器写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_msr_mrs_system 等价列表：系统寄存器写成功。 其它说明：本用例覆盖 write 成功路径。 通过准则：函数返回 VMM_OK，PC 增加 4，系统寄存器写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_msr_mrs_system.004.FI
+同上，设置：
+cpu_vcpu_reg64_read.return = 0xAA
+cpu_vcpu_sysregs_write.return = FALSE
+Expected return
+VMM_ENOTAVAIL
+用例注释
+测试目的：通过故障注入模拟系统寄存器写失败，验证函数返回不可用错误且不推进 PC。 用例类别：故障注入测试 预置条件：构造系统寄存器写操作 ISS，系统寄存器写接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值。 step3、构造系统寄存器写操作 ISS。 step4、设置系统寄存器写接口返回失败。 step5、调用 cpu_vcpu_emulate_msr_mrs_system。 step6、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_msr_mrs_system 等价列表：系统寄存器写失败。 其它说明：本用例覆盖 write 失败路径。 通过准则：函数返回 VMM_ENOTAVAIL，PC 保持不变。
+ 
+⸻
+ 
+十四、
+arm_sign_extend
+ 
+⸻
+ 
+用例名称：
+arm_sign_extend.001.R
+具体构造方法
+<<cpu_vcpu_emulate.arm_sign_extend.imm>> = 0x80U;
+<<cpu_vcpu_emulate.arm_sign_extend.len>> = 8U;
+<<cpu_vcpu_emulate.arm_sign_extend.bits>> = 32U;
+Expected return
+0xFFFFFF80
+用例注释
+测试目的：验证符号扩展函数在符号位为 1 时，能够将立即数扩展为负数形式。 用例类别：基于需求的测试 预置条件：输入立即数的第 8 位符号位为 1，目标位宽为 32 位。 测试步骤： step1、设置立即数为 0x80。 step2、设置原始长度为 8 位。 step3、设置目标位宽为 32 位。 step4、调用 arm_sign_extend。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 1。 其它说明：本用例覆盖符号扩展分支。 通过准则：函数返回 0xFFFFFF80。
+ 
+⸻
+ 
+用例名称：
+arm_sign_extend.002.R
+具体构造方法
+<<cpu_vcpu_emulate.arm_sign_extend.imm>> = 0x7FU;
+<<cpu_vcpu_emulate.arm_sign_extend.len>> = 8U;
+<<cpu_vcpu_emulate.arm_sign_extend.bits>> = 32U;
+Expected return
+0x0000007F
+用例注释
+测试目的：验证符号扩展函数在符号位为 0 时，保持正数值不变。 用例类别：基于需求的测试 预置条件：输入立即数的第 8 位符号位为 0，目标位宽为 32 位。 测试步骤： step1、设置立即数为 0x7F。 step2、设置原始长度为 8 位。 step3、设置目标位宽为 32 位。 step4、调用 arm_sign_extend。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 0。 其它说明：本用例覆盖不进行符号扩展的路径。 通过准则：函数返回 0x0000007F。
+ 
+⸻
+ 
+十五、
+cpu_vcpu_emulate_load
+load/store 分支较多，建议用少量用例覆盖 sas 四类、符号扩展、默认失败和读失败。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (0U << ISS_ABORT_SAS_SHIFT) |
+    (1U << ISS_ABORT_SSE_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+vmm_devemu_emulate_read.return = VMM_OK
+vmm_devemu_emulate_read 输出 data8 = 0x80
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_reg64_write 被调用一次，Rt = 2，data = 0xFFFFFF80
+regs_obj.pc = 0x7004
+用例注释
+测试目的：验证 8 位 load 且需要符号扩展时，函数读取设备数据、执行符号扩展并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造 AArch32 小端模式寄存器对象；ISS 指定访问大小为 8 位，启用符号扩展，目标寄存器为 2；设备读接口返回成功并输出 0x80。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x7000。 step3、构造 8 位带符号扩展 load 的 ISS。 step4、设置设备读接口返回成功并输出 0x80。 step5、调用 cpu_vcpu_emulate_load。 step6、观察返回值、PC 和目标寄存器写入值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：8 位 load，启用符号扩展，设备读成功。 其它说明：本用例覆盖 sas = 0 和符号扩展路径。 通过准则：函数返回 VMM_OK，目标寄存器写入 0xFFFFFF80，PC 增加 4。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (1U << ISS_ABORT_SAS_SHIFT) |
+    (0U << ISS_ABORT_SSE_SHIFT) |
+    (3U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+vmm_devemu_emulate_read.return = VMM_OK
+vmm_devemu_emulate_read 输出 data16 = 0x1234
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_reg64_write 被调用一次，Rt = 3，data = 0x1234
+regs_obj.pc = 0x7002
+用例注释
+测试目的：验证 16 位 load 且不需要符号扩展时，函数直接将读取值写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造 AArch32 小端模式寄存器对象；ISS 指定访问大小为 16 位，不启用符号扩展；设备读接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x7000。 step3、构造 16 位无符号 load 的 ISS。 step4、设置设备读接口返回成功并输出 0x1234。 step5、调用 cpu_vcpu_emulate_load。 step6、观察返回值、PC 和目标寄存器写入值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：16 位 load，不启用符号扩展，设备读成功。 其它说明：本用例覆盖 sas = 1 无符号路径和 il = 0 的 PC 推进。 通过准则：函数返回 VMM_OK，目标寄存器写入 0x1234，PC 增加 2。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (2U << ISS_ABORT_SAS_SHIFT) |
+    (1U << ISS_ABORT_SSE_SHIFT) |
+    (4U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+vmm_devemu_emulate_read.return = VMM_OK
+vmm_devemu_emulate_read 输出 data32 = 0x12345678
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_reg64_write 被调用一次，Rt = 4，data = 0x12345678
+regs_obj.pc = 0x7004
+用例注释
+测试目的：验证 32 位 load 时，函数忽略符号扩展标志并将 32 位值写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造 AArch32 寄存器对象；ISS 指定访问大小为 32 位并设置符号扩展位；设备读接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x7000。 step3、构造 32 位 load 的 ISS。 step4、设置设备读接口返回成功并输出 0x12345678。 step5、调用 cpu_vcpu_emulate_load。 step6、观察返回值、PC 和目标寄存器写入值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：32 位 load，设备读成功。 其它说明：本用例覆盖 sas = 2 路径，以及 sse = (sas == 2) ? 0 : sse 的修正逻辑。 通过准则：函数返回 VMM_OK，目标寄存器写入 0x12345678，PC 增加 4。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.004.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (3U << ISS_ABORT_SAS_SHIFT) |
+    (5U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+vmm_devemu_emulate_read.return = VMM_OK
+vmm_devemu_emulate_read 输出 data64 = 0x1122334455667788
+Expected return
+VMM_OK
+关键期望
+cpu_vcpu_reg64_write 被调用一次，Rt = 5，data = 0x1122334455667788
+regs_obj.pc = 0x7004
+用例注释
+测试目的：验证 64 位 load 时，函数读取 64 位数据并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造 AArch32 寄存器对象；ISS 指定访问大小为 64 位；设备读接口返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x7000。 step3、构造 64 位 load 的 ISS。 step4、设置设备读接口返回成功并输出 64 位测试数据。 step5、调用 cpu_vcpu_emulate_load。 step6、观察返回值、PC 和目标寄存器写入值。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：64 位 load，设备读成功。 其它说明：本用例覆盖 sas = 3 路径。 通过准则：函数返回 VMM_OK，目标寄存器写入 64 位测试数据，PC 增加 4。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.005.FI
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (0U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+vmm_devemu_emulate_read.return = VMM_EFAIL
+Expected return
+VMM_EFAIL
+关键期望
+regs_obj.pc = 0x7000
+cpu_vcpu_reg64_write 未被调用
+用例注释
+测试目的：通过故障注入模拟设备读失败，验证 load 仿真函数返回错误且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定 8 位 load；设备读接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x7000。 step3、构造 8 位 load 的 ISS。 step4、设置设备读接口返回失败。 step5、调用 cpu_vcpu_emulate_load。 step6、观察返回值、PC 和目标寄存器写接口调用情况。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：设备读接口失败。 其它说明：本用例覆盖设备读错误传播路径。 通过准则：函数返回设备读接口注入的错误码，PC 保持不变，目标寄存器写接口未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_load.006.IN.sas.NEC
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x7000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000U;
+
+/* 如果 ISS_ABORT_SAS_MASK 只能表示 0~3，该 default 分支可能不可达 */
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> =
+    (4U << ISS_ABORT_SAS_SHIFT);
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：验证 load 仿真函数在访问大小字段超出支持范围时返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象，并将访问大小字段构造为不支持值。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值。 step3、构造不支持的访问大小字段。 step4、调用 cpu_vcpu_emulate_load。 step5、观察函数返回值。 用例来源：无效等价类 追溯ID：cpu_vcpu_emulate_load 等价列表：访问大小字段超出支持范围。 其它说明：如果 ISS_ABORT_SAS_MASK 只能保留 2 位，则该 default 分支在真实编码下不可达，应做覆盖率排除说明。 通过准则：若环境允许构造该值，函数返回 VMM_EFAIL；若掩码导致值被截断，则该分支作为不可达分支排除。
+ 
+⸻
+ 
+十六、
+cpu_vcpu_emulate_store
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (0U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x12
+vmm_devemu_emulate_write.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x8004
+vmm_devemu_emulate_write 被调用一次，写入大小为 1
+用例注释
+测试目的：验证 8 位 store 时，函数从目标寄存器读取数据并调用设备写接口写入 1 字节数据。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定访问大小为 8 位；通用寄存器读接口和设备写接口均返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x8000。 step3、构造 8 位 store 的 ISS。 step4、设置通用寄存器读接口返回 0x12。 step5、设置设备写接口返回成功。 step6、调用 cpu_vcpu_emulate_store。 step7、观察返回值、PC 和设备写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：8 位 store，设备写成功。 其它说明：本用例覆盖 sas = 0 路径。 通过准则：函数返回 VMM_OK，PC 增加 4，设备写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (1U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x1234
+vmm_devemu_emulate_write.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x8002
+vmm_devemu_emulate_write 被调用一次，写入大小为 2
+用例注释
+测试目的：验证 16 位 store 时，函数从目标寄存器读取数据并调用设备写接口写入 2 字节数据。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定访问大小为 16 位；通用寄存器读接口和设备写接口均返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x8000。 step3、构造 16 位 store 的 ISS。 step4、设置通用寄存器读接口返回 0x1234。 step5、设置设备写接口返回成功。 step6、调用 cpu_vcpu_emulate_store。 step7、观察返回值、PC 和设备写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：16 位 store，设备写成功。 其它说明：本用例覆盖 sas = 1 路径和 il = 0 的 PC 推进。 通过准则：函数返回 VMM_OK，PC 增加 2，设备写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (2U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x12345678
+vmm_devemu_emulate_write.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x8004
+vmm_devemu_emulate_write 被调用一次，写入大小为 4
+用例注释
+测试目的：验证 32 位 store 时，函数从目标寄存器读取数据并调用设备写接口写入 4 字节数据。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定访问大小为 32 位；通用寄存器读接口和设备写接口均返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x8000。 step3、构造 32 位 store 的 ISS。 step4、设置通用寄存器读接口返回 0x12345678。 step5、设置设备写接口返回成功。 step6、调用 cpu_vcpu_emulate_store。 step7、观察返回值、PC 和设备写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：32 位 store，设备写成功。 其它说明：本用例覆盖 sas = 2 路径。 通过准则：函数返回 VMM_OK，PC 增加 4，设备写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.004.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (3U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x1122334455667788
+vmm_devemu_emulate_write.return = VMM_OK
+Expected return
+VMM_OK
+关键期望
+regs_obj.pc = 0x8004
+vmm_devemu_emulate_write 被调用一次，写入大小为 8
+用例注释
+测试目的：验证 64 位 store 时，函数从目标寄存器读取数据并调用设备写接口写入 8 字节数据。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定访问大小为 64 位；通用寄存器读接口和设备写接口均返回成功。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x8000。 step3、构造 64 位 store 的 ISS。 step4、设置通用寄存器读接口返回 64 位测试数据。 step5、设置设备写接口返回成功。 step6、调用 cpu_vcpu_emulate_store。 step7、观察返回值、PC 和设备写接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：64 位 store，设备写成功。 其它说明：本用例覆盖 sas = 3 路径。 通过准则：函数返回 VMM_OK，PC 增加 4，设备写接口被调用一次。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.005.FI
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (0U << ISS_ABORT_SAS_SHIFT) |
+    (2U << ISS_ABORT_SRT_SHIFT);
+Stub 设置：
+cpu_vcpu_reg64_read.return = 0x12
+vmm_devemu_emulate_write.return = VMM_EFAIL
+Expected return
+VMM_EFAIL
+关键期望
+regs_obj.pc = 0x8000
+用例注释
+测试目的：通过故障注入模拟设备写失败，验证 store 仿真函数返回错误且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；ISS 指定 8 位 store；设备写接口返回失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值为 0x8000。 step3、构造 8 位 store 的 ISS。 step4、设置通用寄存器读接口返回测试数据。 step5、设置设备写接口返回失败。 step6、调用 cpu_vcpu_emulate_store。 step7、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：设备写接口失败。 其它说明：本用例覆盖设备写错误传播路径。 通过准则：函数返回设备写接口注入的错误码，PC 保持不变。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_store.006.IN.sas.NEC
+与 load default 一样，如果 ISS_ABORT_SAS_MASK 只能表示 0~3，则 default 分支可能不可达。
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x8000U;
+regs_obj.pstate = PSR_MODE32;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.ipa>> = 0x200000U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_store.iss>> =
+    (4U << ISS_ABORT_SAS_SHIFT);
+Expected return
+VMM_EFAIL
+用例注释
+测试目的：验证 store 仿真函数在访问大小字段超出支持范围时返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象，并将访问大小字段构造为不支持值。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 PC 初值。 step3、构造不支持的访问大小字段。 step4、调用 cpu_vcpu_emulate_store。 step5、观察函数返回值。 用例来源：无效等价类 追溯ID：cpu_vcpu_emulate_store 等价列表：访问大小字段超出支持范围。 其它说明：如果 ISS_ABORT_SAS_MASK 只能保留 2 位，则该 default 分支在真实编码下不可达，应做覆盖率排除说明。 通过准则：若环境允许构造该值，函数返回 VMM_EFAIL；若掩码导致值被截断，则该分支作为不可达分支排除。
+ 
+⸻
+ 
+十七、最终用例清单
+cpu_vcpu_condition_check.001.R
+cpu_vcpu_condition_check.002.R
+cpu_vcpu_condition_check.003.R
+cpu_vcpu_condition_check.004.R
+cpu_vcpu_condition_check.005.R
+cpu_vcpu_condition_check.006.R
+cpu_vcpu_condition_check.007.R
+cpu_vcpu_condition_check.008.R
+cpu_vcpu_condition_check.009.R
+cpu_vcpu_condition_check.010.R
+cpu_vcpu_condition_check.011.R
+cpu_vcpu_condition_check.012.R
+
+cpu_vcpu_update_itstate.001.R
+cpu_vcpu_update_itstate.002.R
+cpu_vcpu_update_itstate.003.R
+
+cpu_vcpu_emulate_wfi_wfe.001.R
+cpu_vcpu_emulate_wfi_wfe.002.R
+cpu_vcpu_emulate_wfi_wfe.003.R
+cpu_vcpu_emulate_wfi_wfe.004.R
+
+cpu_vcpu_emulate_mcr_mrc_cp15.001.R
+cpu_vcpu_emulate_mcr_mrc_cp15.002.R
+cpu_vcpu_emulate_mcr_mrc_cp15.003.FI
+cpu_vcpu_emulate_mcr_mrc_cp15.004.R
+cpu_vcpu_emulate_mcr_mrc_cp15.005.FI
+
+cpu_vcpu_emulate_mcrr_mrrc_cp15.001.R
+
+cpu_vcpu_emulate_mcr_mrc_cp14.001.R
+cpu_vcpu_emulate_mcr_mrc_cp14.002.FI
+cpu_vcpu_emulate_mcr_mrc_cp14.003.R
+cpu_vcpu_emulate_mcr_mrc_cp14.004.FI
+
+cpu_vcpu_emulate_mcrr_mrrc_cp14.001.R
+cpu_vcpu_emulate_ldc_stc_cp14.001.R
+
+cpu_vcpu_emulate_simd_fp_regs.001.R
+cpu_vcpu_emulate_simd_fp_regs.002.R
+cpu_vcpu_emulate_vmrs.001.R
+cpu_vcpu_emulate_vmrs.002.R
+cpu_vcpu_emulate_fpexec_a32.001.R
+cpu_vcpu_emulate_fpexec_a32.002.R
+cpu_vcpu_emulate_fpexec_a64.001.R
+cpu_vcpu_emulate_fpexec_a64.002.R
+
+do_psci_call.001.R
+do_psci_call.002.FI
+cpu_vcpu_emulate_hvc32.001.R
+cpu_vcpu_emulate_hvc64.001.R
+cpu_vcpu_emulate_hvc64.002.R
+cpu_vcpu_emulate_smc32.001.R
+vmm_invoke_smc_fn.001.R
+cpu_vcpu_emulate_smc64.001.R
+cpu_vcpu_emulate_smc64.002.R
+
+cpu_vcpu_emulate_msr_mrs_system.001.R
+cpu_vcpu_emulate_msr_mrs_system.002.FI
+cpu_vcpu_emulate_msr_mrs_system.003.R
+cpu_vcpu_emulate_msr_mrs_system.004.FI
+
+arm_sign_extend.001.R
+arm_sign_extend.002.R
+
+cpu_vcpu_emulate_load.001.R
+cpu_vcpu_emulate_load.002.R
+cpu_vcpu_emulate_load.003.R
+cpu_vcpu_emulate_load.004.R
+cpu_vcpu_emulate_load.005.FI
+cpu_vcpu_emulate_load.006.IN.sas.NEC
+
+cpu_vcpu_emulate_store.001.R
+cpu_vcpu_emulate_store.002.R
+cpu_vcpu_emulate_store.003.R
+cpu_vcpu_emulate_store.004.R
+cpu_vcpu_emulate_store.005.FI
+cpu_vcpu_emulate_store.006.IN.sas.NEC
+vmm_invoke_smc_fn 中真实 smc #0 支持分支、load/store 的 default 分支是否可达，取决于测试平台和 ISS 掩码定义；如果普通单元测试不能安全构造，应做覆盖率排除说明。
