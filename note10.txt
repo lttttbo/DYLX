@@ -1,0 +1,371 @@
+下面重新给出 VFP 相关函数的全覆盖用例。所有关键构造值都直接使用数值，不使用宏。
+本组函数包括：
+cpu_vcpu_emulate_simd_fp_regs
+cpu_vcpu_emulate_vmrs
+cpu_vcpu_emulate_fpexec_a32
+cpu_vcpu_emulate_fpexec_a64
+每个函数 3 条用例：
+001.R：条件检查失败，il = 1，非 Thumb，覆盖 pc += 4 和 Thumb 判断 false。
+002.R：条件检查失败，il = 0，Thumb，覆盖 pc += 2 和 Thumb 判断 true。
+003.R：条件检查成立，转发到 cpu_vcpu_vfp_trap。
+关键数值如下：
+条件检查失败 ISS = 0x01000000
+含义：CV = 1，cond = 0x0，即 EQ；pstate 不设置 Z 标志，因此条件失败。
+
+条件检查成立 ISS = 0x01E00000
+含义：CV = 1，cond = 0xE，即 AL；条件成立。
+
+Thumb 位 pstate = 0x00000020
+
+非 Thumb pstate = 0x00000000
+
+返回成功值 = 0
+注意：如果 VectorCAST 把 cpu_vcpu_condition_check 配成了 Stub，那么下面的 iss 和 pstate 构造不会生效。要么取消该 Stub，要么在 001/002 用例中把它的返回值设为 FALSE，在 003 用例中把它的返回值设为 TRUE。
+ 
+⸻
+ 
+一、
+cpu_vcpu_emulate_simd_fp_regs
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_simd_fp_regs.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004000U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004004
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 SIMD/FP 寄存器访问指令条件检查失败且指令长度为 32 位时，函数跳过当前指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000000，使 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004000。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_simd_fp_regs。 step7、观察返回值、PC、PSTATE 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_simd_fp_regs 等价列表：条件不成立，32 位指令，非 Thumb 状态。 其它说明：本用例覆盖条件失败路径、4 字节 PC 推进分支和 Thumb 判断 false 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004000 更新为 0x00004004，regs_obj.pstate 保持 0x00000000，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_simd_fp_regs.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004000U;
+regs_obj.pstate = 0x00000020U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004002
+regs_obj.pstate = 0x00000020
+cpu_vcpu_update_itstate 被调用一次
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 SIMD/FP 寄存器访问指令条件检查失败且处于 Thumb 状态时，函数按 16 位指令长度推进 PC 并进入 ITSTATE 更新路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000020，表示 Thumb 状态且 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004000。 step3、设置 regs_obj.pstate 为 0x00000020。 step4、设置 il 为 0。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_simd_fp_regs。 step7、观察返回值、PC、PSTATE、ITSTATE 更新函数和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_simd_fp_regs 等价列表：条件不成立，16 位指令，Thumb 状态。 其它说明：本用例覆盖 2 字节 PC 推进分支和 Thumb 判断 true 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004000 更新为 0x00004002，regs_obj.pstate 保持 0x00000020，cpu_vcpu_update_itstate 被调用一次，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_simd_fp_regs.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004000U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_simd_fp_regs.iss>> = 0x01E00000U;
+Stub 设置：
+cpu_vcpu_vfp_trap.return = 0
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004000
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 被调用一次
+用例注释
+测试目的：验证 SIMD/FP 寄存器访问指令条件检查成立时，函数将处理转发给 VFP trap 处理函数。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01E00000，表示条件码有效且条件为 AL；VFP trap 接口返回 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004000。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01E00000。 step6、设置 cpu_vcpu_vfp_trap 返回 0。 step7、调用 cpu_vcpu_emulate_simd_fp_regs。 step8、观察返回值、PC 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_simd_fp_regs 等价列表：条件成立，VFP trap 接口返回成功。 其它说明：本用例覆盖条件成立后直接转发到 VFP trap 的路径。 通过准则：函数返回 0，regs_obj.pc 保持 0x00004000，cpu_vcpu_vfp_trap 被调用一次。
+ 
+⸻
+ 
+二、
+cpu_vcpu_emulate_vmrs
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_vmrs.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004100U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004104
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 VMRS 指令条件检查失败且指令长度为 32 位时，函数跳过当前指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000000，使 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004100。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_vmrs。 step7、观察返回值、PC、PSTATE 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_vmrs 等价列表：条件不成立，32 位指令，非 Thumb 状态。 其它说明：本用例覆盖条件失败路径、4 字节 PC 推进分支和 Thumb 判断 false 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004100 更新为 0x00004104，regs_obj.pstate 保持 0x00000000，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_vmrs.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004100U;
+regs_obj.pstate = 0x00000020U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004102
+regs_obj.pstate = 0x00000020
+cpu_vcpu_update_itstate 被调用一次
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 VMRS 指令条件检查失败且处于 Thumb 状态时，函数按 16 位指令长度推进 PC 并进入 ITSTATE 更新路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000020，表示 Thumb 状态且 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004100。 step3、设置 regs_obj.pstate 为 0x00000020。 step4、设置 il 为 0。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_vmrs。 step7、观察返回值、PC、PSTATE、ITSTATE 更新函数和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_vmrs 等价列表：条件不成立，16 位指令，Thumb 状态。 其它说明：本用例覆盖 2 字节 PC 推进分支和 Thumb 判断 true 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004100 更新为 0x00004102，regs_obj.pstate 保持 0x00000020，cpu_vcpu_update_itstate 被调用一次，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_vmrs.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004100U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_vmrs.iss>> = 0x01E00000U;
+Stub 设置：
+cpu_vcpu_vfp_trap.return = 0
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004100
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 被调用一次
+用例注释
+测试目的：验证 VMRS 指令条件检查成立时，函数将处理转发给 VFP trap 处理函数。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01E00000，表示条件码有效且条件为 AL；VFP trap 接口返回 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004100。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01E00000。 step6、设置 cpu_vcpu_vfp_trap 返回 0。 step7、调用 cpu_vcpu_emulate_vmrs。 step8、观察返回值、PC 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_vmrs 等价列表：条件成立，VFP trap 接口返回成功。 其它说明：本用例覆盖条件成立后直接转发到 VFP trap 的路径。 通过准则：函数返回 0，regs_obj.pc 保持 0x00004100，cpu_vcpu_vfp_trap 被调用一次。
+ 
+⸻
+ 
+三、
+cpu_vcpu_emulate_fpexec_a32
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a32.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004200U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004204
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 A32 FP 执行指令条件检查失败且指令长度为 32 位时，函数跳过当前指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000000，使 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004200。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_fpexec_a32。 step7、观察返回值、PC、PSTATE 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a32 等价列表：条件不成立，32 位指令，非 Thumb 状态。 其它说明：本用例覆盖条件失败路径、4 字节 PC 推进分支和 Thumb 判断 false 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004200 更新为 0x00004204，regs_obj.pstate 保持 0x00000000，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a32.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004200U;
+regs_obj.pstate = 0x00000020U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004202
+regs_obj.pstate = 0x00000020
+cpu_vcpu_update_itstate 被调用一次
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 A32 FP 执行指令条件检查失败且处于 Thumb 状态时，函数按 16 位指令长度推进 PC 并进入 ITSTATE 更新路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000020，表示 Thumb 状态且 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004200。 step3、设置 regs_obj.pstate 为 0x00000020。 step4、设置 il 为 0。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_fpexec_a32。 step7、观察返回值、PC、PSTATE、ITSTATE 更新函数和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a32 等价列表：条件不成立，16 位指令，Thumb 状态。 其它说明：本用例覆盖 2 字节 PC 推进分支和 Thumb 判断 true 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004200 更新为 0x00004202，regs_obj.pstate 保持 0x00000020，cpu_vcpu_update_itstate 被调用一次，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a32.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004200U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a32.iss>> = 0x01E00000U;
+Stub 设置：
+cpu_vcpu_vfp_trap.return = 0
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004200
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 被调用一次
+用例注释
+测试目的：验证 A32 FP 执行指令条件检查成立时，函数将处理转发给 VFP trap 处理函数。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01E00000，表示条件码有效且条件为 AL；VFP trap 接口返回 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004200。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01E00000。 step6、设置 cpu_vcpu_vfp_trap 返回 0。 step7、调用 cpu_vcpu_emulate_fpexec_a32。 step8、观察返回值、PC 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a32 等价列表：条件成立，VFP trap 接口返回成功。 其它说明：本用例覆盖条件成立后直接转发到 VFP trap 的路径。 通过准则：函数返回 0，regs_obj.pc 保持 0x00004200，cpu_vcpu_vfp_trap 被调用一次。
+ 
+⸻
+ 
+四、
+cpu_vcpu_emulate_fpexec_a64
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a64.001.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004300U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004304
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 A64 FP 执行指令条件检查失败且指令长度为 32 位时，函数跳过当前指令并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000000，使 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004300。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_fpexec_a64。 step7、观察返回值、PC、PSTATE 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a64 等价列表：条件不成立，32 位指令，非 Thumb 状态。 其它说明：本用例覆盖条件失败路径、4 字节 PC 推进分支和 Thumb 判断 false 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004300 更新为 0x00004304，regs_obj.pstate 保持 0x00000000，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a64.002.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004300U;
+regs_obj.pstate = 0x00000020U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.iss>> = 0x01000000U;
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004302
+regs_obj.pstate = 0x00000020
+cpu_vcpu_update_itstate 被调用一次
+cpu_vcpu_vfp_trap 未被调用
+用例注释
+测试目的：验证 A64 FP 执行指令条件检查失败且处于 Thumb 状态时，函数按 16 位指令长度推进 PC 并进入 ITSTATE 更新路径。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01000000，表示条件码有效且条件为 EQ；PSTATE 设置为 0x00000020，表示 Thumb 状态且 Z 标志未置位，从而使条件检查失败。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004300。 step3、设置 regs_obj.pstate 为 0x00000020。 step4、设置 il 为 0。 step5、设置 iss 为 0x01000000。 step6、调用 cpu_vcpu_emulate_fpexec_a64。 step7、观察返回值、PC、PSTATE、ITSTATE 更新函数和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a64 等价列表：条件不成立，16 位指令，Thumb 状态。 其它说明：本用例覆盖 2 字节 PC 推进分支和 Thumb 判断 true 分支。 通过准则：函数返回 0，regs_obj.pc 由 0x00004300 更新为 0x00004302，regs_obj.pstate 保持 0x00000020，cpu_vcpu_update_itstate 被调用一次，cpu_vcpu_vfp_trap 未被调用。
+ 
+⸻
+ 
+用例名称：
+cpu_vcpu_emulate_fpexec_a64.003.R
+具体构造方法
+static struct vmm_vcpu vcpu_obj;
+static arch_regs_t regs_obj;
+
+regs_obj.pc = 0x00004300U;
+regs_obj.pstate = 0x00000000U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.vcpu>> = &vcpu_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.regs>> = &regs_obj;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_fpexec_a64.iss>> = 0x01E00000U;
+Stub 设置：
+cpu_vcpu_vfp_trap.return = 0
+Expected return
+0
+关键期望
+regs_obj.pc = 0x00004300
+regs_obj.pstate = 0x00000000
+cpu_vcpu_vfp_trap 被调用一次
+用例注释
+测试目的：验证 A64 FP 执行指令条件检查成立时，函数将处理转发给 VFP trap 处理函数。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 ISS 为 0x01E00000，表示条件码有效且条件为 AL；VFP trap 接口返回 0。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 regs_obj.pc 为 0x00004300。 step3、设置 regs_obj.pstate 为 0x00000000。 step4、设置 il 为 1。 step5、设置 iss 为 0x01E00000。 step6、设置 cpu_vcpu_vfp_trap 返回 0。 step7、调用 cpu_vcpu_emulate_fpexec_a64。 step8、观察返回值、PC 和 VFP trap 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：cpu_vcpu_emulate_fpexec_a64 等价列表：条件成立，VFP trap 接口返回成功。 其它说明：本用例覆盖条件成立后直接转发到 VFP trap 的路径。 通过准则：函数返回 0，regs_obj.pc 保持 0x00004300，cpu_vcpu_vfp_trap 被调用一次。
+ 
+⸻
+ 
+五、更新后的 VFP 类用例清单
+cpu_vcpu_emulate_simd_fp_regs.001.R
+cpu_vcpu_emulate_simd_fp_regs.002.R
+cpu_vcpu_emulate_simd_fp_regs.003.R
+
+cpu_vcpu_emulate_vmrs.001.R
+cpu_vcpu_emulate_vmrs.002.R
+cpu_vcpu_emulate_vmrs.003.R
+
+cpu_vcpu_emulate_fpexec_a32.001.R
+cpu_vcpu_emulate_fpexec_a32.002.R
+cpu_vcpu_emulate_fpexec_a32.003.R
+
+cpu_vcpu_emulate_fpexec_a64.001.R
+cpu_vcpu_emulate_fpexec_a64.002.R
+cpu_vcpu_emulate_fpexec_a64.003.R
+这 12 条用例可以覆盖每个 VFP 类函数中的：
+if (!cpu_vcpu_condition_check(...)) 为 true
+if (!cpu_vcpu_condition_check(...)) 为 false
+pc += 4
+pc += 2
+Thumb 判断为 false
+Thumb 判断为 true
+cpu_vcpu_update_itstate 调用语句
+cpu_vcpu_vfp_trap 转发语句
