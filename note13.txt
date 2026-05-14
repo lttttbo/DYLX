@@ -1,0 +1,511 @@
+你图里这次剩下的覆盖点是：
+if (ret == 0 && next) {
+    *next = vcpu;
+}
+你已经覆盖了：
+ret == 0 为 true
+ret == 0 为 false
+next 为 true
+但还缺一条：
+ret == 0 为 true，next 为 false
+也就是 rq_dequeue() 的入参 next 要传 NULL，同时 vmm_schedalgo_rq_dequeue() 仍然返回成功。之前 3 条用例不够，rq_dequeue 最少需要 4 条。
+rq_enqueue() 和 rq_detach() 没有输出参数问题，不需要像 rq_dequeue 一样在 End of stub 里写输出指针；但它们也要覆盖：
+if (ret == 0 && vcpu == schedp->idle_vcpu)
+所以也需要：
+ret == 0，vcpu 是 idle
+ret == 0，vcpu 不是 idle
+ret != 0
+下面给你完整修正版。
+ 
+⸻
+ 
+一、User Code 设置
+1. Unit Prefix User Code -> 
+vmm_scheduler
+保持这个版本：
+#include <vmm_scheduler.h>
+#include <vmm_percpu.h>
+#include <vmm_vcpu_irq.h>
+#include <arch_regs.h>
+#include <libs/list.h>
+
+#ifdef BUG_ON
+#undef BUG_ON
+#endif
+
+#define BUG_ON(x)              \
+    do {                       \
+        if (x) {               \
+            exit(0);           \
+        }                      \
+    } while (0)
+
+#define VCAST_SCHED0                         (&per_cpu(sched, 0))
+#define VCAST_SCHED1                         (&per_cpu(sched, 1))
+
+#define VCAST_SCHED0_RQ                      (&(VCAST_SCHED0->rq))
+#define VCAST_SCHED0_CURRENT_VCPU            (&(VCAST_SCHED0->current_vcpu))
+#define VCAST_SCHED0_IDLE_VCPU               (&(VCAST_SCHED0->idle_vcpu))
+#define VCAST_SCHED0_IRQ_CONTEXT             (&(VCAST_SCHED0->irq_context))
+#define VCAST_SCHED0_IRQ_REGS                (&(VCAST_SCHED0->irq_regs))
+#define VCAST_SCHED0_YIELD_ON_IRQ_EXIT       (&(VCAST_SCHED0->yield_on_irq_exit))
+#define VCAST_SCHED0_IDLE_IN_RQ              (&(VCAST_SCHED0->idle_in_rq))
+
+#define VCAST_SCHED0_IRQ_ENTER_TSTAMP        (&(VCAST_SCHED0->irq_enter_tstamp))
+#define VCAST_SCHED0_IRQ_PROCESS_NS          (&(VCAST_SCHED0->irq_process_ns))
+#define VCAST_SCHED0_EXP_PROCESS_NS          (&(VCAST_SCHED0->exp_process_ns))
+#define VCAST_SCHED0_CURRENT_VCPU_IRQ_NS     (&(VCAST_SCHED0->current_vcpu_irq_ns))
+#define VCAST_SCHED0_CURRENT_VCPU_EXP_NS     (&(VCAST_SCHED0->current_vcpu_exp_ns))
+
+#define VCAST_SCHED0_SAMPLE_PERIOD_NS        (&(VCAST_SCHED0->sample_period_ns))
+#define VCAST_SCHED0_SAMPLE_IDLE_NS          (&(VCAST_SCHED0->sample_idle_ns))
+#define VCAST_SCHED0_SAMPLE_IDLE_LAST_NS     (&(VCAST_SCHED0->sample_idle_last_ns))
+#define VCAST_SCHED0_SAMPLE_IRQ_NS           (&(VCAST_SCHED0->sample_irq_ns))
+#define VCAST_SCHED0_SAMPLE_IRQ_LAST_NS      (&(VCAST_SCHED0->sample_irq_last_ns))
+
+#define VCAST_SCHED0_EV                      (&(VCAST_SCHED0->ev))
+#define VCAST_SCHED0_SAMPLE_EV               (&(VCAST_SCHED0->sample_ev))
+
+#define VCAST_SCHED1_RQ                      (&(VCAST_SCHED1->rq))
+#define VCAST_SCHED1_CURRENT_VCPU            (&(VCAST_SCHED1->current_vcpu))
+#define VCAST_SCHED1_IDLE_VCPU               (&(VCAST_SCHED1->idle_vcpu))
+#define VCAST_SCHED1_IDLE_IN_RQ              (&(VCAST_SCHED1->idle_in_rq))
+ 
+⸻
+ 
+2. User Globals
+void *vcast_sched_rq_dequeue_vcpu;
+unsigned long long vcast_sched_rq_dequeue_slice;
+ 
+⸻
+ 
+3. Test Case Init
+vcast_sched_rq_dequeue_vcpu = 0;
+vcast_sched_rq_dequeue_slice = 0ULL;
+ 
+⸻
+ 
+4. 
+vmm_schedalgo_rq_dequeue
+的 Stub User Code
+放在：
+Stub User Code -> vmm_schedalgo_rq_dequeue -> End of stub
+extern void *vcast_sched_rq_dequeue_vcpu;
+extern unsigned long long vcast_sched_rq_dequeue_slice;
+
+if (next != (struct vmm_vcpu **)0) {
+    *next = (struct vmm_vcpu *)vcast_sched_rq_dequeue_vcpu;
+}
+
+if (next_time_slice != (u64 *)0) {
+    *next_time_slice = (u64)vcast_sched_rq_dequeue_slice;
+}
+这里一定要放 End of stub。不要在参数树里展开 next[0] 填结构体对象，否则 VectorCAST 会生成类似 eventFlagObject 的独立对象，和 schedp->idle_vcpu 地址不同。
+ 
+⸻
+ 
+二、
+rq_dequeue
+用例名称：
+rq_dequeue.001.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 true
+next 为 true
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu = &idle_vcpu;
+vcast_sched_rq_dequeue_slice = 100ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub 设置：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected return
+0
+关键期望
+next_vcpu = &idle_vcpu
+next_time_slice = 100
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+用例注释
+测试目的：验证从 ready queue 出队 idle VCPU 时，调度控制结构中的 idle 入队标志被清除，并将出队 VCPU 输出给调用者。 用例类别：基于需求的测试 预置条件：构造有效调度控制结构，设置 idle VCPU 指针，并将 idle 入队标志置为 true；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将输出 VCPU 指针设置为同一个 idle VCPU 对象。 测试步骤： step1、构造 idle VCPU、输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将输出 VCPU 设置为 idle VCPU，将输出时间片设置为 100。 step6、调用 rq_dequeue。 step7、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，出队对象为 idle VCPU，next 入参有效。 其它说明：本用例必须保证出队返回的 VCPU 指针和 schedp->idle_vcpu 是同一个对象地址。 通过准则：函数返回 0，输出 VCPU 为 idle VCPU，输出时间片为 100，idle_in_rq 被置为 0。
+ 
+⸻
+ 
+用例名称：
+rq_dequeue.002.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 false
+next 为 true
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu = &normal_vcpu;
+vcast_sched_rq_dequeue_slice = 200ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub 设置：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected return
+0
+关键期望
+next_vcpu = &normal_vcpu
+next_time_slice = 200
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：验证 ready queue 出队普通 VCPU 时，不修改 idle 入队标志，并将普通 VCPU 输出给调用者。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将输出 VCPU 指针设置为普通 VCPU。 测试步骤： step1、构造 idle VCPU、普通 VCPU、输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将输出 VCPU 设置为普通 VCPU，将输出时间片设置为 200。 step6、调用 rq_dequeue。 step7、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，出队对象不是 idle VCPU，next 入参有效。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，输出 VCPU 为普通 VCPU，输出时间片为 200，idle_in_rq 保持 1。
+ 
+⸻
+ 
+用例名称：
+rq_dequeue.003.FI
+覆盖：
+ret == 0 为 false
+具体构造方法
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu = NULL;
+vcast_sched_rq_dequeue_slice = 0ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub 设置：
+vmm_schedalgo_rq_dequeue.return = -1
+Expected return
+-1
+关键期望
+next_vcpu = NULL
+next_time_slice = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：通过故障注入模拟 ready queue 出队失败，验证函数返回出队错误码且不更新输出 VCPU。 用例类别：故障注入测试 预置条件：构造有效调度控制结构，ready queue 出队接口返回失败。 测试步骤： step1、构造输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 ready queue 指针。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 -1。 step5、调用 rq_dequeue。 step6、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队接口失败。 其它说明：本用例覆盖 ret == 0 为 false 的路径。 通过准则：函数返回 -1，输出 VCPU 保持空指针，输出时间片保持 0，idle_in_rq 保持 1。
+ 
+⸻
+ 
+用例名称：
+rq_dequeue.004.R
+覆盖：
+ret == 0 为 true
+next 为 false
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu = &normal_vcpu;
+vcast_sched_rq_dequeue_slice = 300ULL;
+
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = NULL;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub 设置：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected return
+0
+关键期望
+next_time_slice = 300
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：验证 ready queue 出队成功但 next 输出参数为空时，函数不写出 VCPU 指针并仍然返回成功。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将内部出队 VCPU 设置为普通 VCPU；rq_dequeue 的 next 入参设置为空。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将内部出队 VCPU 设置为普通 VCPU，将输出时间片设置为 300。 step6、将 rq_dequeue 的 next 入参设置为空。 step7、调用 rq_dequeue。 step8、观察返回值、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，但调用者不需要输出 VCPU。 其它说明：本用例专门覆盖 if (ret == 0 && next) 中 next 为 false 的路径。 通过准则：函数返回 0，输出时间片为 300，idle_in_rq 保持 1。
+ 
+⸻
+ 
+三、
+rq_enqueue
+rq_enqueue() 不需要像 rq_dequeue() 那样改输出参数。它没有输出参数，直接使用入参 vcpu 做地址比较即可。
+用例名称：
+rq_enqueue.001.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 true
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &idle_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_enqueue.return = 0
+Expected return
+0
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：验证将 idle VCPU 入队成功时，调度控制结构中的 idle 入队标志被置为 true。 用例类别：基于需求的测试 预置条件：构造有效调度控制结构和 idle VCPU，ready queue 入队接口返回成功。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 0。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_enqueue 等价列表：入队对象为 idle VCPU，入队成功。 其它说明：本用例覆盖入队 idle VCPU 后设置 idle_in_rq 的路径。 通过准则：函数返回 0，idle_in_rq 被置为 1。
+ 
+⸻
+ 
+用例名称：
+rq_enqueue.002.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 false
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &normal_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_enqueue.return = 0
+Expected return
+0
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+用例注释
+测试目的：验证普通 VCPU 入队成功时，不修改 idle 入队标志。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构，ready queue 入队接口返回成功。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 0。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_enqueue 等价列表：入队对象不是 idle VCPU，入队成功。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，idle_in_rq 保持 0。
+ 
+⸻
+ 
+用例名称：
+rq_enqueue.003.FI
+覆盖：
+ret == 0 为 false
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &idle_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_enqueue.return = -1
+Expected return
+-1
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+用例注释
+测试目的：通过故障注入模拟 ready queue 入队失败，验证函数返回错误且不设置 idle 入队标志。 用例类别：故障注入测试 预置条件：构造 idle VCPU，ready queue 入队接口返回失败。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 -1。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_enqueue 等价列表：ready queue 入队接口失败。 其它说明：本用例覆盖入队失败路径。 通过准则：函数返回 -1，idle_in_rq 保持 0。
+ 
+⸻
+ 
+四、
+rq_detach
+rq_detach() 同样没有输出参数，但也需要 3 条用例覆盖 ret == 0 && vcpu == idle_vcpu 的组合。
+用例名称：
+rq_detach.001.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 true
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &idle_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_detach.return = 0
+Expected return
+0
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+用例注释
+测试目的：验证 detach idle VCPU 成功时，调度控制结构中的 idle 入队标志被清除。 用例类别：基于需求的测试 预置条件：构造 idle VCPU 和调度控制结构，idle 入队标志初始为 true，ready queue detach 接口返回成功。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 0。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_detach 等价列表：detach 对象为 idle VCPU，detach 成功。 其它说明：本用例覆盖 detach idle VCPU 后清除 idle_in_rq 的路径。 通过准则：函数返回 0，idle_in_rq 被置为 0。
+ 
+⸻
+ 
+用例名称：
+rq_detach.002.R
+覆盖：
+ret == 0 为 true
+vcpu == schedp->idle_vcpu 为 false
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &normal_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_detach.return = 0
+Expected return
+0
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：验证 detach 普通 VCPU 成功时，不修改 idle 入队标志。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构，ready queue detach 接口返回成功。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 0。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_detach 等价列表：detach 对象不是 idle VCPU，detach 成功。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，idle_in_rq 保持 1。
+ 
+⸻
+ 
+用例名称：
+rq_detach.003.FI
+覆盖：
+ret == 0 为 false
+具体构造方法
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &idle_vcpu;
+Stub 设置：
+vmm_schedalgo_rq_detach.return = -1
+Expected return
+-1
+关键期望
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+用例注释
+测试目的：通过故障注入模拟 ready queue detach 失败，验证函数返回错误且不清除 idle 入队标志。 用例类别：故障注入测试 预置条件：构造 idle VCPU 和调度控制结构，ready queue detach 接口返回失败。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 -1。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_detach 等价列表：ready queue detach 接口失败。 其它说明：本用例覆盖 detach 失败路径。 通过准则：函数返回 -1，idle_in_rq 保持 1。
+ 
+⸻
+ 
+五、
+rq_prempt_needed
+用例名称：
+rq_prempt_needed.001.R
+具体构造方法
+static struct vmm_vcpu current_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.rq_prempt_needed.schedp>> = VCAST_SCHED0;
+Stub 设置：
+vmm_schedalgo_rq_prempt_needed.return = 1
+Expected return
+1
+用例注释
+测试目的：验证 ready queue 抢占判断函数能够返回调度算法的抢占判断结果。 用例类别：基于需求的测试 预置条件：构造调度控制结构和当前 VCPU，调度算法抢占判断接口返回 true。 测试步骤： step1、构造调度控制结构和当前 VCPU。 step2、设置调度算法抢占判断接口返回 1。 step3、调用 rq_prempt_needed。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_prempt_needed 等价列表：调度算法判断需要抢占。 其它说明：本用例覆盖抢占判断返回 true 的路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+用例名称：
+rq_prempt_needed.002.R
+具体构造方法
+static struct vmm_vcpu current_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.rq_prempt_needed.schedp>> = VCAST_SCHED0;
+Stub 设置：
+vmm_schedalgo_rq_prempt_needed.return = 0
+Expected return
+0
+用例注释
+测试目的：验证 ready queue 抢占判断函数在调度算法返回 false 时返回 false。 用例类别：基于需求的测试 预置条件：构造调度控制结构和当前 VCPU，调度算法抢占判断接口返回 false。 测试步骤： step1、构造调度控制结构和当前 VCPU。 step2、设置调度算法抢占判断接口返回 0。 step3、调用 rq_prempt_needed。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_prempt_needed 等价列表：调度算法判断不需要抢占。 其它说明：本用例覆盖抢占判断返回 false 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+六、
+rq_length
+用例名称：
+rq_length.001.R
+具体构造方法
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+<<vmm_scheduler.rq_length.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_length.priority>> = 2U;
+Stub 设置：
+vmm_schedalgo_rq_length.return = 3
+Expected return
+3
+用例注释
+测试目的：验证 ready queue 长度查询函数能够返回调度算法队列长度。 用例类别：基于需求的测试 预置条件：构造调度控制结构，调度算法长度查询接口返回 3。 测试步骤： step1、构造调度控制结构。 step2、设置查询优先级为 2。 step3、设置调度算法长度查询接口返回 3。 step4、调用 rq_length。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_length 等价列表：调度控制结构有效，优先级有效。 其它说明：本用例覆盖队列长度查询路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+七、这一组的最小高覆盖用例清单
+rq_dequeue.001.R
+rq_dequeue.002.R
+rq_dequeue.003.FI
+rq_dequeue.004.R
+
+rq_enqueue.001.R
+rq_enqueue.002.R
+rq_enqueue.003.FI
+
+rq_detach.001.R
+rq_detach.002.R
+rq_detach.003.FI
+
+rq_prempt_needed.001.R
+rq_prempt_needed.002.R
+
+rq_length.001.R
+ 
+⸻
+ 
+八、关于 dead code
+这一组函数里：
+rq_dequeue
+rq_enqueue
+rq_detach
+rq_prempt_needed
+rq_length
+没有真正的 dead code。
+你图里的未覆盖点不是 dead code，而是缺少：
+ret == 0 && next == NULL
+对应的 rq_dequeue.004.R。
+如果你后续测 rq_total_length_except_idle()，则需要看是否定义了：
+CONFIG_ADAPTIVE_HALT_TRAP
+如果没有定义，该函数整段不编译，不需要覆盖；如果定义了，还需要单独设计 2 到 3 条用例覆盖 idle_in_rq 和 BUG_ON(ret <= 0)。
