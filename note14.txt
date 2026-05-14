@@ -1,0 +1,3087 @@
+下面给出一版重新整理后的 vmm_scheduler.c 完整测试方案。这一版按你最新的 User Code 方案重新设计：
+	1.	不在 Appendix 文件作用域使用 per_cpu() 初始化指针；
+	2.	使用 VCAST_SCHED0 / VCAST_SCHED1 宏句柄；
+	3.	对 rq_dequeue 使用 Stub End 强制输出同一个 VCPU 指针，避免 eventFlagObject 这种地址不一致问题；
+	4.	对每个函数尽量做到 100% 覆盖；
+	5.	对真正无法覆盖或受编译开关影响的分支给出说明；
+	6.	尽量减少新增测试函数，只有一个可选 callback 函数用于覆盖 wq_cleanup 调用路径。
+ 
+⸻
+ 
+一、公共 User Code
+1. Unit Appendix User Code
+保持为空，或者删除之前所有这类代码：
+struct vmm_scheduler_ctrl *vcast_sched0 = &per_cpu(sched, 0);
+struct vmm_scheduler_ctrl *vcast_sched1 = &per_cpu(sched, 1);
+这些写法会触发：
+statement expression not allowed at file scope
+ 
+⸻
+ 
+2. Unit Prefix User Code -> 
+vmm_scheduler
+#include <vmm_scheduler.h>
+#include <vmm_percpu.h>
+#include <vmm_vcpu_irq.h>
+#include <arch_regs.h>
+#include <libs/list.h>
+
+#ifdef BUG_ON
+#undef BUG_ON
+#endif
+
+#define BUG_ON(x)              \
+    do {                       \
+        if (x) {               \
+            exit(0);           \
+        }                      \
+    } while (0)
+
+#define VCAST_SCHED0                         (&per_cpu(sched, 0))
+#define VCAST_SCHED1                         (&per_cpu(sched, 1))
+
+#define VCAST_SCHED0_RQ                      (&(VCAST_SCHED0->rq))
+#define VCAST_SCHED0_CURRENT_VCPU            (&(VCAST_SCHED0->current_vcpu))
+#define VCAST_SCHED0_IDLE_VCPU               (&(VCAST_SCHED0->idle_vcpu))
+#define VCAST_SCHED0_IRQ_CONTEXT             (&(VCAST_SCHED0->irq_context))
+#define VCAST_SCHED0_IRQ_REGS                (&(VCAST_SCHED0->irq_regs))
+#define VCAST_SCHED0_YIELD_ON_IRQ_EXIT       (&(VCAST_SCHED0->yield_on_irq_exit))
+#define VCAST_SCHED0_IDLE_IN_RQ              (&(VCAST_SCHED0->idle_in_rq))
+
+#define VCAST_SCHED0_IRQ_ENTER_TSTAMP        (&(VCAST_SCHED0->irq_enter_tstamp))
+#define VCAST_SCHED0_IRQ_PROCESS_NS          (&(VCAST_SCHED0->irq_process_ns))
+#define VCAST_SCHED0_EXP_PROCESS_NS          (&(VCAST_SCHED0->exp_process_ns))
+#define VCAST_SCHED0_CURRENT_VCPU_IRQ_NS     (&(VCAST_SCHED0->current_vcpu_irq_ns))
+#define VCAST_SCHED0_CURRENT_VCPU_EXP_NS     (&(VCAST_SCHED0->current_vcpu_exp_ns))
+
+#define VCAST_SCHED0_SAMPLE_PERIOD_NS        (&(VCAST_SCHED0->sample_period_ns))
+#define VCAST_SCHED0_SAMPLE_IDLE_NS          (&(VCAST_SCHED0->sample_idle_ns))
+#define VCAST_SCHED0_SAMPLE_IDLE_LAST_NS     (&(VCAST_SCHED0->sample_idle_last_ns))
+#define VCAST_SCHED0_SAMPLE_IRQ_NS           (&(VCAST_SCHED0->sample_irq_ns))
+#define VCAST_SCHED0_SAMPLE_IRQ_LAST_NS      (&(VCAST_SCHED0->sample_irq_last_ns))
+
+#define VCAST_SCHED0_EV                      (&(VCAST_SCHED0->ev))
+#define VCAST_SCHED0_SAMPLE_EV               (&(VCAST_SCHED0->sample_ev))
+
+#define VCAST_SCHED1_RQ                      (&(VCAST_SCHED1->rq))
+#define VCAST_SCHED1_CURRENT_VCPU            (&(VCAST_SCHED1->current_vcpu))
+#define VCAST_SCHED1_IDLE_VCPU               (&(VCAST_SCHED1->idle_vcpu))
+#define VCAST_SCHED1_IDLE_IN_RQ              (&(VCAST_SCHED1->idle_in_rq))
+
+extern unsigned int vcast_sched_wq_cleanup_called;
+
+static void vcast_sched_wq_cleanup_cb(struct vmm_vcpu *vcpu)
+{
+    (void)vcpu;
+    vcast_sched_wq_cleanup_called++;
+}
+这个唯一新增函数 vcast_sched_wq_cleanup_cb() 用于覆盖 vcpu->wq_cleanup(vcpu) 调用路径。它会出现在覆盖率里，因此后面也给它单独用例。
+ 
+⸻
+ 
+3. User Globals
+void *vcast_sched_rq_dequeue_vcpu_seq[4];
+unsigned long long vcast_sched_rq_dequeue_slice_seq[4];
+unsigned int vcast_sched_rq_dequeue_call;
+
+unsigned int vcast_sched_wq_cleanup_called;
+unsigned int vcast_idle_orphan_yield_count;
+ 
+⸻
+ 
+4. Test Case Init
+vcast_sched_rq_dequeue_vcpu_seq[0] = 0;
+vcast_sched_rq_dequeue_vcpu_seq[1] = 0;
+vcast_sched_rq_dequeue_vcpu_seq[2] = 0;
+vcast_sched_rq_dequeue_vcpu_seq[3] = 0;
+
+vcast_sched_rq_dequeue_slice_seq[0] = 0ULL;
+vcast_sched_rq_dequeue_slice_seq[1] = 0ULL;
+vcast_sched_rq_dequeue_slice_seq[2] = 0ULL;
+vcast_sched_rq_dequeue_slice_seq[3] = 0ULL;
+
+vcast_sched_rq_dequeue_call = 0U;
+vcast_sched_wq_cleanup_called = 0U;
+vcast_idle_orphan_yield_count = 0U;
+ 
+⸻
+ 
+5. 
+vmm_schedalgo_rq_dequeue
+Stub End User Code
+放在：
+Stub User Code -> vmm_schedalgo_rq_dequeue -> End of stub
+extern void *vcast_sched_rq_dequeue_vcpu_seq[4];
+extern unsigned long long vcast_sched_rq_dequeue_slice_seq[4];
+extern unsigned int vcast_sched_rq_dequeue_call;
+
+unsigned int idx = vcast_sched_rq_dequeue_call;
+
+if (idx > 3U) {
+    idx = 3U;
+}
+
+if (next != (struct vmm_vcpu **)0) {
+    *next = (struct vmm_vcpu *)vcast_sched_rq_dequeue_vcpu_seq[idx];
+}
+
+if (next_time_slice != (u64 *)0) {
+    *next_time_slice = (u64)vcast_sched_rq_dequeue_slice_seq[idx];
+}
+
+vcast_sched_rq_dequeue_call++;
+ 
+⸻
+ 
+6. 
+vmm_panic
+Stub
+建议在 vmm_panic 的 Stub User Code 中写：
+exit(0);
+ 
+⸻
+ 
+7. 
+vmm_scheduler_yield
+Stub，仅用于 
+idle_orphan
+当测试 idle_orphan() 时，vmm_scheduler_yield Stub Beginning 写：
+extern unsigned int vcast_idle_orphan_yield_count;
+
+vcast_idle_orphan_yield_count++;
+
+if (vcast_idle_orphan_yield_count >= 1U) {
+    exit(0);
+}
+其它用例不要启用这个 Stub，否则会影响 vmm_scheduler_yield() 本体测试。
+ 
+⸻
+ 
+二、
+rq_dequeue
+rq_dequeue() 最少 4 条才能覆盖完整：
+if (ret == VMM_OK && vcpu == schedp->idle_vcpu)
+if (ret == VMM_OK && next)
+ 
+⸻
+ 
+rq_dequeue.001.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &idle_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 100ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected：
+return = 0
+next_vcpu = &idle_vcpu
+next_time_slice = 100
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+注释：
+测试目的：验证从 ready queue 出队 idle VCPU 时，调度控制结构中的 idle 入队标志被清除，并将出队 VCPU 输出给调用者。 用例类别：基于需求的测试 预置条件：构造有效调度控制结构，设置 idle VCPU 指针，并将 idle 入队标志置为 true；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将输出 VCPU 指针设置为同一个 idle VCPU 对象。 测试步骤： step1、构造 idle VCPU、输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将输出 VCPU 设置为 idle VCPU，将输出时间片设置为 100。 step6、调用 rq_dequeue。 step7、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，出队对象为 idle VCPU，next 入参有效。 其它说明：本用例必须保证出队返回的 VCPU 指针和 schedp->idle_vcpu 是同一个对象地址。 通过准则：函数返回 0，输出 VCPU 为 idle VCPU，输出时间片为 100，idle_in_rq 被置为 0。
+ 
+⸻
+ 
+rq_dequeue.002.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &normal_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 200ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected：
+return = 0
+next_vcpu = &normal_vcpu
+next_time_slice = 200
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：验证 ready queue 出队普通 VCPU 时，不修改 idle 入队标志，并将普通 VCPU 输出给调用者。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将输出 VCPU 指针设置为普通 VCPU。 测试步骤： step1、构造 idle VCPU、普通 VCPU、输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将输出 VCPU 设置为普通 VCPU，将输出时间片设置为 200。 step6、调用 rq_dequeue。 step7、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，出队对象不是 idle VCPU，next 入参有效。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，输出 VCPU 为普通 VCPU，输出时间片为 200，idle_in_rq 保持 1。
+ 
+⸻
+ 
+rq_dequeue.003.FI
+构造
+static struct vmm_vcpu *next_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = NULL;
+vcast_sched_rq_dequeue_slice_seq[0] = 0ULL;
+
+next_vcpu = NULL;
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = &next_vcpu;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub：
+vmm_schedalgo_rq_dequeue.return = -1
+Expected：
+return = -1
+next_vcpu = NULL
+next_time_slice = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：通过故障注入模拟 ready queue 出队失败，验证函数返回出队错误码且不更新输出 VCPU。 用例类别：故障注入测试 预置条件：构造有效调度控制结构，ready queue 出队接口返回失败。 测试步骤： step1、构造输出 VCPU 指针和时间片变量。 step2、设置调度控制结构中的 ready queue 指针。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 -1。 step5、调用 rq_dequeue。 step6、观察返回值、输出 VCPU、输出时间片和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队接口失败。 其它说明：本用例覆盖 ret == 0 为 false 的路径。 通过准则：函数返回 -1，输出 VCPU 保持空指针，输出时间片保持 0，idle_in_rq 保持 1。
+ 
+⸻
+ 
+rq_dequeue.004.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static u64 next_time_slice;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &normal_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 300ULL;
+
+next_time_slice = 0U;
+
+<<vmm_scheduler.rq_dequeue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_dequeue.next>> = NULL;
+<<vmm_scheduler.rq_dequeue.next_time_slice>> = &next_time_slice;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+Expected：
+return = 0
+next_time_slice = 300
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：验证 ready queue 出队成功但 next 输出参数为空时，函数不写出 VCPU 指针并仍然返回成功。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构；通过 vmm_schedalgo_rq_dequeue 的 End of stub 将内部出队 VCPU 设置为普通 VCPU；rq_dequeue 的 next 入参设置为空。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和时间片变量。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 vmm_schedalgo_rq_dequeue 返回 0。 step5、在 vmm_schedalgo_rq_dequeue 的 End of stub 中，将内部出队 VCPU 设置为普通 VCPU，将输出时间片设置为 300。 step6、将 rq_dequeue 的 next 入参设置为空。 step7、调用 rq_dequeue。 step8、观察返回值、输出时间片和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_dequeue 等价列表：ready queue 出队成功，但调用者不需要输出 VCPU。 其它说明：本用例专门覆盖 if (ret == 0 && next) 中 next 为 false 的路径。 通过准则：函数返回 0，输出时间片为 300，idle_in_rq 保持 1。
+ 
+⸻
+ 
+三、
+rq_enqueue
+rq_enqueue.001.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &idle_vcpu;
+Stub：
+vmm_schedalgo_rq_enqueue.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：验证将 idle VCPU 入队成功时，调度控制结构中的 idle 入队标志被置为 true。 用例类别：基于需求的测试 预置条件：构造有效调度控制结构和 idle VCPU，ready queue 入队接口返回成功。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 0。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_enqueue 等价列表：入队对象为 idle VCPU，入队成功。 其它说明：本用例覆盖入队 idle VCPU 后设置 idle_in_rq 的路径。 通过准则：函数返回 0，idle_in_rq 被置为 1。
+ 
+⸻
+ 
+rq_enqueue.002.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &normal_vcpu;
+Stub：
+vmm_schedalgo_rq_enqueue.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+注释：
+测试目的：验证普通 VCPU 入队成功时，不修改 idle 入队标志。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构，ready queue 入队接口返回成功。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 0。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_enqueue 等价列表：入队对象不是 idle VCPU，入队成功。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，idle_in_rq 保持 0。
+ 
+⸻
+ 
+rq_enqueue.003.FI
+构造
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_enqueue.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_enqueue.vcpu>> = &idle_vcpu;
+Stub：
+vmm_schedalgo_rq_enqueue.return = -1
+Expected：
+return = -1
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+注释：
+测试目的：通过故障注入模拟 ready queue 入队失败，验证函数返回错误且不设置 idle 入队标志。 用例类别：故障注入测试 预置条件：构造 idle VCPU，ready queue 入队接口返回失败。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 false。 step4、设置 ready queue 入队接口返回 -1。 step5、调用 rq_enqueue。 step6、观察返回值和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_enqueue 等价列表：ready queue 入队接口失败。 其它说明：本用例覆盖入队失败路径。 通过准则：函数返回 -1，idle_in_rq 保持 0。
+ 
+⸻
+ 
+四、
+rq_detach
+rq_detach.001.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &idle_vcpu;
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 0
+注释：
+测试目的：验证 detach idle VCPU 成功时，调度控制结构中的 idle 入队标志被清除。 用例类别：基于需求的测试 预置条件：构造 idle VCPU 和调度控制结构，idle 入队标志初始为 true，ready queue detach 接口返回成功。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为该 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 0。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_detach 等价列表：detach 对象为 idle VCPU，detach 成功。 其它说明：本用例覆盖 detach idle VCPU 后清除 idle_in_rq 的路径。 通过准则：函数返回 0，idle_in_rq 被置为 0。
+ 
+⸻
+ 
+rq_detach.002.R
+构造
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_vcpu normal_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &normal_vcpu;
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：验证 detach 普通 VCPU 成功时，不修改 idle 入队标志。 用例类别：基于需求的测试 预置条件：构造 idle VCPU、普通 VCPU 和调度控制结构，ready queue detach 接口返回成功。 测试步骤： step1、构造 idle VCPU、普通 VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 0。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：需求分析、有效等价类 追溯ID：rq_detach 等价列表：detach 对象不是 idle VCPU，detach 成功。 其它说明：本用例覆盖 vcpu == schedp->idle_vcpu 为 false 的路径。 通过准则：函数返回 0，idle_in_rq 保持 1。
+ 
+⸻
+ 
+rq_detach.003.FI
+构造
+static struct vmm_vcpu idle_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_detach.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_detach.vcpu>> = &idle_vcpu;
+Stub：
+vmm_schedalgo_rq_detach.return = -1
+Expected：
+return = -1
+*VCAST_SCHED0_IDLE_IN_RQ = 1
+注释：
+测试目的：通过故障注入模拟 ready queue detach 失败，验证函数返回错误且不清除 idle 入队标志。 用例类别：故障注入测试 预置条件：构造 idle VCPU 和调度控制结构，ready queue detach 接口返回失败。 测试步骤： step1、构造 idle VCPU 和调度控制结构。 step2、设置调度控制结构中的 idle VCPU 指针为 idle VCPU。 step3、设置 idle_in_rq 初值为 true。 step4、设置 ready queue detach 接口返回 -1。 step5、调用 rq_detach。 step6、观察返回值和 idle 入队标志。 用例来源：故障注入、无效等价类 追溯ID：rq_detach 等价列表：ready queue detach 接口失败。 其它说明：本用例覆盖 detach 失败路径。 通过准则：函数返回 -1，idle_in_rq 保持 1。
+ 
+⸻
+ 
+五、
+rq_prempt_needed
+rq_prempt_needed.001.R
+构造
+static struct vmm_vcpu current_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.rq_prempt_needed.schedp>> = VCAST_SCHED0;
+Stub：
+vmm_schedalgo_rq_prempt_needed.return = 1
+Expected：
+return = 1
+注释：
+测试目的：验证 ready queue 抢占判断函数能够返回调度算法的抢占判断结果。 用例类别：基于需求的测试 预置条件：构造调度控制结构和当前 VCPU，调度算法抢占判断接口返回 true。 测试步骤： step1、构造调度控制结构和当前 VCPU。 step2、设置调度算法抢占判断接口返回 1。 step3、调用 rq_prempt_needed。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_prempt_needed 等价列表：调度算法判断需要抢占。 其它说明：本用例覆盖抢占判断返回 true 的路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+rq_prempt_needed.002.R
+构造
+static struct vmm_vcpu current_vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.rq_prempt_needed.schedp>> = VCAST_SCHED0;
+Stub：
+vmm_schedalgo_rq_prempt_needed.return = 0
+Expected：
+return = 0
+注释：
+测试目的：验证 ready queue 抢占判断函数在调度算法返回 false 时返回 false。 用例类别：基于需求的测试 预置条件：构造调度控制结构和当前 VCPU，调度算法抢占判断接口返回 false。 测试步骤： step1、构造调度控制结构和当前 VCPU。 step2、设置调度算法抢占判断接口返回 0。 step3、调用 rq_prempt_needed。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_prempt_needed 等价列表：调度算法判断不需要抢占。 其它说明：本用例覆盖抢占判断返回 false 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+六、
+rq_length
+rq_length.001.R
+构造
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+<<vmm_scheduler.rq_length.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.rq_length.priority>> = 2U;
+Stub：
+vmm_schedalgo_rq_length.return = 3
+Expected：
+return = 3
+注释：
+测试目的：验证 ready queue 长度查询函数能够返回调度算法队列长度。 用例类别：基于需求的测试 预置条件：构造调度控制结构，调度算法长度查询接口返回 3。 测试步骤： step1、构造调度控制结构。 step2、设置查询优先级为 2。 step3、设置调度算法长度查询接口返回 3。 step4、调用 rq_length。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_length 等价列表：调度控制结构有效，优先级有效。 其它说明：本用例覆盖队列长度查询路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+七、
+rq_total_length_except_idle
+该函数只在定义：
+CONFIG_ADAPTIVE_HALT_TRAP
+时编译。若未定义，该函数不需要测试。
+rq_total_length_except_idle.001.R
+覆盖：
+idle_in_rq = false
+构造
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_IN_RQ = FALSE;
+
+<<vmm_scheduler.rq_total_length_except_idle.schedp>> = VCAST_SCHED0;
+Stub：
+vmm_schedalgo_rq_total_length.return = 3
+Expected：
+return = 3
+注释：
+测试目的：验证 idle VCPU 不在 ready queue 中时，函数直接返回 ready queue 总长度。 用例类别：基于需求的测试 预置条件：构造调度控制结构，设置 idle_in_rq 为 false，调度算法总长度接口返回 3。 测试步骤： step1、构造调度控制结构。 step2、设置 idle_in_rq 为 false。 step3、设置调度算法总长度接口返回 3。 step4、调用 rq_total_length_except_idle。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_total_length_except_idle 等价列表：idle VCPU 不在 ready queue 中。 其它说明：仅在 CONFIG_ADAPTIVE_HALT_TRAP 编译开启时适用。 通过准则：函数返回 3。
+ 
+⸻
+ 
+rq_total_length_except_idle.002.R
+覆盖：
+idle_in_rq = true，ret > 0
+构造
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_total_length_except_idle.schedp>> = VCAST_SCHED0;
+Stub：
+vmm_schedalgo_rq_total_length.return = 3
+Expected：
+return = 2
+注释：
+测试目的：验证 idle VCPU 在 ready queue 中时，函数从 ready queue 总长度中扣除 idle VCPU。 用例类别：基于需求的测试 预置条件：构造调度控制结构，设置 idle_in_rq 为 true，调度算法总长度接口返回 3。 测试步骤： step1、构造调度控制结构。 step2、设置 idle_in_rq 为 true。 step3、设置调度算法总长度接口返回 3。 step4、调用 rq_total_length_except_idle。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：rq_total_length_except_idle 等价列表：idle VCPU 在 ready queue 中，队列总长度大于 0。 其它说明：仅在 CONFIG_ADAPTIVE_HALT_TRAP 编译开启时适用。 通过准则：函数返回 2。
+ 
+⸻
+ 
+rq_total_length_except_idle.003.IN.rq.NEC
+覆盖：
+idle_in_rq = true，ret <= 0，BUG_ON
+构造
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_IDLE_IN_RQ = TRUE;
+
+<<vmm_scheduler.rq_total_length_except_idle.schedp>> = VCAST_SCHED0;
+Stub：
+vmm_schedalgo_rq_total_length.return = 0
+Expected：
+无普通返回；BUG_ON 测试替身 exit(0)
+注释：
+测试目的：验证 idle VCPU 标记在 ready queue 中但总长度为 0 时，函数触发断言防御处理。 用例类别：接口测试 预置条件：设置 idle_in_rq 为 true，调度算法总长度接口返回 0，并使用 BUG_ON 测试替身。 测试步骤： step1、构造调度控制结构。 step2、设置 idle_in_rq 为 true。 step3、设置调度算法总长度接口返回 0。 step4、调用 rq_total_length_except_idle。 step5、观察是否通过 BUG_ON 测试替身退出。 用例来源：无效等价类 追溯ID：rq_total_length_except_idle 等价列表：idle VCPU 状态与 ready queue 总长度不一致。 其它说明：仅在 CONFIG_ADAPTIVE_HALT_TRAP 编译开启时适用。 通过准则：用例通过 BUG_ON 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+八、
+__vmm_scheduler_sync_system_time
+__vmm_scheduler_sync_system_time.001.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+*VCAST_SCHED0_IRQ_PROCESS_NS = 1000U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 700U;
+*VCAST_SCHED0_CURRENT_VCPU_IRQ_NS = 300U;
+*VCAST_SCHED0_CURRENT_VCPU_EXP_NS = 200U;
+
+current_vcpu.system_nsecs = 50U;
+
+<<vmm_scheduler.__vmm_scheduler_sync_system_time.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_sync_system_time.current>> = &current_vcpu;
+Expected：
+current_vcpu.system_nsecs = 1250
+*VCAST_SCHED0_CURRENT_VCPU_IRQ_NS = 1000
+*VCAST_SCHED0_CURRENT_VCPU_EXP_NS = 700
+注释：
+测试目的：验证调度器系统时间同步函数能够将 IRQ 和异常处理时间差累计到当前 VCPU 的系统时间中。 用例类别：基于需求的测试 预置条件：构造当前 VCPU 和调度控制结构，并设置当前和上一次记录的 IRQ/异常处理时间。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 的系统时间初值为 50。 step3、设置调度控制结构中的当前 IRQ 处理时间为 1000，上次记录为 300。 step4、设置当前异常处理时间为 700，上次记录为 200。 step5、调用 __vmm_scheduler_sync_system_time。 step6、观察当前 VCPU 的系统时间和调度控制结构中的记录值。 用例来源：需求分析、有效等价类 追溯ID：__vmm_scheduler_sync_system_time 等价列表：IRQ 和异常处理时间均发生增长。 其它说明：本用例覆盖系统时间同步累加路径。 通过准则：current_vcpu.system_nsecs 更新为 1250，当前 IRQ 和异常处理记录分别更新为 1000 和 700。
+ 
+⸻
+ 
+九、
+__vmm_scheduler_next1
+__vmm_scheduler_next1.001.R
+构造
+static struct vmm_vcpu next_vcpu;
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+next_vcpu.state_tstamp = 100U;
+next_vcpu.state_ready_nsecs = 10U;
+next_vcpu.resumed = TRUE;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+*VCAST_SCHED0_IRQ_PROCESS_NS = 50U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 30U;
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &next_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 500ULL;
+
+<<vmm_scheduler.__vmm_scheduler_next1.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next1.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+vmm_timer_timestamp.return = 200
+vmm_timer_event_start.return = 0
+Expected：
+return = &next_vcpu
+next_vcpu.state_ready_nsecs = 110
+next_vcpu.resumed = 0
+next_vcpu.state_tstamp = 200
+*VCAST_SCHED0_CURRENT_VCPU = &next_vcpu
+*VCAST_SCHED0_CURRENT_VCPU_IRQ_NS = 50
+*VCAST_SCHED0_CURRENT_VCPU_EXP_NS = 30
+注释：
+测试目的：验证首次调度时，调度器能够从 ready queue 取出下一个 VCPU，切换上下文并更新运行状态和时间片定时器。 用例类别：基于需求的测试 预置条件：当前 VCPU 为空，ready queue 出队成功并返回目标 VCPU；定时器时间戳返回 200。 测试步骤： step1、构造目标 VCPU 和寄存器对象。 step2、设置目标 VCPU 的 ready 累计时间和状态时间戳。 step3、设置 ready queue 出队接口返回目标 VCPU 和时间片 500。 step4、设置定时器时间戳为 200。 step5、调用 __vmm_scheduler_next1。 step6、观察返回值、当前 VCPU 指针、VCPU 时间统计和定时器启动情况。 用例来源：需求分析、有效等价类 追溯ID：__vmm_scheduler_next1 等价列表：ready queue 出队成功，首次调度目标 VCPU。 其它说明：本用例覆盖首次调度成功路径。 通过准则：函数返回目标 VCPU，当前 VCPU 更新为目标 VCPU，目标 VCPU ready 时间由 10 更新为 110，状态时间戳更新为 200。
+ 
+⸻
+ 
+__vmm_scheduler_next1.002.FI
+构造
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+<<vmm_scheduler.__vmm_scheduler_next1.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next1.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return = -1
+Expected：
+无普通返回；vmm_panic 测试替身 exit(0)
+注释：
+测试目的：通过故障注入模拟 ready queue 出队失败，验证首次调度函数触发 panic 防御处理。 用例类别：故障注入测试 预置条件：ready queue 出队接口返回失败，并将 vmm_panic 设置为测试替身。 测试步骤： step1、构造寄存器对象和调度控制结构。 step2、设置 ready queue 出队接口返回 -1。 step3、调用 __vmm_scheduler_next1。 step4、观察是否进入 vmm_panic 测试替身。 用例来源：故障注入、无效等价类 追溯ID：__vmm_scheduler_next1 等价列表：ready queue 出队失败。 其它说明：本用例覆盖出队失败后的 panic 路径。 通过准则：用例通过 vmm_panic 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+十、
+__vmm_scheduler_next2
+__vmm_scheduler_next2() 至少需要以下 5 条覆盖主要分支。
+ 
+⸻
+ 
+__vmm_scheduler_next2.001.R
+覆盖：
+current RUNNING
+next != current
+next READY
+构造
+static struct vmm_vcpu current_vcpu;
+static struct vmm_vcpu next_vcpu;
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+current_vcpu.state_tstamp = 100U;
+current_vcpu.state_running_nsecs = 10U;
+current_vcpu.resumed = FALSE;
+
+next_vcpu.state_tstamp = 100U;
+next_vcpu.state_ready_nsecs = 20U;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_PROCESS_NS = 1000U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 500U;
+*VCAST_SCHED0_CURRENT_VCPU_IRQ_NS = 100U;
+*VCAST_SCHED0_CURRENT_VCPU_EXP_NS = 50U;
+
+vmm_scheduler_set_state_packed(&current_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+vmm_scheduler_set_state_packed(&next_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &next_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 600ULL;
+
+<<vmm_scheduler.__vmm_scheduler_next2.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next2.current>> = &current_vcpu;
+<<vmm_scheduler.__vmm_scheduler_next2.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+vmm_schedalgo_rq_enqueue.return = 0
+vmm_timer_timestamp.return = 200
+vmm_timer_event_start.return = 0
+Expected：
+return = &next_vcpu
+current_vcpu.state_running_nsecs = 110
+next_vcpu.state_ready_nsecs = 120
+next_vcpu.resumed = 0
+next_vcpu.state_tstamp = 200
+*VCAST_SCHED0_CURRENT_VCPU = &next_vcpu
+注释：
+测试目的：验证当前 VCPU 为 RUNNING 且下一个 VCPU 不同时，调度器保存当前 VCPU 运行时间、将当前 VCPU 放回 ready queue，并切换到新的 READY VCPU。 用例类别：基于需求的测试 预置条件：当前 VCPU 状态为 RUNNING，下一个 VCPU 状态为 READY，ready queue 出队成功。 测试步骤： step1、构造当前 VCPU、下一个 VCPU 和寄存器对象。 step2、设置当前 VCPU 状态为 RUNNING，设置下一个 VCPU 状态为 READY。 step3、设置定时器时间戳为 200。 step4、设置 ready queue 出队接口返回下一个 VCPU 和时间片 600。 step5、调用 __vmm_scheduler_next2。 step6、观察返回值、当前 VCPU 指针和两个 VCPU 的时间统计。 用例来源：需求分析、有效等价类 追溯ID：__vmm_scheduler_next2 等价列表：当前 VCPU RUNNING，下一个 VCPU READY，发生上下文切换。 其它说明：本用例覆盖正常调度切换路径。 通过准则：函数返回下一个 VCPU，当前 VCPU running 时间更新为 110，下一个 VCPU ready 时间更新为 120，当前 VCPU 指针更新为下一个 VCPU。
+ 
+⸻
+ 
+__vmm_scheduler_next2.002.R
+覆盖：
+next == current
+return NULL
+构造
+static struct vmm_vcpu current_vcpu;
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+current_vcpu.state_tstamp = 100U;
+current_vcpu.state_ready_nsecs = 10U;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+vmm_scheduler_set_state_packed(&current_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &current_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 700ULL;
+
+<<vmm_scheduler.__vmm_scheduler_next2.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next2.current>> = &current_vcpu;
+<<vmm_scheduler.__vmm_scheduler_next2.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return = 0
+vmm_timer_timestamp.return = 200
+vmm_timer_event_start.return = 0
+Expected：
+return = NULL
+current_vcpu.state_ready_nsecs = 110
+current_vcpu.state_tstamp = 200
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu
+注释：
+测试目的：验证 ready queue 出队结果仍为当前 VCPU 时，函数不执行上下文切换并返回空指针。 用例类别：基于需求的测试 预置条件：当前 VCPU 状态为 READY，ready queue 出队返回同一个 VCPU。 测试步骤： step1、构造当前 VCPU 和寄存器对象。 step2、设置当前 VCPU 状态为 READY。 step3、设置 ready queue 出队接口返回当前 VCPU。 step4、设置定时器时间戳为 200。 step5、调用 __vmm_scheduler_next2。 step6、观察返回值和当前 VCPU 状态统计。 用例来源：需求分析、有效等价类 追溯ID：__vmm_scheduler_next2 等价列表：出队 VCPU 与当前 VCPU 相同。 其它说明：本用例覆盖 next == current 返回 NULL 的路径。 通过准则：函数返回空指针，当前 VCPU ready 时间更新为 110，当前 VCPU 指针保持不变。
+ 
+⸻
+ 
+__vmm_scheduler_next2.003.R
+覆盖：
+next != current
+next_state != READY
+goto dequeue_again
+构造
+static struct vmm_vcpu current_vcpu;
+static struct vmm_vcpu bad_next_vcpu;
+static struct vmm_vcpu good_next_vcpu;
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+current_vcpu.state_tstamp = 100U;
+bad_next_vcpu.state_tstamp = 100U;
+good_next_vcpu.state_tstamp = 100U;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+vmm_scheduler_set_state_packed(&current_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+vmm_scheduler_set_state_packed(&bad_next_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+vmm_scheduler_set_state_packed(&good_next_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+vcast_sched_rq_dequeue_vcpu_seq[0] = &bad_next_vcpu;
+vcast_sched_rq_dequeue_slice_seq[0] = 500ULL;
+vcast_sched_rq_dequeue_vcpu_seq[1] = &good_next_vcpu;
+vcast_sched_rq_dequeue_slice_seq[1] = 600ULL;
+
+<<vmm_scheduler.__vmm_scheduler_next2.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next2.current>> = &current_vcpu;
+<<vmm_scheduler.__vmm_scheduler_next2.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return 第1次 = 0，第2次 = 0
+vmm_timer_timestamp.return = 200
+vmm_timer_event_start.return = 0
+Expected：
+return = &good_next_vcpu
+*VCAST_SCHED0_CURRENT_VCPU = &good_next_vcpu
+注释：
+测试目的：验证出队得到的下一个 VCPU 不是 READY 状态时，调度器丢弃该对象并重新出队。 用例类别：基于需求的测试 预置条件：第一次出队返回 PAUSED VCPU，第二次出队返回 READY VCPU。 测试步骤： step1、构造当前 VCPU、非 READY VCPU 和 READY VCPU。 step2、设置第一次出队返回非 READY VCPU。 step3、设置第二次出队返回 READY VCPU。 step4、调用 __vmm_scheduler_next2。 step5、观察返回值和当前 VCPU 指针。 用例来源：需求分析、有效等价类 追溯ID：__vmm_scheduler_next2 等价列表：第一次出队对象不是 READY，第二次出队对象 READY。 其它说明：本用例覆盖 goto dequeue_again 路径。 通过准则：函数最终返回 READY VCPU，当前 VCPU 指针更新为第二次出队的 VCPU。
+ 
+⸻
+ 
+__vmm_scheduler_next2.004.FI
+覆盖：
+rq_dequeue 失败 panic
+构造
+static struct vmm_vcpu current_vcpu;
+static arch_regs_t regs_obj;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+vmm_scheduler_set_state_packed(&current_vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.__vmm_scheduler_next2.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next2.current>> = &current_vcpu;
+<<vmm_scheduler.__vmm_scheduler_next2.regs>> = &regs_obj;
+Stub：
+vmm_schedalgo_rq_dequeue.return = -1
+Expected：
+无普通返回；vmm_panic 测试替身 exit(0)
+注释：
+测试目的：通过故障注入模拟 ready queue 出队失败，验证调度切换函数触发 panic 防御处理。 用例类别：故障注入测试 预置条件：当前 VCPU 有效，ready queue 出队接口返回失败，vmm_panic 为测试替身。 测试步骤： step1、构造当前 VCPU 和寄存器对象。 step2、设置当前 VCPU 状态为 READY。 step3、设置 ready queue 出队接口返回 -1。 step4、调用 __vmm_scheduler_next2。 step5、观察是否通过 vmm_panic 测试替身退出。 用例来源：故障注入、无效等价类 追溯ID：__vmm_scheduler_next2 等价列表：ready queue 出队失败。 其它说明：本用例覆盖出队失败 panic 路径。 通过准则：用例通过 vmm_panic 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+__vmm_scheduler_next2.005.IN.state.NEC
+覆盖：
+BUG_ON(vmm_scheduler_get_state(current, ...) != 0)
+构造
+static struct vmm_vcpu current_vcpu;
+static arch_regs_t regs_obj;
+
+<<vmm_scheduler.__vmm_scheduler_next2.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.__vmm_scheduler_next2.current>> = &current_vcpu;
+<<vmm_scheduler.__vmm_scheduler_next2.regs>> = &regs_obj;
+SBF Stub：
+vmm_scheduler_get_state.return = -1
+Expected：
+无普通返回；BUG_ON 测试替身 exit(0)
+注释：
+测试目的：验证获取当前 VCPU 状态失败时，调度切换函数触发断言防御处理。 用例类别：接口测试 预置条件：通过 SBF 将 vmm_scheduler_get_state 设置为返回失败，并使用 BUG_ON 测试替身。 测试步骤： step1、构造当前 VCPU 和寄存器对象。 step2、设置 vmm_scheduler_get_state 返回 -1。 step3、调用 __vmm_scheduler_next2。 step4、观察是否通过 BUG_ON 测试替身退出。 用例来源：无效等价类 追溯ID：__vmm_scheduler_next2 等价列表：当前 VCPU 状态获取失败。 其它说明：本用例覆盖 BUG_ON 防御路径。 通过准则：用例通过 BUG_ON 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+十一、
+vmm_scheduler_switch
+vmm_scheduler_switch.001.IN.regs.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_switch.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.vmm_scheduler_switch.regs>> = NULL;
+Expected：
+无普通返回；vmm_panic 测试替身 exit(0)
+注释：
+测试目的：验证寄存器指针为空时，调度切换函数触发 panic 防御处理。 用例类别：接口测试 预置条件：寄存器入参为空，vmm_panic 设置为测试替身。 测试步骤： step1、设置 regs 入参为空。 step2、调用 vmm_scheduler_switch。 step3、观察是否进入 vmm_panic 测试替身。 用例来源：无效等价类 追溯ID：vmm_scheduler_switch 等价列表：寄存器指针为空。 其它说明：本用例覆盖空寄存器防御路径。 通过准则：用例通过 vmm_panic 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+vmm_scheduler_switch.002.R
+覆盖：
+current == NULL
+next = __vmm_scheduler_next1(...)
+if (next) arch_vcpu_post_switch
+构造
+static struct vmm_vcpu next_vcpu;
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+<<vmm_scheduler.vmm_scheduler_switch.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.vmm_scheduler_switch.regs>> = &regs_obj;
+SBF Stub：
+__vmm_scheduler_next1.return = &next_vcpu
+Expected：
+arch_vcpu_post_switch 被调用一次
+注释：
+测试目的：验证当前 VCPU 为空时，调度切换函数调用首次调度路径，并对返回的 VCPU 执行 post switch。 用例类别：基于需求的测试 预置条件：当前 VCPU 指针为空，__vmm_scheduler_next1 返回有效 VCPU。 测试步骤： step1、构造下一个 VCPU 和寄存器对象。 step2、设置调度控制结构中的当前 VCPU 为空。 step3、设置 __vmm_scheduler_next1 返回下一个 VCPU。 step4、调用 vmm_scheduler_switch。 step5、观察 arch_vcpu_post_switch 调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_switch 等价列表：当前 VCPU 为空，首次调度返回有效 VCPU。 其它说明：本用例覆盖首次调度路径。 通过准则：arch_vcpu_post_switch 被调用一次，入参为 __vmm_scheduler_next1 返回的 VCPU。
+ 
+⸻
+ 
+vmm_scheduler_switch.003.R
+覆盖：
+current != NULL
+preempt_count == preempt_min
+__vmm_scheduler_next2 返回有效 next
+构造
+static struct vmm_vcpu current_vcpu;
+static struct vmm_vcpu next_vcpu;
+static arch_regs_t regs_obj;
+
+current_vcpu.preempt_count = 0U;
+current_vcpu.wq_lock = NULL;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.vmm_scheduler_switch.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.vmm_scheduler_switch.regs>> = &regs_obj;
+SBF Stub：
+__vmm_scheduler_next2.return = &next_vcpu
+Expected：
+arch_vcpu_post_switch 被调用一次
+注释：
+测试目的：验证当前 VCPU 可抢占时，调度切换函数调用普通调度路径，并对新的 VCPU 执行 post switch。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效，抢占计数等于最小可抢占值，__vmm_scheduler_next2 返回新的 VCPU。 测试步骤： step1、构造当前 VCPU、下一个 VCPU 和寄存器对象。 step2、设置当前 VCPU 抢占计数为 0，等待队列锁为空。 step3、设置 __vmm_scheduler_next2 返回下一个 VCPU。 step4、调用 vmm_scheduler_switch。 step5、观察 arch_vcpu_post_switch 调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_switch 等价列表：当前 VCPU 可抢占，发生调度切换。 其它说明：本用例覆盖普通调度切换路径。 通过准则：arch_vcpu_post_switch 被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_switch.004.R
+覆盖：
+preempt_count != preempt_min
+vmm_timer_event_restart
+next = NULL
+构造
+static struct vmm_vcpu current_vcpu;
+static arch_regs_t regs_obj;
+
+current_vcpu.preempt_count = 2U;
+current_vcpu.wq_lock = NULL;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.vmm_scheduler_switch.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.vmm_scheduler_switch.regs>> = &regs_obj;
+Expected：
+vmm_timer_event_restart 被调用一次
+arch_vcpu_post_switch 未被调用
+注释：
+测试目的：验证当前 VCPU 不可抢占时，调度切换函数重启时间片定时器并不执行上下文切换。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效，抢占计数大于最小可抢占值。 测试步骤： step1、构造当前 VCPU 和寄存器对象。 step2、设置当前 VCPU 抢占计数为 2。 step3、调用 vmm_scheduler_switch。 step4、观察时间片定时器重启接口和 post switch 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_switch 等价列表：当前 VCPU 不可抢占。 其它说明：本用例覆盖不可抢占路径。 通过准则：vmm_timer_event_restart 被调用一次，arch_vcpu_post_switch 未被调用。
+ 
+⸻
+ 
+vmm_scheduler_switch.005.R
+覆盖：
+current->wq_lock != NULL
+next == NULL
+current->preempt_count > 0
+构造
+static struct vmm_vcpu current_vcpu;
+static arch_regs_t regs_obj;
+static vmm_spinlock_t wait_lock;
+
+current_vcpu.preempt_count = 1U;
+current_vcpu.wq_lock = &wait_lock;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+
+<<vmm_scheduler.vmm_scheduler_switch.schedp>> = VCAST_SCHED0;
+<<vmm_scheduler.vmm_scheduler_switch.regs>> = &regs_obj;
+SBF Stub：
+__vmm_scheduler_next2.return = NULL
+Expected：
+current_vcpu.preempt_count = 0
+vmm_spin_unlock_lite 被调用一次
+vmm_spin_lock 未在此函数内调用
+注释：
+测试目的：验证当前 VCPU 因等待队列锁导致最小可抢占值为 1 时，调度完成后释放等待队列锁并递减抢占计数。 用例类别：基于需求的测试 预置条件：当前 VCPU 有等待队列锁，抢占计数为 1，__vmm_scheduler_next2 返回 NULL。 测试步骤： step1、构造当前 VCPU、等待队列锁和寄存器对象。 step2、设置当前 VCPU 的等待队列锁非空，抢占计数为 1。 step3、设置 __vmm_scheduler_next2 返回空指针。 step4、调用 vmm_scheduler_switch。 step5、观察等待队列锁释放和抢占计数变化。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_switch 等价列表：当前 VCPU 有等待队列锁，调度返回空指针。 其它说明：本用例覆盖等待队列锁释放路径。 通过准则：等待队列锁释放接口被调用一次，抢占计数由 1 变为 0。
+ 
+⸻
+ 
+十二、
+scheduler_timer_event
+scheduler_timer_event.001.R
+构造
+static arch_regs_t regs_obj;
+static struct vmm_timer_event ev_obj;
+
+*VCAST_SCHED0_IRQ_REGS = &regs_obj;
+
+<<vmm_scheduler.scheduler_timer_event.ev>> = &ev_obj;
+SBF Stub：
+vmm_scheduler_switch.return = void
+Expected：
+vmm_scheduler_switch 被调用一次
+注释：
+测试目的：验证调度器定时器事件在 IRQ 寄存器存在时触发调度切换。 用例类别：基于需求的测试 预置条件：调度控制结构中的 IRQ 寄存器指针有效。 测试步骤： step1、构造 IRQ 寄存器对象和定时器事件对象。 step2、设置调度器 IRQ 寄存器指针。 step3、调用 scheduler_timer_event。 step4、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_timer_event 等价列表：IRQ 寄存器指针有效。 其它说明：本用例覆盖定时器触发调度切换路径。 通过准则：vmm_scheduler_switch 被调用一次。
+ 
+⸻
+ 
+scheduler_timer_event.002.R
+构造
+static struct vmm_timer_event ev_obj;
+
+*VCAST_SCHED0_IRQ_REGS = NULL;
+
+<<vmm_scheduler.scheduler_timer_event.ev>> = &ev_obj;
+Expected：
+vmm_scheduler_switch 未被调用
+注释：
+测试目的：验证调度器定时器事件在 IRQ 寄存器为空时不触发调度切换。 用例类别：基于需求的测试 预置条件：调度控制结构中的 IRQ 寄存器指针为空。 测试步骤： step1、构造定时器事件对象。 step2、设置调度器 IRQ 寄存器指针为空。 step3、调用 scheduler_timer_event。 step4、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_timer_event 等价列表：IRQ 寄存器指针为空。 其它说明：本用例覆盖不触发调度切换路径。 通过准则：vmm_scheduler_switch 未被调用。
+ 
+⸻
+ 
+十三、
+vmm_scheduler_preempt_disable
+vmm_scheduler_preempt_disable.001.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.preempt_count = 0U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+current_vcpu.preempt_count = 1
+注释：
+测试目的：验证非 IRQ 上下文且存在当前 VCPU 时，关闭抢占接口能够增加当前 VCPU 抢占计数。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 抢占计数为 0。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_preempt_disable。 step5、观察当前 VCPU 抢占计数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_disable 等价列表：非 IRQ 上下文，当前 VCPU 有效。 其它说明：本用例覆盖抢占计数递增路径。 通过准则：当前 VCPU 抢占计数由 0 增加为 1。
+ 
+⸻
+ 
+vmm_scheduler_preempt_disable.002.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.preempt_count = 0U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+current_vcpu.preempt_count = 0
+注释：
+测试目的：验证 IRQ 上下文中调用关闭抢占接口时，不修改当前 VCPU 抢占计数。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置调度器处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 抢占计数为 0。 step3、设置调度器 IRQ 上下文标志为 true。 step4、调用 vmm_scheduler_preempt_disable。 step5、观察当前 VCPU 抢占计数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_disable 等价列表：IRQ 上下文，当前 VCPU 有效。 其它说明：本用例覆盖 IRQ 上下文不递增路径。 通过准则：当前 VCPU 抢占计数保持为 0。
+ 
+⸻
+ 
+vmm_scheduler_preempt_disable.003.R
+构造
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+无状态变化
+注释：
+测试目的：验证非 IRQ 上下文但当前 VCPU 为空时，关闭抢占接口直接返回。 用例类别：基于需求的测试 预置条件：调度器当前 VCPU 指针为空，且不处于 IRQ 上下文。 测试步骤： step1、设置调度器当前 VCPU 指针为空。 step2、设置 IRQ 上下文标志为 false。 step3、调用 vmm_scheduler_preempt_disable。 step4、观察函数是否正常返回。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_disable 等价列表：当前 VCPU 不存在。 其它说明：本用例覆盖 vcpu 为空路径。 通过准则：函数无返回值，正常返回且无异常。
+ 
+⸻
+ 
+十四、
+vmm_scheduler_preempt_enable
+vmm_scheduler_preempt_enable.001.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.preempt_count = 2U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+current_vcpu.preempt_count = 1
+注释：
+测试目的：验证非 IRQ 上下文且当前 VCPU 抢占计数非 0 时，开启抢占接口能够减少抢占计数。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，抢占计数为 2，调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置抢占计数为 2。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_preempt_enable。 step5、观察当前 VCPU 抢占计数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_enable 等价列表：非 IRQ 上下文，当前 VCPU 有效，抢占计数非 0。 其它说明：本用例覆盖抢占计数递减路径。 通过准则：当前 VCPU 抢占计数由 2 减少为 1。
+ 
+⸻
+ 
+vmm_scheduler_preempt_enable.002.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.preempt_count = 0U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+current_vcpu.preempt_count = 0
+注释：
+测试目的：验证当前 VCPU 抢占计数为 0 时，开启抢占接口不继续递减。 用例类别：边界值分析 预置条件：构造当前 VCPU，抢占计数为 0，调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置抢占计数为 0。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_preempt_enable。 step5、观察当前 VCPU 抢占计数。 用例来源：边界值分析 追溯ID：vmm_scheduler_preempt_enable 等价列表：抢占计数为下边界 0。 其它说明：本用例覆盖抢占计数为 0 的路径。 通过准则：当前 VCPU 抢占计数保持为 0。
+ 
+⸻
+ 
+vmm_scheduler_preempt_enable.003.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.preempt_count = 2U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+current_vcpu.preempt_count = 2
+注释：
+测试目的：验证 IRQ 上下文中调用开启抢占接口时，不修改当前 VCPU 抢占计数。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，抢占计数为 2，调度器处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置抢占计数为 2。 step3、设置 IRQ 上下文标志为 true。 step4、调用 vmm_scheduler_preempt_enable。 step5、观察当前 VCPU 抢占计数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_enable 等价列表：IRQ 上下文。 其它说明：本用例覆盖 IRQ 上下文不递减路径。 通过准则：当前 VCPU 抢占计数保持为 2。
+ 
+⸻
+ 
+十五、
+vmm_scheduler_preempt_orphan
+vmm_scheduler_preempt_orphan.001.R
+构造
+static arch_regs_t regs_obj;
+
+<<vmm_scheduler.vmm_scheduler_preempt_orphan.regs>> = &regs_obj;
+SBF Stub：
+vmm_scheduler_switch.return = void
+Expected：
+vmm_scheduler_switch 被调用一次
+注释：
+测试目的：验证 orphan 抢占接口能够调用调度切换函数。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并对调度切换函数打桩。 测试步骤： step1、构造寄存器对象。 step2、调用 vmm_scheduler_preempt_orphan。 step3、观察 vmm_scheduler_switch 调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_preempt_orphan 等价列表：寄存器对象有效。 其它说明：本用例覆盖 orphan 抢占入口路径。 通过准则：vmm_scheduler_switch 被调用一次，入参为当前调度控制结构和传入寄存器对象。
+ 
+⸻
+ 
+十六、
+scheduler_ipi_resched
+scheduler_ipi_resched.001.R
+构造
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_IRQ_REGS = &regs_obj;
+SBF Stub：
+rq_prempt_needed.return = TRUE
+vmm_scheduler_switch.return = void
+Expected：
+vmm_scheduler_switch 被调用一次
+注释：
+测试目的：验证 IPI 重调度处理在存在 IRQ 寄存器且需要抢占时，触发调度切换。 用例类别：基于需求的测试 预置条件：调度器 IRQ 寄存器指针有效，ready queue 抢占判断返回 true。 测试步骤： step1、构造 IRQ 寄存器对象。 step2、设置调度器 IRQ 寄存器指针。 step3、设置抢占判断函数返回 true。 step4、调用 scheduler_ipi_resched。 step5、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_resched 等价列表：IRQ 寄存器有效且需要抢占。 其它说明：本用例覆盖 IPI 中触发调度切换路径。 通过准则：vmm_scheduler_switch 被调用一次。
+ 
+⸻
+ 
+scheduler_ipi_resched.002.R
+构造
+*VCAST_SCHED0_IRQ_REGS = NULL;
+SBF Stub：
+rq_prempt_needed.return = TRUE
+Expected：
+vmm_scheduler_switch 未被调用
+注释：
+测试目的：验证 IPI 重调度处理在 IRQ 寄存器为空时，不触发调度切换。 用例类别：基于需求的测试 预置条件：调度器 IRQ 寄存器指针为空。 测试步骤： step1、设置调度器 IRQ 寄存器指针为空。 step2、调用 scheduler_ipi_resched。 step3、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_resched 等价列表：IRQ 寄存器为空。 其它说明：本用例覆盖 schedp->irq_regs 为 false 的路径。 通过准则：vmm_scheduler_switch 未被调用。
+ 
+⸻
+ 
+scheduler_ipi_resched.003.R
+构造
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_IRQ_REGS = &regs_obj;
+SBF Stub：
+rq_prempt_needed.return = FALSE
+Expected：
+vmm_scheduler_switch 未被调用
+注释：
+测试目的：验证 IPI 重调度处理在不需要抢占时，不触发调度切换。 用例类别：基于需求的测试 预置条件：调度器 IRQ 寄存器指针有效，抢占判断返回 false。 测试步骤： step1、构造 IRQ 寄存器对象。 step2、设置调度器 IRQ 寄存器指针。 step3、设置抢占判断函数返回 false。 step4、调用 scheduler_ipi_resched。 step5、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_resched 等价列表：IRQ 寄存器有效但不需要抢占。 其它说明：本用例覆盖抢占判断为 false 的路径。 通过准则：vmm_scheduler_switch 未被调用。
+ 
+⸻
+ 
+十七、
+vmm_scheduler_force_resched
+vmm_scheduler_force_resched.001.IN.hcpu.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_force_resched.hcpu>> = CONFIG_CPU_COUNT;
+Expected：
+return = -5
+注释：
+测试目的：验证目标 CPU 编号等于 CPU 数量上限时，强制重调度接口返回无效错误。 用例类别：接口测试 预置条件：将目标 CPU 编号设置为无效边界值 CONFIG_CPU_COUNT。 测试步骤： step1、设置目标 CPU 编号为 CONFIG_CPU_COUNT。 step2、调用 vmm_scheduler_force_resched。 step3、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_force_resched 等价列表：目标 CPU 编号超出有效范围。 其它说明：本用例覆盖 CPU 编号无效路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_scheduler_force_resched.002.IN.hcpu.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_force_resched.hcpu>> = 1U;
+Stub：
+vmm_cpu_online.return = FALSE
+Expected：
+return = VMM_ENOTAVAIL 的实际数值
+注释：
+测试目的：验证目标 CPU 不在线时，强制重调度接口返回不可用错误。 用例类别：接口测试 预置条件：目标 CPU 编号有效，但 CPU 在线查询接口返回 false。 测试步骤： step1、设置目标 CPU 编号为 1。 step2、设置 CPU 在线查询接口返回 false。 step3、调用 vmm_scheduler_force_resched。 step4、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_force_resched 等价列表：目标 CPU 编号有效但 CPU 不在线。 其它说明：本用例覆盖目标 CPU 不在线路径。 通过准则：函数返回 VMM_ENOTAVAIL 的实际数值。
+ 
+⸻
+ 
+vmm_scheduler_force_resched.003.R
+构造
+<<vmm_scheduler.vmm_scheduler_force_resched.hcpu>> = 0U;
+Stub：
+vmm_cpu_online.return = TRUE
+vmm_smp_processor_id.return = 0
+Expected：
+return = 0
+vmm_smp_ipi_sync_call 未被调用
+注释：
+测试目的：验证目标 CPU 为当前 CPU 时，强制重调度接口直接返回成功且不发送 IPI。 用例类别：基于需求的测试 预置条件：目标 CPU 在线，且目标 CPU 与当前 CPU 相同。 测试步骤： step1、设置目标 CPU 编号为 0。 step2、设置 CPU 在线查询接口返回 true。 step3、设置当前 CPU 编号为 0。 step4、调用 vmm_scheduler_force_resched。 step5、观察返回值和 IPI 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_force_resched 等价列表：目标 CPU 为当前 CPU。 其它说明：本用例覆盖本地 CPU 直接返回路径。 通过准则：函数返回 0，IPI 同步调用接口未被调用。
+ 
+⸻
+ 
+vmm_scheduler_force_resched.004.R
+构造
+<<vmm_scheduler.vmm_scheduler_force_resched.hcpu>> = 1U;
+Stub：
+vmm_cpu_online.return = TRUE
+vmm_smp_processor_id.return = 0
+arch_atomic_cmpxchg.return = 0
+vmm_smp_ipi_sync_call.return = 0
+Expected：
+return = 0
+vmm_smp_ipi_sync_call 被调用一次
+注释：
+测试目的：验证目标 CPU 为远端 CPU且重调度状态从 idle 成功切换到 triggered 时，函数发送 IPI 并返回成功。 用例类别：基于需求的测试 预置条件：目标 CPU 在线，当前 CPU 为 0，目标 CPU 为 1，原重调度状态为 idle。 测试步骤： step1、设置目标 CPU 编号为 1。 step2、设置目标 CPU 在线。 step3、设置当前 CPU 编号为 0。 step4、设置原子比较交换返回 idle 状态。 step5、调用 vmm_scheduler_force_resched。 step6、观察返回值和 IPI 同步调用接口。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_force_resched 等价列表：目标 CPU 在线、远端 CPU、重调度状态成功触发。 其它说明：本用例覆盖发送重调度 IPI 的路径。 通过准则：函数返回 0，IPI 同步调用接口被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_force_resched.005.R
+构造
+<<vmm_scheduler.vmm_scheduler_force_resched.hcpu>> = 1U;
+Stub：
+vmm_cpu_online.return = TRUE
+vmm_smp_processor_id.return = 0
+arch_atomic_cmpxchg.return = 1
+Expected：
+return = 0
+vmm_smp_ipi_sync_call 未被调用
+注释：
+测试目的：验证远端 CPU 重调度状态已经处于 triggered 时，函数不重复发送 IPI。 用例类别：基于需求的测试 预置条件：目标 CPU 在线，当前 CPU 为 0，目标 CPU 为 1，原子比较交换返回非 idle 状态。 测试步骤： step1、设置目标 CPU 编号为 1。 step2、设置目标 CPU 在线。 step3、设置当前 CPU 编号为 0。 step4、设置原子比较交换返回 1。 step5、调用 vmm_scheduler_force_resched。 step6、观察返回值和 IPI 同步调用接口。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_force_resched 等价列表：远端 CPU 已处于重调度触发状态。 其它说明：本用例覆盖不重复发送 IPI 的路径。 通过准则：函数返回 0，IPI 同步调用接口未被调用。
+ 
+⸻
+ 
+十八、
+scheduler_system_time_sync
+scheduler_system_time_sync.001.R
+构造
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.system_nsecs = 0U;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_PROCESS_NS = 100U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 50U;
+*VCAST_SCHED0_CURRENT_VCPU_IRQ_NS = 10U;
+*VCAST_SCHED0_CURRENT_VCPU_EXP_NS = 5U;
+Expected：
+current_vcpu.system_nsecs = 135
+注释：
+测试目的：验证系统时间同步 IPI 处理函数在存在当前 VCPU 时，能够同步当前 VCPU 的系统时间。 用例类别：基于需求的测试 预置条件：调度器当前 VCPU 指针有效，并设置 IRQ/异常处理时间。 测试步骤： step1、构造当前 VCPU。 step2、设置调度器当前 VCPU 指针。 step3、设置 IRQ 和异常处理时间差。 step4、调用 scheduler_system_time_sync。 step5、观察当前 VCPU 的系统时间。 用例来源：需求分析、有效等价类 追溯ID：scheduler_system_time_sync 等价列表：当前 VCPU 存在。 其它说明：本用例覆盖当前 VCPU 存在时的同步路径。 通过准则：当前 VCPU 的 system_nsecs 更新为 135。
+ 
+⸻
+ 
+scheduler_system_time_sync.002.R
+构造
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+Expected：
+无状态变化
+注释：
+测试目的：验证系统时间同步 IPI 处理函数在当前 VCPU 为空时直接返回。 用例类别：基于需求的测试 预置条件：调度器当前 VCPU 指针为空。 测试步骤： step1、设置调度器当前 VCPU 指针为空。 step2、调用 scheduler_system_time_sync。 step3、观察函数是否正常返回。 用例来源：需求分析、有效等价类 追溯ID：scheduler_system_time_sync 等价列表：当前 VCPU 不存在。 其它说明：本用例覆盖当前 VCPU 为空路径。 通过准则：函数无返回值，正常返回且无异常。
+ 
+⸻
+ 
+十九、
+vmm_scheduler_stats
+最少 7 条：空 VCPU、get_hcpu 失败、IPI 失败、READY、RUNNING、PAUSED、HALTED、default。这里给 8 条。
+ 
+⸻
+ 
+vmm_scheduler_stats.001.IN.vcpu.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_stats.vcpu>> = NULL;
+Expected：
+return = -1
+注释：
+测试目的：验证 VCPU 入参为空时，调度统计接口返回失败。 用例类别：接口测试 预置条件：VCPU 入参为空。 测试步骤： step1、将 VCPU 入参设置为空。 step2、调用 vmm_scheduler_stats。 step3、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_stats 等价列表：VCPU 入参为空。 其它说明：本用例覆盖空指针防御路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+vmm_scheduler_stats.002.FI
+构造
+static struct vmm_vcpu vcpu;
+
+<<vmm_scheduler.vmm_scheduler_stats.vcpu>> = &vcpu;
+Stub：
+vmm_scheduler_get_hcpu.return = -2
+Expected：
+return = -2
+注释：
+测试目的：通过故障注入模拟获取 VCPU 所属 CPU 失败，验证调度统计接口返回该错误码。 用例类别：故障注入测试 预置条件：VCPU 入参有效，vmm_scheduler_get_hcpu 返回 -2。 测试步骤： step1、构造有效 VCPU。 step2、设置 vmm_scheduler_get_hcpu 返回 -2。 step3、调用 vmm_scheduler_stats。 step4、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_stats 等价列表：获取 VCPU 所属 CPU 失败。 其它说明：本用例覆盖获取 CPU 失败路径。 通过准则：函数返回 -2。
+ 
+⸻
+ 
+vmm_scheduler_stats.003.FI
+构造
+static struct vmm_vcpu vcpu;
+
+<<vmm_scheduler.vmm_scheduler_stats.vcpu>> = &vcpu;
+Stub：
+vmm_scheduler_get_hcpu.return = 0，并输出 hcpu = 0
+vmm_smp_ipi_sync_call.return = -3
+Expected：
+return = -3
+注释：
+测试目的：通过故障注入模拟系统时间同步 IPI 失败，验证调度统计接口返回该错误码。 用例类别：故障注入测试 预置条件：VCPU 入参有效，获取所属 CPU 成功，IPI 同步接口返回失败。 测试步骤： step1、构造有效 VCPU。 step2、设置 vmm_scheduler_get_hcpu 返回成功并输出 CPU0。 step3、设置 vmm_smp_ipi_sync_call 返回 -3。 step4、调用 vmm_scheduler_stats。 step5、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_stats 等价列表：系统时间同步 IPI 失败。 其它说明：本用例覆盖 IPI 同步失败路径。 通过准则：函数返回 -3。
+ 
+⸻
+ 
+vmm_scheduler_stats.004.R
+覆盖 READY。
+构造
+static struct vmm_vcpu vcpu;
+static u32 state;
+static u8 priority;
+static u32 hcpu;
+static u32 reset_count;
+static u64 last_reset_nsecs;
+static u64 ready_nsecs;
+static u64 running_nsecs;
+static u64 paused_nsecs;
+static u64 halted_nsecs;
+static u64 system_nsecs;
+
+vcpu.priority = 4U;
+vcpu.reset_count = 2U;
+vcpu.reset_tstamp = 900U;
+vcpu.state_tstamp = 1000U;
+vcpu.state_ready_nsecs = 10U;
+vcpu.state_running_nsecs = 20U;
+vcpu.state_paused_nsecs = 30U;
+vcpu.state_halted_nsecs = 40U;
+vcpu.system_nsecs = 50U;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_stats.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_stats.state>> = &state;
+<<vmm_scheduler.vmm_scheduler_stats.priority>> = &priority;
+<<vmm_scheduler.vmm_scheduler_stats.hcpu>> = &hcpu;
+<<vmm_scheduler.vmm_scheduler_stats.reset_count>> = &reset_count;
+<<vmm_scheduler.vmm_scheduler_stats.last_reset_nsecs>> = &last_reset_nsecs;
+<<vmm_scheduler.vmm_scheduler_stats.ready_nsecs>> = &ready_nsecs;
+<<vmm_scheduler.vmm_scheduler_stats.running_nsecs>> = &running_nsecs;
+<<vmm_scheduler.vmm_scheduler_stats.paused_nsecs>> = &paused_nsecs;
+<<vmm_scheduler.vmm_scheduler_stats.halted_nsecs>> = &halted_nsecs;
+<<vmm_scheduler.vmm_scheduler_stats.system_nsecs>> = &system_nsecs;
+Stub：
+vmm_scheduler_get_hcpu.return = 0，输出 hcpu = 0
+vmm_smp_ipi_sync_call.return = 0
+vmm_timer_timestamp.return = 1100
+Expected：
+return = 0
+ready_nsecs = 110
+running_nsecs = 20
+paused_nsecs = 30
+halted_nsecs = 40
+system_nsecs = 50
+priority = 4
+reset_count = 2
+last_reset_nsecs = 200
+注释：
+测试目的：验证 VCPU 当前状态为 READY 时，调度统计接口能够更新 ready 累计时间并输出各项统计。 用例类别：基于需求的测试 预置条件：VCPU 状态为 READY，状态时间戳为 1000，当前时间戳为 1100。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置 VCPU 各项统计初值。 step3、设置当前时间戳为 1100。 step4、调用 vmm_scheduler_stats。 step5、观察返回值和输出统计字段。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_stats 等价列表：VCPU 当前状态为 READY。 其它说明：本用例覆盖 READY 状态统计更新路径。 通过准则：函数返回 0，ready 时间由 10 更新为 110，其它统计按原值输出。
+ 
+⸻
+ 
+vmm_scheduler_stats.005.R
+覆盖 RUNNING。构造同 004，仅改：
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+vcpu.state_running_nsecs = 20U;
+vcpu.state_tstamp = 1000U;
+Stub：
+vmm_timer_timestamp.return = 1100
+Expected：
+return = 0
+running_nsecs = 120
+注释：
+测试目的：验证 VCPU 当前状态为 RUNNING 时，调度统计接口更新 running 累计时间。 用例类别：基于需求的测试 预置条件：VCPU 状态为 RUNNING，状态时间戳为 1000，当前时间戳为 1100。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置 running 统计初值为 20。 step3、设置当前时间戳为 1100。 step4、调用 vmm_scheduler_stats。 step5、观察 running 统计输出。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_stats 等价列表：VCPU 当前状态为 RUNNING。 其它说明：本用例覆盖 RUNNING 状态统计更新路径。 通过准则：函数返回 0，running 时间更新为 120。
+ 
+⸻
+ 
+vmm_scheduler_stats.006.R
+覆盖 PAUSED。Expected：
+paused_nsecs = 原 paused + 100
+注释：
+测试目的：验证 VCPU 当前状态为 PAUSED 时，调度统计接口更新 paused 累计时间。 用例类别：基于需求的测试 预置条件：VCPU 状态为 PAUSED，状态时间戳为 1000，当前时间戳为 1100。 测试步骤： step1、构造 VCPU 并设置状态为 PAUSED。 step2、设置 paused 统计初值。 step3、设置当前时间戳为 1100。 step4、调用 vmm_scheduler_stats。 step5、观察 paused 统计输出。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_stats 等价列表：VCPU 当前状态为 PAUSED。 其它说明：本用例覆盖 PAUSED 状态统计更新路径。 通过准则：函数返回 0，paused 时间增加 100。
+ 
+⸻
+ 
+vmm_scheduler_stats.007.R
+覆盖 HALTED。Expected：
+halted_nsecs = 原 halted + 100
+注释：
+测试目的：验证 VCPU 当前状态为 HALTED 时，调度统计接口更新 halted 累计时间。 用例类别：基于需求的测试 预置条件：VCPU 状态为 HALTED，状态时间戳为 1000，当前时间戳为 1100。 测试步骤： step1、构造 VCPU 并设置状态为 HALTED。 step2、设置 halted 统计初值。 step3、设置当前时间戳为 1100。 step4、调用 vmm_scheduler_stats。 step5、观察 halted 统计输出。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_stats 等价列表：VCPU 当前状态为 HALTED。 其它说明：本用例覆盖 HALTED 状态统计更新路径。 通过准则：函数返回 0，halted 时间增加 100。
+ 
+⸻
+ 
+vmm_scheduler_stats.008.R
+覆盖 default，并覆盖输出指针为 NULL。
+构造
+static struct vmm_vcpu vcpu;
+
+vcpu.state_tstamp = 1000U;
+vcpu.state_ready_nsecs = 10U;
+vcpu.state_running_nsecs = 20U;
+vcpu.state_paused_nsecs = 30U;
+vcpu.state_halted_nsecs = 40U;
+vcpu.system_nsecs = 50U;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_UNKNOWN));
+
+<<vmm_scheduler.vmm_scheduler_stats.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_stats.state>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.priority>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.hcpu>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.reset_count>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.last_reset_nsecs>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.ready_nsecs>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.running_nsecs>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.paused_nsecs>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.halted_nsecs>> = NULL;
+<<vmm_scheduler.vmm_scheduler_stats.system_nsecs>> = NULL;
+Stub：
+vmm_scheduler_get_hcpu.return = 0，输出 hcpu = 0
+vmm_smp_ipi_sync_call.return = 0
+vmm_timer_timestamp.return = 1100
+Expected：
+return = 0
+vcpu.state_ready_nsecs = 10
+vcpu.state_running_nsecs = 20
+vcpu.state_paused_nsecs = 30
+vcpu.state_halted_nsecs = 40
+注释：
+测试目的：验证 VCPU 当前状态不属于 READY、RUNNING、PAUSED、HALTED 时，调度统计接口不修改各状态累计时间，并能处理所有输出指针为空的情况。 用例类别：基于需求的测试 预置条件：VCPU 状态为 UNKNOWN，所有输出指针均为空。 测试步骤： step1、构造 VCPU 并设置状态为 UNKNOWN。 step2、设置各状态累计时间初值。 step3、将所有输出指针设置为空。 step4、调用 vmm_scheduler_stats。 step5、观察返回值和 VCPU 内部统计值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_stats 等价列表：当前状态为 default 分支，输出指针为空。 其它说明：本用例覆盖统计状态 switch 的 default 分支和所有输出指针判空路径。 通过准则：函数返回 0，各状态累计时间保持不变。
+ 
+⸻
+ 
+二十、
+vmm_scheduler_state_change
+这个函数分支最多，建议最少用下面这些用例。以下用例以 vmm_scheduler_set_state_packed() 设置初始状态。
+vmm_scheduler_state_change.001.IN.vcpu.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = NULL;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Expected：
+return = -1
+注释：
+测试目的：验证 VCPU 入参为空时，状态切换接口返回失败。 用例类别：接口测试 预置条件：VCPU 入参为空。 测试步骤： step1、将 VCPU 入参设置为空。 step2、设置目标状态为 READY。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：VCPU 入参为空。 其它说明：本用例覆盖空指针防御路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+vmm_scheduler_state_change.002.R
+UNKNOWN -> RESET，新建 VCPU setup 成功。
+构造
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_UNKNOWN));
+vcpu.state_tstamp = 100U;
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_RESET;
+Stub：
+vmm_smp_processor_id.return = 0
+vmm_schedalgo_vcpu_setup.return = 0
+vmm_timer_timestamp.return = 200
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vcpu.reset_tstamp = 200
+vcpu.state_tstamp = 200
+注释：
+测试目的：验证 UNKNOWN 状态 VCPU 切换到 RESET 时，函数执行新 VCPU 调度算法初始化并更新 reset 时间戳。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 UNKNOWN，调度算法 setup 接口返回成功。 测试步骤： step1、构造 VCPU 并设置初始状态为 UNKNOWN。 step2、设置目标状态为 RESET。 step3、设置调度算法 setup 接口返回 0。 step4、设置时间戳为 200。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值和 VCPU 时间戳。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：UNKNOWN 到 RESET，新 VCPU 初始化成功。 其它说明：本用例覆盖 UNKNOWN -> RESET 的新建 VCPU路径。 通过准则：函数返回 0，VCPU reset 时间戳和状态时间戳更新为 200。
+ 
+⸻
+ 
+vmm_scheduler_state_change.003.FI
+UNKNOWN -> RESET，setup 失败。
+Stub：
+vmm_schedalgo_vcpu_setup.return = -2
+Expected：
+return = -2
+注释：
+测试目的：通过故障注入模拟新 VCPU 调度算法初始化失败，验证状态切换接口返回该错误码。 用例类别：故障注入测试 预置条件：VCPU 初始状态为 UNKNOWN，目标状态为 RESET，调度算法 setup 接口返回 -2。 测试步骤： step1、构造 VCPU 并设置初始状态为 UNKNOWN。 step2、设置目标状态为 RESET。 step3、设置调度算法 setup 接口返回 -2。 step4、调用 vmm_scheduler_state_change。 step5、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：UNKNOWN 到 RESET，setup 失败。 其它说明：本用例覆盖 setup 失败路径。 通过准则：函数返回 -2。
+ 
+⸻
+ 
+vmm_scheduler_state_change.004.R
+READY -> RESET，已有 VCPU reset 成功。
+构造
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+vcpu.state_tstamp = 100U;
+vcpu.reset_count = 1U;
+vcpu.state_ready_nsecs = 10U;
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_RESET;
+Stub：
+vmm_smp_processor_id.return = 0
+vmm_schedalgo_rq_detach.return = 0
+arch_vcpu_init.return = 0
+vmm_vcpu_irq_init.return = 0
+vmm_timer_timestamp.return = 200
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vcpu.reset_count = 2
+vcpu.state_ready_nsecs = 0
+vcpu.state_running_nsecs = 0
+vcpu.state_paused_nsecs = 0
+vcpu.state_halted_nsecs = 0
+vcpu.system_nsecs = 0
+vcpu.reset_tstamp = 200
+注释：
+测试目的：验证已有 READY VCPU 切换到 RESET 时，函数从 ready queue 中移除 VCPU，重新初始化架构和中断状态，并清零统计信息。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 READY，当前 VCPU 不是该 VCPU，ready queue detach、架构初始化和 IRQ 初始化均成功。 测试步骤： step1、构造 VCPU 并设置初始状态为 READY。 step2、设置目标状态为 RESET。 step3、设置 ready queue detach 接口返回 0。 step4、设置架构初始化和 IRQ 初始化接口返回 0。 step5、设置时间戳为 200。 step6、调用 vmm_scheduler_state_change。 step7、观察返回值、reset 计数和各项统计信息。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：READY 到 RESET，已有 VCPU 重置成功。 其它说明：本用例覆盖已有 VCPU reset 成功路径。 通过准则：函数返回 0，reset 计数增加到 2，统计信息清零，reset 时间戳为 200。
+ 
+⸻
+ 
+vmm_scheduler_state_change.005.FI
+READY -> RESET，arch_vcpu_init 失败。
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+arch_vcpu_init.return = -3
+Expected：
+return = -3
+注释：
+测试目的：通过故障注入模拟架构 VCPU 初始化失败，验证 RESET 状态切换返回错误码。 用例类别：故障注入测试 预置条件：VCPU 初始状态为 READY，ready queue detach 成功，架构初始化返回 -3。 测试步骤： step1、构造 READY 状态 VCPU。 step2、设置目标状态为 RESET。 step3、设置 ready queue detach 返回成功。 step4、设置 arch_vcpu_init 返回 -3。 step5、调用 vmm_scheduler_state_change。 step6、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RESET 路径中架构初始化失败。 其它说明：本用例覆盖 arch_vcpu_init 失败路径。 通过准则：函数返回 -3。
+ 
+⸻
+ 
+vmm_scheduler_state_change.006.FI
+READY -> RESET，vmm_vcpu_irq_init 失败。
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+arch_vcpu_init.return = 0
+vmm_vcpu_irq_init.return = -4
+Expected：
+return = -4
+注释：
+测试目的：通过故障注入模拟 VCPU IRQ 初始化失败，验证 RESET 状态切换返回错误码。 用例类别：故障注入测试 预置条件：VCPU 初始状态为 READY，ready queue detach 和架构初始化成功，IRQ 初始化返回 -4。 测试步骤： step1、构造 READY 状态 VCPU。 step2、设置目标状态为 RESET。 step3、设置 ready queue detach 和架构初始化返回成功。 step4、设置 vmm_vcpu_irq_init 返回 -4。 step5、调用 vmm_scheduler_state_change。 step6、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RESET 路径中 IRQ 初始化失败。 其它说明：本用例覆盖 vmm_vcpu_irq_init 失败路径。 通过准则：函数返回 -4。
+ 
+⸻
+ 
+vmm_scheduler_state_change.007.R
+RESET -> RESET，skip。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RESET));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_RESET;
+Expected：
+return = 0
+注释：
+测试目的：验证 RESET 状态切换到 RESET 时，函数识别为无需状态变化并正常返回。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RESET，目标状态也为 RESET。 测试步骤： step1、构造 VCPU 并设置状态为 RESET。 step2、设置目标状态为 RESET。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RESET 到 RESET。 其它说明：本用例覆盖 skip_state_change 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_state_change.008.R
+RESET -> READY，enqueue 成功。
+构造：
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RESET));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Stub：
+vmm_schedalgo_rq_enqueue.return = 0
+vmm_schedalgo_rq_prempt_needed.return = 0
+vmm_timer_timestamp.return = 300
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+注释：
+测试目的：验证 RESET 状态 VCPU 切换到 READY 时，函数将 VCPU 加入 ready queue 并更新状态。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RESET，ready queue 入队接口返回成功。 测试步骤： step1、构造 VCPU 并设置状态为 RESET。 step2、设置目标状态为 READY。 step3、设置 ready queue 入队接口返回 0。 step4、调用 vmm_scheduler_state_change。 step5、观察返回值和状态变化。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RESET 到 READY，入队成功。 其它说明：本用例覆盖 RESET/PAUSED 到 READY 的正常入队路径。 通过准则：函数返回 0，VCPU 状态更新为 READY。
+ 
+⸻
+ 
+vmm_scheduler_state_change.009.R
+PAUSED -> READY，调用 wq_cleanup。
+构造：
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vcast_sched_wq_cleanup_called = 0U;
+
+vcpu.wq_cleanup = vcast_sched_wq_cleanup_cb;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Stub：
+vmm_schedalgo_rq_enqueue.return = 0
+vmm_schedalgo_rq_prempt_needed.return = 0
+vmm_timer_timestamp.return = 300
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vcast_sched_wq_cleanup_called = 1
+注释：
+测试目的：验证 PAUSED 状态 VCPU 切换到 READY 时，若存在等待队列清理回调，函数会执行该回调。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 PAUSED，设置 wq_cleanup 为测试回调，ready queue 入队成功。 测试步骤： step1、构造 VCPU 并设置状态为 PAUSED。 step2、设置等待队列清理回调。 step3、设置目标状态为 READY。 step4、设置 ready queue 入队接口返回 0。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值和回调计数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：PAUSED 到 READY，存在等待队列清理回调。 其它说明：本用例覆盖 if (vcpu->wq_cleanup) 调用路径。 通过准则：函数返回 0，测试回调调用次数为 1。
+ 
+⸻
+ 
+vmm_scheduler_state_change.010.R
+RUNNING -> READY，resumed=true，skip state change。
+构造：
+static struct vmm_vcpu vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+vcpu.resumed = FALSE;
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Stub：
+vmm_smp_processor_id.return = 0
+arch_atomic_read.return = 0
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vcpu.resumed = TRUE
+arch_vcpu_preempt_orphan 被调用一次
+注释：
+测试目的：验证 RUNNING 状态 VCPU 收到 READY 请求时，函数设置 resumed 标志并触发抢占，但不立即改变状态。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RUNNING，目标状态为 READY，当前 CPU 与 VCPU 所属 CPU 相同。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置当前 VCPU 指针为该 VCPU。 step3、设置目标状态为 READY。 step4、调用 vmm_scheduler_state_change。 step5、观察返回值、resumed 标志和抢占接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RUNNING 到 READY。 其它说明：本用例覆盖 RUNNING->READY 的 skip_state_change 路径。 通过准则：函数返回 0，vcpu.resumed 被置为 TRUE，抢占接口被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_state_change.011.R
+READY -> READY，skip。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Expected：
+return = 0
+注释：
+测试目的：验证 READY 到 READY 状态切换被视为合法空操作。 用例类别：基于需求的测试 预置条件：VCPU 初始状态和目标状态均为 READY。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置目标状态为 READY。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：READY 到 READY。 其它说明：本用例覆盖 READY->READY 的 skip_state_change 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_state_change.012.IN.state.NEC
+HALTED -> READY，非法。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_HALTED));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Expected：
+return = -5
+注释：
+测试目的：验证 HALTED 状态 VCPU 直接切换到 READY 时返回无效错误。 用例类别：接口测试 预置条件：VCPU 初始状态为 HALTED，目标状态为 READY。 测试步骤： step1、构造 VCPU 并设置状态为 HALTED。 step2、设置目标状态为 READY。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：HALTED 到 READY 非法转换。 其它说明：本用例覆盖 READY 分支中的非法状态路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_scheduler_state_change.013.IN.state.NEC
+请求 RUNNING。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_RUNNING;
+Expected：
+return = -5
+注释：
+测试目的：验证外部请求将 VCPU 设置为 RUNNING 状态时，函数返回无效错误。 用例类别：接口测试 预置条件：VCPU 初始状态为 READY，目标状态为 RUNNING。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置目标状态为 RUNNING。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：外部直接请求 RUNNING 状态。 其它说明：本用例覆盖 RUNNING 分支返回无效路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_scheduler_state_change.014.R
+PAUSED -> PAUSED skip。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+Expected：
+return = 0
+注释：
+测试目的：验证 PAUSED 到 PAUSED 状态切换被视为合法空操作。 用例类别：基于需求的测试 预置条件：VCPU 初始状态和目标状态均为 PAUSED。 测试步骤： step1、构造 VCPU 并设置状态为 PAUSED。 step2、设置目标状态为 PAUSED。 step3、调用 vmm_scheduler_state_change。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：PAUSED 到 PAUSED。 其它说明：本用例覆盖 PAUSED 分支中的 skip_state_change 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_state_change.015.R
+READY -> PAUSED，detach 成功。
+构造：
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+vmm_timer_timestamp.return = 400
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+注释：
+测试目的：验证 READY 状态 VCPU 切换到 PAUSED 时，若该 VCPU 不在当前运行状态，函数从 ready queue 中移除该 VCPU 并更新状态。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 READY，当前 VCPU 指针不等于该 VCPU，ready queue detach 成功。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置目标状态为 PAUSED。 step3、设置当前 VCPU 指针为空。 step4、设置 ready queue detach 返回 0。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值和状态变化。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：READY 到 PAUSED，非当前 VCPU，detach 成功。 其它说明：本用例覆盖 READY->PAUSED 的 detach 路径。 通过准则：函数返回 0，VCPU 状态更新为 PAUSED。
+ 
+⸻
+ 
+vmm_scheduler_state_change.016.R
+RUNNING -> PAUSED，当前 VCPU，触发抢占。
+构造：
+static struct vmm_vcpu vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+vcpu.resumed = FALSE;
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+Stub：
+vmm_timer_timestamp.return = 400
+vmm_scheduler_get_state.return = 0
+arch_atomic_read.return = 0
+Expected：
+return = 0
+arch_vcpu_preempt_orphan 被调用一次
+注释：
+测试目的：验证 RUNNING 状态的当前 VCPU 切换到 PAUSED 时，函数更新状态并触发抢占。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RUNNING，且为当前运行 VCPU，调度器不处于 IRQ 上下文。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置调度器当前 VCPU 指针为该 VCPU。 step3、设置目标状态为 PAUSED。 step4、调用 vmm_scheduler_state_change。 step5、观察返回值和抢占接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RUNNING 到 PAUSED，当前 VCPU。 其它说明：本用例覆盖当前 VCPU 被 PAUSED 时触发抢占路径。 通过准则：函数返回 0，抢占接口被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_state_change.017.R
+RUNNING -> PAUSED，resumed == TRUE，执行 wq_cleanup 并 skip。
+构造：
+static struct vmm_vcpu vcpu;
+
+vcast_sched_wq_cleanup_called = 0U;
+
+vcpu.resumed = TRUE;
+vcpu.wq_cleanup = vcast_sched_wq_cleanup_cb;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+Expected：
+return = 0
+vcast_sched_wq_cleanup_called = 1
+vcpu.resumed = FALSE
+注释：
+测试目的：验证 RUNNING 状态 VCPU 已经收到 resume 标志时，切换到 PAUSED 会执行等待队列清理并跳过状态变化。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RUNNING，resumed 为 true，等待队列清理回调有效。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置 resumed 为 true。 step3、设置等待队列清理回调。 step4、设置目标状态为 PAUSED。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值、resumed 标志和回调调用次数。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RUNNING 到 PAUSED，已有 resume 标志。 其它说明：本用例覆盖 resumed && new_state == PAUSED 路径。 通过准则：函数返回 0，resumed 被清除，清理回调调用一次。
+ 
+⸻
+ 
+vmm_scheduler_state_change.018.R
+READY -> HALTED，detach 成功。
+构造同 READY -> PAUSED，只改：
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_HALTED;
+Expected：
+return = 0
+注释：
+测试目的：验证 READY 状态 VCPU 切换到 HALTED 时，函数从 ready queue 中移除 VCPU 并更新状态。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 READY，当前 VCPU 指针不等于该 VCPU，ready queue detach 成功。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置目标状态为 HALTED。 step3、设置当前 VCPU 指针为空。 step4、设置 ready queue detach 返回 0。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值和状态变化。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：READY 到 HALTED，detach 成功。 其它说明：本用例覆盖 HALTED 分支中的 READY detach 路径。 通过准则：函数返回 0，VCPU 状态更新为 HALTED。
+ 
+⸻
+ 
+vmm_scheduler_state_change.019.IN.state.NEC
+RESET -> HALTED，非法且调用 cleanup。
+构造：
+static struct vmm_vcpu vcpu;
+
+vcast_sched_wq_cleanup_called = 0U;
+
+vcpu.wq_cleanup = vcast_sched_wq_cleanup_cb;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RESET));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_HALTED;
+Expected：
+return = -5
+vcast_sched_wq_cleanup_called = 1
+注释：
+测试目的：验证 RESET 状态 VCPU 切换到 HALTED 时被判定为非法，并在存在等待队列清理回调时执行清理。 用例类别：接口测试 预置条件：VCPU 初始状态为 RESET，目标状态为 HALTED，等待队列清理回调有效。 测试步骤： step1、构造 VCPU 并设置状态为 RESET。 step2、设置等待队列清理回调。 step3、设置目标状态为 HALTED。 step4、调用 vmm_scheduler_state_change。 step5、观察返回值和回调调用次数。 用例来源：无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：RESET 到 HALTED 非法转换。 其它说明：本用例覆盖 HALTED 分支中的非法状态路径。 通过准则：函数返回 -5，清理回调调用一次。
+ 
+⸻
+ 
+vmm_scheduler_state_change.020.R
+halt_flag 自动转 HALTED。
+构造：
+static struct vmm_vcpu vcpu;
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+vcpu.halt_flag = TRUE;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Stub：
+vmm_schedalgo_rq_detach.return = 0
+vmm_timer_timestamp.return = 500
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vcpu.halt_flag = FALSE
+注释：
+测试目的：验证 VCPU 的 halt_flag 为 true 且状态为 READY 时，状态切换接口在完成当前状态处理后自动再次切换到 HALTED。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 READY，halt_flag 为 true。 测试步骤： step1、构造 VCPU 并设置状态为 READY。 step2、设置 halt_flag 为 true。 step3、设置目标状态为 READY。 step4、设置 ready queue detach 返回成功。 step5、调用 vmm_scheduler_state_change。 step6、观察返回值和 halt_flag。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：halt_flag 为 true 且状态为 READY。 其它说明：本用例覆盖 AICoder 增加的自动 HALTED 跳转路径。 通过准则：函数返回 0，halt_flag 被清除。
+ 
+⸻
+ 
+vmm_scheduler_state_change.021.R
+本地抢占且 IRQ 上下文，调用 vmm_scheduler_switch。
+构造：
+static struct vmm_vcpu vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+*VCAST_SCHED0_IRQ_REGS = (arch_regs_t *)0x1000;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+SBF Stub：
+vmm_scheduler_switch.return = void
+vmm_timer_timestamp.return = 600
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vmm_scheduler_switch 被调用一次
+注释：
+测试目的：验证本地 CPU 中处于 IRQ 上下文时，当前运行 VCPU 状态变为 PAUSED 会直接调用调度切换函数。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RUNNING，当前 VCPU 指针为该 VCPU，调度器处于 IRQ 上下文。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置当前 VCPU 指针为该 VCPU。 step3、设置 IRQ 上下文标志为 true，并设置 IRQ 寄存器指针。 step4、设置目标状态为 PAUSED。 step5、调用 vmm_scheduler_state_change。 step6、观察调度切换函数调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：本地 CPU，IRQ 上下文，需要抢占。 其它说明：本用例覆盖 schedp->irq_context 为 true 的抢占路径。 通过准则：函数返回 0，vmm_scheduler_switch 被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_state_change.022.R
+本地抢占，reboot flag + IRQ context flag，设置 yield_on_irq_exit。
+构造：
+static struct vmm_vcpu vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = FALSE;
+
+vcpu.context_flag = CONTEXT_FLAG_IN_IRQ;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_RUNNING));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_PAUSED;
+Stub：
+arch_atomic_read.return = 1
+vmm_timer_timestamp.return = 600
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = TRUE
+arch_atomic_write 被调用一次
+arch_vcpu_preempt_orphan 未被调用
+注释：
+测试目的：验证 reboot 标志存在且当前 VCPU 处于 IRQ 上下文标记时，状态切换接口设置 IRQ 退出时让出标志，而不是立即抢占 orphan。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 RUNNING，目标状态为 PAUSED，do_reboot 读取值为 1，当前 VCPU context_flag 包含 IRQ 标记。 测试步骤： step1、构造 VCPU 并设置状态为 RUNNING。 step2、设置当前 VCPU 指针为该 VCPU。 step3、设置 context_flag 包含 IRQ 标记。 step4、设置 arch_atomic_read 返回 1。 step5、调用 vmm_scheduler_state_change。 step6、观察 yield_on_irq_exit 和抢占接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：本地抢占，reboot 标志存在，当前 VCPU 处于 IRQ 标记。 其它说明：本用例覆盖 reboot 分支。 通过准则：函数返回 0，yield_on_irq_exit 被置为 TRUE，arch_atomic_write 被调用一次，arch_vcpu_preempt_orphan 未被调用。
+ 
+⸻
+ 
+vmm_scheduler_state_change.023.R
+远端抢占，调用 vmm_scheduler_force_resched。
+构造：
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu remote_current;
+
+*VCAST_SCHED1_CURRENT_VCPU = &remote_current;
+*VCAST_SCHED1_RQ = (void *)0x1234;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(1, VMM_VCPU_STATE_RESET));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+Stub：
+vmm_smp_processor_id.return = 0
+vmm_schedalgo_rq_enqueue.return = 0
+vmm_schedalgo_rq_prempt_needed.return = 1
+vmm_scheduler_force_resched.return = 0
+vmm_timer_timestamp.return = 700
+vmm_scheduler_get_state.return = 0
+Expected：
+return = 0
+vmm_scheduler_force_resched 被调用一次，hcpu = 1
+注释：
+测试目的：验证目标 VCPU 所属 CPU 不是当前 CPU 且需要抢占时，状态切换接口请求远端 CPU 重调度。 用例类别：基于需求的测试 预置条件：VCPU 所属 CPU 为 1，当前 CPU 为 0，目标状态为 READY，入队成功且判断需要抢占。 测试步骤： step1、构造 VCPU 并设置其所属 CPU 为 1、状态为 RESET。 step2、设置当前 CPU 为 0。 step3、设置目标状态为 READY。 step4、设置 ready queue 入队成功，抢占判断返回 true。 step5、调用 vmm_scheduler_state_change。 step6、观察远端重调度接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_state_change 等价列表：远端 CPU 需要重调度。 其它说明：本用例覆盖远端抢占路径。 通过准则：函数返回 0，vmm_scheduler_force_resched 被调用一次，目标 CPU 为 1。
+ 
+⸻
+ 
+vmm_scheduler_state_change.024.IN.state.NEC
+vmm_scheduler_get_state 失败触发 BUG_ON。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_state_change.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_state_change.new_state>> = VMM_VCPU_STATE_READY;
+SBF Stub：
+vmm_scheduler_get_state.return = -1
+Expected：
+无普通返回；BUG_ON 测试替身 exit(0)
+注释：
+测试目的：验证状态切换结束阶段获取 VCPU 状态失败时，函数触发断言防御处理。 用例类别：接口测试 预置条件：通过 SBF 将 vmm_scheduler_get_state 设置为返回失败，并使用 BUG_ON 测试替身。 测试步骤： step1、构造 VCPU。 step2、设置目标状态。 step3、设置 vmm_scheduler_get_state 返回 -1。 step4、调用 vmm_scheduler_state_change。 step5、观察是否通过 BUG_ON 测试替身退出。 用例来源：无效等价类 追溯ID：vmm_scheduler_state_change 等价列表：状态查询失败。 其它说明：本用例覆盖函数尾部 BUG_ON 路径。 通过准则：用例通过 BUG_ON 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+vmm_scheduler_state_change
+的 dead code
+以下代码不可覆盖：
+if (0 && schedp->current_vcpu->is_normal) {
+    schedp->yield_on_irq_exit = TRUE;
+}
+原因：
+条件中存在常量 0，表达式恒为 false，该分支为明确 dead code。
+覆盖率排除说明：
+该分支条件包含常量 0，编译后逻辑恒不可达，属于源代码中显式屏蔽的 dead code，应在覆盖率中排除。
+ 
+⸻
+ 
+二十一、
+scheduler_ipi_migrate_vcpu
+scheduler_ipi_migrate_vcpu.001.R
+成功迁移。
+构造
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg0>> = &vcpu;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg1>> = (void *)1U;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg2>> = NULL;
+Stub：
+vmm_smp_processor_id.return = 0
+vmm_schedalgo_rq_detach.return = 0
+vmm_schedalgo_rq_enqueue.return = 0
+vmm_scheduler_force_resched.return = 0
+Expected：
+vmm_scheduler_force_resched 被调用一次，hcpu = 1
+注释：
+测试目的：验证迁移 IPI 处理函数在 VCPU 状态为 READY 且当前 CPU 与旧 CPU 一致时，将 VCPU 从旧 CPU 队列迁移到新 CPU 队列。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 READY，所属 CPU 为 0，当前 CPU 为 0，新 CPU 为 1。 测试步骤： step1、构造 VCPU 并设置状态为 READY、所属 CPU 为 0。 step2、设置当前 CPU 为 0。 step3、设置新 CPU 为 1。 step4、调用 scheduler_ipi_migrate_vcpu。 step5、观察 detach、enqueue 和 force resched 调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_migrate_vcpu 等价列表：READY VCPU 从旧 CPU 迁移到新 CPU。 其它说明：本用例覆盖迁移成功路径。 通过准则：detach、enqueue 和远端重调度接口均被调用。
+ 
+⸻
+ 
+scheduler_ipi_migrate_vcpu.002.R
+状态不是 READY，跳过。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg0>> = &vcpu;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg1>> = (void *)1U;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg2>> = NULL;
+Expected：
+rq_detach 未被调用
+注释：
+测试目的：验证迁移 IPI 处理函数在 VCPU 状态不是 READY 时跳过迁移。 用例类别：基于需求的测试 预置条件：VCPU 初始状态为 PAUSED。 测试步骤： step1、构造 VCPU 并设置状态为 PAUSED。 step2、设置新 CPU 为 1。 step3、调用 scheduler_ipi_migrate_vcpu。 step4、观察 ready queue detach 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_migrate_vcpu 等价列表：VCPU 状态不是 READY。 其它说明：本用例覆盖状态不满足迁移条件的 skip 路径。 通过准则：ready queue detach 接口未被调用。
+ 
+⸻
+ 
+scheduler_ipi_migrate_vcpu.003.R
+旧 CPU 与当前 CPU 不一致，跳过。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(1, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg0>> = &vcpu;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg1>> = (void *)2U;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg2>> = NULL;
+Stub：
+vmm_smp_processor_id.return = 0
+Expected：
+rq_detach 未被调用
+注释：
+测试目的：验证迁移 IPI 处理函数在 VCPU 当前所属 CPU 与执行 IPI 的 CPU 不一致时跳过迁移。 用例类别：基于需求的测试 预置条件：VCPU 状态为 READY，所属 CPU 为 1，当前执行 CPU 为 0。 测试步骤： step1、构造 VCPU 并设置状态为 READY、所属 CPU 为 1。 step2、设置当前 CPU 为 0。 step3、设置新 CPU 为 2。 step4、调用 scheduler_ipi_migrate_vcpu。 step5、观察 detach 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_migrate_vcpu 等价列表：VCPU 所属 CPU 与当前 CPU 不一致。 其它说明：本用例覆盖 CPU 不匹配 skip 路径。 通过准则：ready queue detach 接口未被调用。
+ 
+⸻
+ 
+scheduler_ipi_migrate_vcpu.004.R
+新 CPU 等于旧 CPU，跳过。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg0>> = &vcpu;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg1>> = (void *)0U;
+<<vmm_scheduler.scheduler_ipi_migrate_vcpu.arg2>> = NULL;
+Stub：
+vmm_smp_processor_id.return = 0
+Expected：
+rq_detach 未被调用
+注释：
+测试目的：验证迁移 IPI 处理函数在新 CPU 等于旧 CPU 时跳过迁移。 用例类别：基于需求的测试 预置条件：VCPU 状态为 READY，所属 CPU 为 0，新 CPU 也为 0。 测试步骤： step1、构造 VCPU 并设置状态为 READY、所属 CPU 为 0。 step2、设置当前 CPU 为 0。 step3、设置新 CPU 为 0。 step4、调用 scheduler_ipi_migrate_vcpu。 step5、观察 detach 接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_ipi_migrate_vcpu 等价列表：新 CPU 与旧 CPU 相同。 其它说明：本用例覆盖 hcpu == new_hcpu 的 skip 路径。 通过准则：ready queue detach 接口未被调用。
+ 
+⸻
+ 
+二十二、
+vmm_scheduler_set_hcpu
+vmm_scheduler_set_hcpu.001.IN.vcpu.NEC
+构造
+<<vmm_scheduler.vmm_scheduler_set_hcpu.vcpu>> = NULL;
+<<vmm_scheduler.vmm_scheduler_set_hcpu.hcpu>> = 0U;
+Expected：
+return = -1
+注释：
+测试目的：验证 VCPU 入参为空时，设置 host CPU 接口返回失败。 用例类别：接口测试 预置条件：VCPU 入参为空。 测试步骤： step1、将 VCPU 入参设置为空。 step2、调用 vmm_scheduler_set_hcpu。 step3、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_set_hcpu 等价列表：VCPU 为空。 其它说明：本用例覆盖空指针防御路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+vmm_scheduler_set_hcpu.002.R
+旧 CPU 等于新 CPU。
+构造：
+static struct vmm_vcpu vcpu;
+
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.vmm_scheduler_set_hcpu.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_set_hcpu.hcpu>> = 0U;
+Expected：
+return = 0
+注释：
+测试目的：验证目标 host CPU 与当前 host CPU 相同时，接口直接返回成功。 用例类别：基于需求的测试 预置条件：VCPU 当前所属 CPU 为 0，目标 CPU 也为 0。 测试步骤： step1、构造 VCPU 并设置所属 CPU 为 0。 step2、设置目标 CPU 为 0。 step3、调用 vmm_scheduler_set_hcpu。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_set_hcpu 等价列表：目标 CPU 与当前 CPU 相同。 其它说明：本用例覆盖无需迁移路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_set_hcpu.003.IN.affinity.NEC
+目标 CPU 不在亲和性中。
+构造：
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask mask_obj;
+
+vcpu.cpu_affinity = &mask_obj;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.vmm_scheduler_set_hcpu.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_set_hcpu.hcpu>> = 1U;
+Stub：
+vmm_cpumask_test_cpu.return = FALSE
+Expected：
+return = -5
+注释：
+测试目的：验证目标 CPU 不在 VCPU 亲和性掩码中时，接口返回无效错误。 用例类别：接口测试 预置条件：VCPU 当前 CPU 为 0，目标 CPU 为 1，CPU 亲和性测试返回 false。 测试步骤： step1、构造 VCPU 和亲和性掩码。 step2、设置 VCPU 当前所属 CPU 为 0。 step3、设置目标 CPU 为 1。 step4、设置亲和性测试接口返回 false。 step5、调用 vmm_scheduler_set_hcpu。 step6、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_set_hcpu 等价列表：目标 CPU 不满足亲和性。 其它说明：本用例覆盖亲和性检查失败路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_scheduler_set_hcpu.004.R
+非 READY/RUNNING 状态，直接改 packed state。
+构造：
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask mask_obj;
+
+vcpu.cpu_affinity = &mask_obj;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_PAUSED));
+
+<<vmm_scheduler.vmm_scheduler_set_hcpu.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_set_hcpu.hcpu>> = 1U;
+Stub：
+vmm_cpumask_test_cpu.return = TRUE
+Expected：
+return = 0
+vmm_smp_ipi_async_call 未被调用
+注释：
+测试目的：验证 VCPU 状态不是 READY/RUNNING 时，设置 host CPU 直接更新状态中的 CPU 字段，不触发迁移 IPI。 用例类别：基于需求的测试 预置条件：VCPU 当前状态为 PAUSED，目标 CPU 满足亲和性。 测试步骤： step1、构造 VCPU 和亲和性掩码。 step2、设置 VCPU 状态为 PAUSED，当前 CPU 为 0。 step3、设置目标 CPU 为 1。 step4、设置亲和性测试返回 true。 step5、调用 vmm_scheduler_set_hcpu。 step6、观察返回值和 IPI 调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_set_hcpu 等价列表：非 READY/RUNNING 状态，CPU 亲和性有效。 其它说明：本用例覆盖直接更新 hcpu 路径。 通过准则：函数返回 0，异步 IPI 未被调用。
+ 
+⸻
+ 
+vmm_scheduler_set_hcpu.005.R
+READY 状态，触发迁移 IPI。
+构造：
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask mask_obj;
+
+vcpu.cpu_affinity = &mask_obj;
+vmm_scheduler_set_state_packed(&vcpu, VCPU_STATE_PACK(0, VMM_VCPU_STATE_READY));
+
+<<vmm_scheduler.vmm_scheduler_set_hcpu.vcpu>> = &vcpu;
+<<vmm_scheduler.vmm_scheduler_set_hcpu.hcpu>> = 1U;
+Stub：
+vmm_cpumask_test_cpu.return = TRUE
+vmm_smp_ipi_async_call.return = 0
+Expected：
+return = 0
+vmm_smp_ipi_async_call 被调用一次
+注释：
+测试目的：验证 VCPU 状态为 READY 且目标 CPU 满足亲和性时，接口触发异步迁移 IPI。 用例类别：基于需求的测试 预置条件：VCPU 当前状态为 READY，当前 CPU 为 0，目标 CPU 为 1，亲和性检查成功。 测试步骤： step1、构造 VCPU 和亲和性掩码。 step2、设置 VCPU 状态为 READY，所属 CPU 为 0。 step3、设置目标 CPU 为 1。 step4、设置亲和性测试返回 true。 step5、调用 vmm_scheduler_set_hcpu。 step6、观察返回值和异步 IPI 调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_set_hcpu 等价列表：READY 状态，目标 CPU 合法，需要迁移。 其它说明：本用例覆盖 READY/RUNNING 状态下的迁移路径。 通过准则：函数返回 0，异步 IPI 被调用一次。
+ 
+⸻
+ 
+二十三、
+vmm_scheduler_irq_enter
+vmm_scheduler_irq_enter.001.R
+构造：
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+*VCAST_SCHED0_IRQ_REGS = NULL;
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = TRUE;
+
+<<vmm_scheduler.vmm_scheduler_irq_enter.regs>> = &regs_obj;
+<<vmm_scheduler.vmm_scheduler_irq_enter.vcpu_context>> = TRUE;
+Stub：
+vmm_timer_timestamp.return = 1000
+Expected：
+*VCAST_SCHED0_IRQ_ENTER_TSTAMP = 1000
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE
+*VCAST_SCHED0_IRQ_REGS = &regs_obj
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = FALSE
+注释：
+测试目的：验证以 VCPU 上下文进入 IRQ 时，调度器记录 IRQ 时间戳、保存寄存器指针并清除 yield 标志。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，定时器时间戳接口返回 1000。 测试步骤： step1、构造有效寄存器对象。 step2、设置 vcpu_context 为 true。 step3、设置定时器时间戳接口返回 1000。 step4、调用 vmm_scheduler_irq_enter。 step5、观察调度器 IRQ 上下文字段。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_enter 等价列表：以 VCPU 上下文进入 IRQ。 其它说明：本用例覆盖 vcpu_context == TRUE 路径。 通过准则：IRQ 进入时间戳为 1000，IRQ 上下文标志为 FALSE，IRQ 寄存器指针为输入寄存器对象，yield 标志为 FALSE。
+ 
+⸻
+ 
+vmm_scheduler_irq_enter.002.R
+构造：
+static arch_regs_t regs_obj;
+
+<<vmm_scheduler.vmm_scheduler_irq_enter.regs>> = &regs_obj;
+<<vmm_scheduler.vmm_scheduler_irq_enter.vcpu_context>> = FALSE;
+Stub：
+vmm_timer_timestamp.return = 2000
+Expected：
+*VCAST_SCHED0_IRQ_ENTER_TSTAMP = 2000
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE
+*VCAST_SCHED0_IRQ_REGS = &regs_obj
+注释：
+测试目的：验证非 VCPU 上下文进入 IRQ 时，调度器将 IRQ 上下文标志置为 true。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，定时器时间戳接口返回 2000。 测试步骤： step1、构造有效寄存器对象。 step2、设置 vcpu_context 为 false。 step3、设置定时器时间戳接口返回 2000。 step4、调用 vmm_scheduler_irq_enter。 step5、观察调度器 IRQ 上下文字段。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_enter 等价列表：以非 VCPU 上下文进入 IRQ。 其它说明：本用例覆盖 vcpu_context == FALSE 路径。 通过准则：IRQ 进入时间戳为 2000，IRQ 上下文标志为 TRUE，IRQ 寄存器指针为输入寄存器对象。
+ 
+⸻
+ 
+二十四、
+vmm_scheduler_irq_regs
+vmm_scheduler_irq_regs.001.R
+构造：
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_IRQ_REGS = &regs_obj;
+Expected：
+return = &regs_obj
+注释：
+测试目的：验证 IRQ 寄存器查询接口能够返回当前调度器保存的 IRQ 寄存器指针。 用例类别：基于需求的测试 预置条件：将调度器中的 IRQ 寄存器指针设置为有效寄存器对象。 测试步骤： step1、构造有效寄存器对象。 step2、设置调度器 IRQ 寄存器指针为该对象。 step3、调用 vmm_scheduler_irq_regs。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_regs 等价列表：IRQ 寄存器指针有效。 其它说明：本用例覆盖 IRQ 寄存器查询路径。 通过准则：函数返回预置的寄存器对象指针。
+ 
+⸻
+ 
+二十五、
+vmm_scheduler_irq_exit
+vmm_scheduler_irq_exit.001.R
+当前 VCPU 为空。
+构造：
+static arch_regs_t regs_obj;
+
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+
+<<vmm_scheduler.vmm_scheduler_irq_exit.regs>> = &regs_obj;
+Expected：
+函数直接返回
+vmm_vcpu_irq_process 未被调用
+注释：
+测试目的：验证 IRQ 退出时当前 VCPU 为空，函数直接返回。 用例类别：基于需求的测试 预置条件：调度器当前 VCPU 指针为空。 测试步骤： step1、构造寄存器对象。 step2、设置当前 VCPU 指针为空。 step3、调用 vmm_scheduler_irq_exit。 step4、观察 IRQ 处理接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_exit 等价列表：当前 VCPU 不存在。 其它说明：本用例覆盖函数开头直接返回路径。 通过准则：函数正常返回，IRQ 处理接口未被调用。
+ 
+⸻
+ 
+vmm_scheduler_irq_exit.002.R
+当前 VCPU 非 RUNNING，触发 switch；IRQ context true。
+构造：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs_obj;
+static arch_regs_t irq_regs_obj;
+
+vcpu.is_normal = FALSE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_REGS = &irq_regs_obj;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+*VCAST_SCHED0_IRQ_ENTER_TSTAMP = 1000U;
+*VCAST_SCHED0_IRQ_PROCESS_NS = 10U;
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = FALSE;
+
+<<vmm_scheduler.vmm_scheduler_irq_exit.regs>> = &regs_obj;
+Stub：
+vmm_manager_vcpu_get_state.return = VMM_VCPU_STATE_PAUSED
+vmm_timer_timestamp.return = 1200
+SBF Stub：
+vmm_scheduler_switch.return = void
+Expected：
+*VCAST_SCHED0_IRQ_PROCESS_NS = 210
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE
+*VCAST_SCHED0_IRQ_REGS = NULL
+vmm_scheduler_switch 被调用一次
+注释：
+测试目的：验证 IRQ 退出时当前 VCPU 非 RUNNING，函数先处理 IRQ 并触发调度切换，然后累计 IRQ 处理时间。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效但状态不是 RUNNING，调度器处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU、IRQ 寄存器和输入寄存器对象。 step2、设置当前 VCPU 状态查询返回 PAUSED。 step3、设置 IRQ 上下文标志为 true。 step4、设置 IRQ 进入时间戳为 1000，当前时间戳为 1200。 step5、调用 vmm_scheduler_irq_exit。 step6、观察 IRQ 处理时间、IRQ 上下文标志、IRQ 寄存器指针和调度切换调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_exit 等价列表：当前 VCPU 非 RUNNING，IRQ 上下文退出。 其它说明：本用例覆盖状态非 RUNNING 时触发调度切换路径和 IRQ 时间累计路径。 通过准则：调度切换被调用一次，IRQ 处理时间由 10 更新为 210，IRQ 上下文标志清零，IRQ 寄存器指针清空。
+ 
+⸻
+ 
+vmm_scheduler_irq_exit.003.R
+当前 RUNNING，但 yield_on_irq_exit = true；非 IRQ context，normal VCPU。
+构造：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs_obj;
+static arch_regs_t irq_regs_obj;
+
+vcpu.is_normal = TRUE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_REGS = &irq_regs_obj;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+*VCAST_SCHED0_IRQ_ENTER_TSTAMP = 1000U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 20U;
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = TRUE;
+
+<<vmm_scheduler.vmm_scheduler_irq_exit.regs>> = &regs_obj;
+Stub：
+vmm_manager_vcpu_get_state.return = VMM_VCPU_STATE_RUNNING
+vmm_timer_timestamp.return = 1300
+SBF Stub：
+vmm_scheduler_switch.return = void
+vmm_scheduler_vcpu_halt_trap_toggle.return = void
+Expected：
+*VCAST_SCHED0_EXP_PROCESS_NS = 320
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE
+*VCAST_SCHED0_IRQ_REGS = NULL
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = FALSE
+vmm_scheduler_switch 被调用一次
+vmm_scheduler_vcpu_halt_trap_toggle 被调用一次
+注释：
+测试目的：验证 IRQ 退出时当前 VCPU 仍为 RUNNING 但设置了 yield_on_irq_exit，函数触发调度切换、清除 yield 标志，并在 normal VCPU 上执行 halt trap 切换。 用例类别：基于需求的测试 预置条件：当前 VCPU 为 normal，状态为 RUNNING，yield_on_irq_exit 为 true，调度器不处于 IRQ 上下文。 测试步骤： step1、构造 normal 当前 VCPU 和寄存器对象。 step2、设置当前 VCPU 状态为 RUNNING。 step3、设置 yield_on_irq_exit 为 true。 step4、设置异常进入时间戳和当前时间戳。 step5、调用 vmm_scheduler_irq_exit。 step6、观察异常处理时间、yield 标志、调度切换和 halt trap 切换调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_exit 等价列表：RUNNING 状态但 IRQ 退出需要 yield。 其它说明：本用例覆盖 yield_on_irq_exit 路径、异常处理时间累计路径和 normal VCPU halt trap toggle 路径。 通过准则：异常处理时间更新为 320，yield 标志清零，调度切换和 halt trap toggle 均被调用。
+ 
+⸻
+ 
+vmm_scheduler_irq_exit.004.R
+当前 RUNNING，无 yield，不切换；orphan VCPU。
+构造：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs_obj;
+
+vcpu.is_normal = FALSE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+*VCAST_SCHED0_IRQ_ENTER_TSTAMP = 1000U;
+*VCAST_SCHED0_EXP_PROCESS_NS = 0U;
+*VCAST_SCHED0_YIELD_ON_IRQ_EXIT = FALSE;
+
+<<vmm_scheduler.vmm_scheduler_irq_exit.regs>> = &regs_obj;
+Stub：
+vmm_manager_vcpu_get_state.return = VMM_VCPU_STATE_RUNNING
+vmm_timer_timestamp.return = 1100
+Expected：
+*VCAST_SCHED0_EXP_PROCESS_NS = 100
+vmm_scheduler_switch 未被调用
+注释：
+测试目的：验证 IRQ 退出时当前 VCPU 为 RUNNING 且无 yield 请求时，函数不执行调度切换，仅进行 IRQ 处理和时间统计。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效且状态为 RUNNING，yield_on_irq_exit 为 false，调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU 和寄存器对象。 step2、设置当前 VCPU 状态为 RUNNING。 step3、设置 yield 标志为 false。 step4、设置进入时间戳为 1000，当前时间戳为 1100。 step5、调用 vmm_scheduler_irq_exit。 step6、观察异常处理时间和调度切换调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_exit 等价列表：RUNNING 状态，无 yield 请求。 其它说明：本用例覆盖不触发调度切换路径。 通过准则：异常处理时间更新为 100，调度切换未被调用。
+ 
+⸻
+ 
+二十六、
+vmm_scheduler_irq_context
+vmm_scheduler_irq_context.001.R
+构造：
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+return = TRUE
+注释：
+测试目的：验证 IRQ 上下文查询接口能够返回调度器当前 IRQ 上下文标志。 用例类别：基于需求的测试 预置条件：将调度器 IRQ 上下文标志设置为 true。 测试步骤： step1、设置调度器 IRQ 上下文标志为 true。 step2、调用 vmm_scheduler_irq_context。 step3、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_context 等价列表：IRQ 上下文标志为 true。 其它说明：本用例覆盖 IRQ 上下文查询路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+二十七、
+vmm_scheduler_orphan_context
+vmm_scheduler_orphan_context.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = FALSE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+return = TRUE
+注释：
+测试目的：验证当前 VCPU 存在、非 normal 且不在 IRQ 上下文时，orphan 上下文查询返回 true。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置其为非 normal，并设置调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 的 normal 标志为 false。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_orphan_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_orphan_context 等价列表：当前 VCPU 有效、非 normal、非 IRQ 上下文。 其它说明：本用例覆盖 orphan 上下文判断为 true 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vmm_scheduler_orphan_context.002.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = TRUE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+return = FALSE
+注释：
+测试目的：验证当前 VCPU 为 normal VCPU 时，orphan 上下文查询返回 false。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置其为 normal，并设置调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 的 normal 标志为 true。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_orphan_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_orphan_context 等价列表：当前 VCPU 有效、normal、非 IRQ 上下文。 其它说明：本用例覆盖 orphan 上下文判断为 false 的路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vmm_scheduler_orphan_context.003.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = FALSE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+return = FALSE
+注释：
+测试目的：验证当前处于 IRQ 上下文时，orphan 上下文查询返回 false。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效且为非 normal，但调度器处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 为非 normal。 step3、设置 IRQ 上下文标志为 true。 step4、调用 vmm_scheduler_orphan_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_orphan_context 等价列表：IRQ 上下文。 其它说明：本用例覆盖 IRQ 上下文导致返回 false 的路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+二十八、
+vmm_scheduler_normal_context
+vmm_scheduler_normal_context.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = TRUE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+return = TRUE
+注释：
+测试目的：验证当前 VCPU 为 normal 且不在 IRQ 上下文时，normal 上下文查询返回 true。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置其为 normal，并设置调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 的 normal 标志为 true。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_normal_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_normal_context 等价列表：当前 VCPU 有效、normal、非 IRQ 上下文。 其它说明：本用例覆盖 normal 上下文判断为 true 的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vmm_scheduler_normal_context.002.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = FALSE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+return = FALSE
+注释：
+测试目的：验证当前 VCPU 为 orphan VCPU 时，normal 上下文查询返回 false。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，设置其为非 normal，并设置调度器不处于 IRQ 上下文。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 的 normal 标志为 false。 step3、设置调度器 IRQ 上下文标志为 false。 step4、调用 vmm_scheduler_normal_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_normal_context 等价列表：当前 VCPU 有效、非 normal、非 IRQ 上下文。 其它说明：本用例覆盖 normal 上下文判断为 false 的路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vmm_scheduler_normal_context.003.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.is_normal = TRUE;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+return = FALSE
+注释：
+测试目的：验证调度器处于 IRQ 上下文时，normal 上下文查询返回 false。 用例类别：基于需求的测试 预置条件：当前 VCPU 为 normal，但 IRQ 上下文标志为 true。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 为 normal。 step3、设置 IRQ 上下文标志为 true。 step4、调用 vmm_scheduler_normal_context。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_normal_context 等价列表：IRQ 上下文。 其它说明：本用例覆盖 IRQ 上下文导致返回 false 的路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+二十九、
+vmm_scheduler_current_ready_vcpu_count
+vmm_scheduler_current_ready_vcpu_count.001.R
+构造
+无入参。
+Stub：
+vmm_smp_processor_id.return = 0
+vmm_scheduler_ready_count.return 按调用序列返回：1, 1, 1, ... 每个优先级均返回 1
+Expected：
+return = VMM_VCPU_MAX_PRIORITY - VMM_VCPU_MIN_PRIORITY + 1
+注释：
+测试目的：验证当前 CPU 的 ready VCPU 总数为各优先级 ready 数量之和。 用例类别：基于需求的测试 预置条件：当前 CPU 为 0，各优先级 ready 数量接口均返回 1。 测试步骤： step1、设置当前 CPU 为 0。 step2、设置每个优先级的 vmm_scheduler_ready_count 返回 1。 step3、调用 vmm_scheduler_current_ready_vcpu_count。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_ready_vcpu_count 等价列表：所有优先级均有 1 个 ready VCPU。 其它说明：本用例覆盖优先级循环累加路径。 通过准则：函数返回 VMM_VCPU_MAX_PRIORITY - VMM_VCPU_MIN_PRIORITY + 1 的实际数值。
+ 
+⸻
+ 
+三十、
+vmm_scheduler_ready_count
+vmm_scheduler_ready_count.001.IN.hcpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_ready_count.hcpu>> = CONFIG_CPU_COUNT;
+<<vmm_scheduler.vmm_scheduler_ready_count.priority>> = VMM_VCPU_MIN_PRIORITY;
+Expected：
+return = 0
+注释：
+测试目的：验证 CPU 编号无效时，ready VCPU 数量查询接口返回 0。 用例类别：接口测试 预置条件：设置 CPU 编号为 CONFIG_CPU_COUNT。 测试步骤： step1、设置 CPU 编号为无效边界值。 step2、设置优先级为有效值。 step3、调用 vmm_scheduler_ready_count。 step4、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_ready_count 等价列表：CPU 编号无效。 其它说明：本用例覆盖 CPU 编号无效路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_ready_count.002.IN.cpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_ready_count.hcpu>> = 0U;
+<<vmm_scheduler.vmm_scheduler_ready_count.priority>> = VMM_VCPU_MIN_PRIORITY;
+Stub：
+vmm_cpu_online.return = FALSE
+Expected：
+return = 0
+注释：
+测试目的：验证 CPU 不在线时，ready VCPU 数量查询接口返回 0。 用例类别：接口测试 预置条件：CPU 编号有效但在线查询返回 false。 测试步骤： step1、设置 CPU 编号为 0。 step2、设置 CPU 在线查询返回 false。 step3、调用 vmm_scheduler_ready_count。 step4、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_ready_count 等价列表：CPU 不在线。 其它说明：本用例覆盖 CPU 不在线路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_ready_count.003.IN.priority.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_ready_count.hcpu>> = 0U;
+<<vmm_scheduler.vmm_scheduler_ready_count.priority>> = 255U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+return = 0
+注释：
+测试目的：验证优先级超出最大范围时，ready VCPU 数量查询接口返回 0。 用例类别：接口测试 预置条件：CPU 编号有效且在线，优先级设置为 255。 测试步骤： step1、设置 CPU 编号为 0。 step2、设置 CPU 在线查询接口返回 true。 step3、设置优先级为 255。 step4、调用 vmm_scheduler_ready_count。 step5、观察函数返回值。 用例来源：无效等价类 追溯ID：vmm_scheduler_ready_count 等价列表：优先级超出有效范围。 其它说明：本用例覆盖优先级无效路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_scheduler_ready_count.004.R
+构造：
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+<<vmm_scheduler.vmm_scheduler_ready_count.hcpu>> = 0U;
+<<vmm_scheduler.vmm_scheduler_ready_count.priority>> = VMM_VCPU_MIN_PRIORITY;
+Stub：
+vmm_cpu_online.return = TRUE
+vmm_schedalgo_rq_length.return = 4
+Expected：
+return = 4
+注释：
+测试目的：验证 CPU 在线且优先级有效时，ready VCPU 数量查询接口返回对应 ready queue 长度。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，优先级有效，调度算法队列长度接口返回 4。 测试步骤： step1、设置 CPU 编号为 0。 step2、设置 CPU 在线查询接口返回 true。 step3、设置优先级为有效最小优先级。 step4、设置调度算法队列长度接口返回 4。 step5、调用 vmm_scheduler_ready_count。 step6、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_ready_count 等价列表：CPU 在线，优先级有效。 其它说明：本用例覆盖正常 ready queue 长度查询路径。 通过准则：函数返回 4。
+ 
+⸻
+ 
+三十一、
+scheduler_sample_event
+scheduler_sample_event.001.R
+构造：
+static struct vmm_timer_event ev_obj;
+static struct vmm_vcpu idle_vcpu;
+
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_IRQ_PROCESS_NS = 1000U;
+*VCAST_SCHED0_SAMPLE_IDLE_LAST_NS = 100U;
+*VCAST_SCHED0_SAMPLE_IRQ_LAST_NS = 200U;
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 5000U;
+
+<<vmm_scheduler.scheduler_sample_event.ev>> = &ev_obj;
+Stub：
+vmm_scheduler_stats.return = 0，并输出 running_nsecs 参数对应 idle_ns = 800
+vmm_timer_event_start.return = 0
+Expected：
+*VCAST_SCHED0_SAMPLE_IDLE_NS = 700
+*VCAST_SCHED0_SAMPLE_IDLE_LAST_NS = 800
+*VCAST_SCHED0_SAMPLE_IRQ_NS = 800
+*VCAST_SCHED0_SAMPLE_IRQ_LAST_NS = 1000
+vmm_timer_event_start 被调用一次，period = 5000
+注释：
+测试目的：验证调度器采样事件能够计算本周期 idle 时间和 IRQ 时间增量，并重新启动下一次采样定时器。 用例类别：基于需求的测试 预置条件：设置 idle VCPU、IRQ 累计时间、上一次 idle/IRQ 采样值和采样周期。 测试步骤： step1、构造采样定时器事件和 idle VCPU。 step2、设置当前 idle 时间为 800，上一轮 idle 采样值为 100。 step3、设置当前 IRQ 时间为 1000，上一轮 IRQ 采样值为 200。 step4、设置采样周期为 5000。 step5、调用 scheduler_sample_event。 step6、观察采样增量和定时器重启参数。 用例来源：需求分析、有效等价类 追溯ID：scheduler_sample_event 等价列表：采样事件正常执行。 其它说明：本用例覆盖采样计算和定时器重启路径。 通过准则：idle 增量为 700，IRQ 增量为 800，下一次采样定时器以 5000 启动。
+ 
+⸻
+ 
+三十二、
+vmm_scheduler_get_sample_period
+vmm_scheduler_get_sample_period.001.R
+构造：
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 12345U;
+
+<<vmm_scheduler.vmm_scheduler_get_sample_period.hcpu>> = 0U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+return = 12345
+注释：
+测试目的：验证 CPU 在线时，采样周期查询接口返回调度控制结构中的采样周期。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，采样周期预置为 12345。 测试步骤： step1、设置 CPU0 的采样周期为 12345。 step2、设置 CPU 在线查询接口返回 true。 step3、调用 vmm_scheduler_get_sample_period。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_get_sample_period 等价列表：CPU 在线，采样周期已设置。 其它说明：本用例覆盖正常采样周期读取路径。 通过准则：函数返回 12345。
+ 
+⸻
+ 
+vmm_scheduler_get_sample_period.002.IN.hcpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_get_sample_period.hcpu>> = CONFIG_CPU_COUNT;
+Expected：
+return = CONFIG_IDLE_PERIOD_SECS * 1000000000
+注释：
+测试目的：验证 CPU 编号无效时，采样周期查询接口返回默认采样周期。 用例类别：接口测试 预置条件：CPU 编号设置为无效边界值。 测试步骤： step1、设置 CPU 编号为 CONFIG_CPU_COUNT。 step2、调用 vmm_scheduler_get_sample_period。 step3、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_get_sample_period 等价列表：CPU 编号无效。 其它说明：本用例覆盖无效 CPU 返回默认采样周期路径。 通过准则：函数返回默认采样周期，即 CONFIG_IDLE_PERIOD_SECS * 1000000000。
+ 
+⸻
+ 
+三十三、
+vmm_scheduler_set_sample_period
+vmm_scheduler_set_sample_period.001.R
+构造：
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 1000U;
+
+<<vmm_scheduler.vmm_scheduler_set_sample_period.hcpu>> = 0U;
+<<vmm_scheduler.vmm_scheduler_set_sample_period.period>> = 8888U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 8888
+注释：
+测试目的：验证 CPU 在线时，采样周期设置接口能够更新调度控制结构中的采样周期。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，采样周期初始值为 1000。 测试步骤： step1、设置 CPU0 采样周期初值为 1000。 step2、设置 CPU 在线查询接口返回 true。 step3、调用 vmm_scheduler_set_sample_period，设置周期为 8888。 step4、观察 CPU0 采样周期字段。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_set_sample_period 等价列表：CPU 在线，周期参数有效。 其它说明：本用例覆盖正常设置采样周期路径。 通过准则：函数无返回值，采样周期被更新为 8888。
+ 
+⸻
+ 
+vmm_scheduler_set_sample_period.002.IN.hcpu.NEC
+构造：
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 1000U;
+
+<<vmm_scheduler.vmm_scheduler_set_sample_period.hcpu>> = CONFIG_CPU_COUNT;
+<<vmm_scheduler.vmm_scheduler_set_sample_period.period>> = 8888U;
+Expected：
+*VCAST_SCHED0_SAMPLE_PERIOD_NS = 1000
+注释：
+测试目的：验证 CPU 编号无效时，采样周期设置接口直接返回且不修改已有周期。 用例类别：接口测试 预置条件：CPU 编号设置为无效边界值，CPU0 采样周期初值为 1000。 测试步骤： step1、设置 CPU0 采样周期初值为 1000。 step2、设置目标 CPU 编号为 CONFIG_CPU_COUNT。 step3、调用 vmm_scheduler_set_sample_period。 step4、观察 CPU0 采样周期字段是否保持不变。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_set_sample_period 等价列表：CPU 编号无效。 其它说明：本用例覆盖无效 CPU 直接返回路径。 通过准则：函数无返回值，采样周期保持为 1000。
+ 
+⸻
+ 
+三十四、
+vmm_scheduler_irq_time
+vmm_scheduler_irq_time.001.R
+构造：
+*VCAST_SCHED0_SAMPLE_IRQ_NS = 777U;
+
+<<vmm_scheduler.vmm_scheduler_irq_time.hcpu>> = 0U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+return = 777
+注释：
+测试目的：验证 CPU 在线时，IRQ 时间查询接口返回采样 IRQ 时间。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，采样 IRQ 时间预置为 777。 测试步骤： step1、设置 CPU0 采样 IRQ 时间为 777。 step2、设置 CPU 在线查询接口返回 true。 step3、调用 vmm_scheduler_irq_time。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_irq_time 等价列表：CPU 在线，采样 IRQ 时间有效。 其它说明：本用例覆盖正常 IRQ 时间查询路径。 通过准则：函数返回 777。
+ 
+⸻
+ 
+vmm_scheduler_irq_time.002.IN.hcpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_irq_time.hcpu>> = CONFIG_CPU_COUNT;
+Expected：
+return = 0
+注释：
+测试目的：验证 CPU 编号无效时，IRQ 时间查询接口返回 0。 用例类别：接口测试 预置条件：CPU 编号设置为无效边界值。 测试步骤： step1、设置 CPU 编号为 CONFIG_CPU_COUNT。 step2、调用 vmm_scheduler_irq_time。 step3、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_irq_time 等价列表：CPU 编号无效。 其它说明：本用例覆盖无效 CPU 返回 0 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+三十五、
+vmm_scheduler_idle_time
+vmm_scheduler_idle_time.001.R
+构造：
+*VCAST_SCHED0_SAMPLE_IDLE_NS = 999U;
+
+<<vmm_scheduler.vmm_scheduler_idle_time.hcpu>> = 0U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+return = 999
+注释：
+测试目的：验证 CPU 在线时，idle 时间查询接口返回采样 idle 时间。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，采样 idle 时间预置为 999。 测试步骤： step1、设置 CPU0 采样 idle 时间为 999。 step2、设置 CPU 在线查询接口返回 true。 step3、调用 vmm_scheduler_idle_time。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_idle_time 等价列表：CPU 在线，采样 idle 时间有效。 其它说明：本用例覆盖正常 idle 时间查询路径。 通过准则：函数返回 999。
+ 
+⸻
+ 
+vmm_scheduler_idle_time.002.IN.hcpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_idle_time.hcpu>> = CONFIG_CPU_COUNT;
+Expected：
+return = 0
+注释：
+测试目的：验证 CPU 编号无效时，idle 时间查询接口返回 0。 用例类别：接口测试 预置条件：CPU 编号设置为无效边界值。 测试步骤： step1、设置 CPU 编号为 CONFIG_CPU_COUNT。 step2、调用 vmm_scheduler_idle_time。 step3、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_idle_time 等价列表：CPU 编号无效。 其它说明：本用例覆盖无效 CPU 返回 0 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+三十六、
+vmm_scheduler_idle_vcpu
+vmm_scheduler_idle_vcpu.001.R
+构造：
+static struct vmm_vcpu idle_vcpu;
+
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+
+<<vmm_scheduler.vmm_scheduler_idle_vcpu.hcpu>> = 0U;
+Stub：
+vmm_cpu_online.return = TRUE
+Expected：
+return = &idle_vcpu
+注释：
+测试目的：验证 CPU 在线时，idle VCPU 查询接口返回指定 CPU 的 idle VCPU 指针。 用例类别：基于需求的测试 预置条件：CPU 编号有效且在线，CPU0 的 idle VCPU 指针已设置。 测试步骤： step1、构造 idle VCPU。 step2、设置 CPU0 的 idle VCPU 指针。 step3、设置 CPU 在线查询接口返回 true。 step4、调用 vmm_scheduler_idle_vcpu。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_idle_vcpu 等价列表：CPU 在线，idle VCPU 指针有效。 其它说明：本用例覆盖正常 idle VCPU 查询路径。 通过准则：函数返回预置的 idle VCPU 指针。
+ 
+⸻
+ 
+vmm_scheduler_idle_vcpu.002.IN.hcpu.NEC
+构造：
+<<vmm_scheduler.vmm_scheduler_idle_vcpu.hcpu>> = CONFIG_CPU_COUNT;
+Expected：
+return = NULL
+注释：
+测试目的：验证 CPU 编号无效时，idle VCPU 查询接口返回空指针。 用例类别：接口测试 预置条件：CPU 编号设置为无效边界值。 测试步骤： step1、设置 CPU 编号为 CONFIG_CPU_COUNT。 step2、调用 vmm_scheduler_idle_vcpu。 step3、观察函数返回值。 用例来源：无效等价类、边界值分析 追溯ID：vmm_scheduler_idle_vcpu 等价列表：CPU 编号无效。 其它说明：本用例覆盖无效 CPU 返回空指针路径。 通过准则：函数返回空指针。
+ 
+⸻
+ 
+三十七、
+vmm_scheduler_current_vcpu
+vmm_scheduler_current_vcpu.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+Expected：
+return = &current_vcpu
+注释：
+测试目的：验证当前 VCPU 查询接口能够返回调度器当前 VCPU 指针。 用例类别：基于需求的测试 预置条件：将调度控制结构中的当前 VCPU 设置为有效对象。 测试步骤： step1、构造有效 VCPU。 step2、设置调度控制结构中的当前 VCPU 指针。 step3、调用 vmm_scheduler_current_vcpu。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_vcpu 等价列表：当前 VCPU 指针有效。 其它说明：本用例覆盖当前 VCPU 查询路径。 通过准则：函数返回预置的当前 VCPU 指针。
+ 
+⸻
+ 
+三十八、
+vmm_scheduler_current_priority
+vmm_scheduler_current_priority.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+current_vcpu.priority = 3U;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+Expected：
+return = 3
+注释：
+测试目的：验证当前 VCPU 存在时，当前优先级查询接口返回该 VCPU 的优先级。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，并设置优先级为 3。 测试步骤： step1、构造当前 VCPU。 step2、设置当前 VCPU 优先级为 3。 step3、设置调度器当前 VCPU 指针。 step4、调用 vmm_scheduler_current_priority。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_priority 等价列表：当前 VCPU 有效。 其它说明：本用例覆盖当前 VCPU 存在路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+vmm_scheduler_current_priority.002.R
+构造：
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+Expected：
+return = VMM_VCPU_MAX_PRIORITY 的实际数值
+注释：
+测试目的：验证当前 VCPU 不存在时，当前优先级查询接口返回最大优先级默认值。 用例类别：基于需求的测试 预置条件：设置调度器当前 VCPU 指针为空。 测试步骤： step1、设置调度器当前 VCPU 指针为空。 step2、调用 vmm_scheduler_current_priority。 step3、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_priority 等价列表：当前 VCPU 不存在。 其它说明：本用例覆盖当前 VCPU 为空路径。 通过准则：函数返回 VMM_VCPU_MAX_PRIORITY 的实际数值。
+ 
+⸻
+ 
+三十九、
+vmm_scheduler_current_guest
+vmm_scheduler_current_guest.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+static struct vmm_guest guest_obj;
+
+current_vcpu.guest = &guest_obj;
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+Expected：
+return = &guest_obj
+注释：
+测试目的：验证当前 VCPU 存在时，当前 guest 查询接口返回该 VCPU 关联的 guest。 用例类别：基于需求的测试 预置条件：构造当前 VCPU 和 guest 对象，并建立关联关系。 测试步骤： step1、构造当前 VCPU 和 guest 对象。 step2、设置当前 VCPU 的 guest 指针。 step3、设置调度器当前 VCPU 指针。 step4、调用 vmm_scheduler_current_guest。 step5、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_guest 等价列表：当前 VCPU 有效且 guest 指针有效。 其它说明：本用例覆盖当前 guest 查询路径。 通过准则：函数返回预置的 guest 对象指针。
+ 
+⸻
+ 
+vmm_scheduler_current_guest.002.R
+构造：
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+Expected：
+return = NULL
+注释：
+测试目的：验证当前 VCPU 不存在时，当前 guest 查询接口返回空指针。 用例类别：基于需求的测试 预置条件：设置调度器当前 VCPU 指针为空。 测试步骤： step1、设置调度器当前 VCPU 指针为空。 step2、调用 vmm_scheduler_current_guest。 step3、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_current_guest 等价列表：当前 VCPU 不存在。 其它说明：本用例覆盖当前 VCPU 为空路径。 通过准则：函数返回空指针。
+ 
+⸻
+ 
+四十、
+vmm_scheduler_yield
+vmm_scheduler_yield.001.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Stub：
+vmm_manager_vcpu_get_state.return = VMM_VCPU_STATE_RUNNING
+vmm_scheduler_state_change.return = 0
+Expected：
+vmm_scheduler_state_change 被调用一次，新状态为 VMM_VCPU_STATE_READY
+注释：
+测试目的：验证当前 VCPU 处于运行状态时，yield 接口将其状态切换为 ready。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，调度器不处于 IRQ 上下文，当前 VCPU 状态查询返回 running。 测试步骤： step1、构造当前 VCPU。 step2、设置调度器 IRQ 上下文标志为 false。 step3、设置当前 VCPU 状态查询接口返回 running。 step4、调用 vmm_scheduler_yield。 step5、观察状态切换接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_yield 等价列表：当前 VCPU 存在且处于 running 状态。 其它说明：本用例覆盖正常 yield 路径。 通过准则：函数无返回值，状态切换接口被调用一次，目标状态为 ready。
+ 
+⸻
+ 
+vmm_scheduler_yield.002.R
+构造：
+static struct vmm_vcpu current_vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Stub：
+vmm_manager_vcpu_get_state.return = VMM_VCPU_STATE_READY
+Expected：
+vmm_scheduler_state_change 未被调用
+注释：
+测试目的：验证当前 VCPU 非 running 状态时，yield 接口不执行状态切换。 用例类别：基于需求的测试 预置条件：构造当前 VCPU，调度器不处于 IRQ 上下文，当前 VCPU 状态查询返回 ready。 测试步骤： step1、构造当前 VCPU。 step2、设置调度器 IRQ 上下文标志为 false。 step3、设置当前 VCPU 状态查询接口返回 ready。 step4、调用 vmm_scheduler_yield。 step5、观察状态切换接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_yield 等价列表：当前 VCPU 存在但不是 running 状态。 其它说明：本用例覆盖非 running 时不切换路径。 通过准则：函数无返回值，状态切换接口未被调用。
+ 
+⸻
+ 
+vmm_scheduler_yield.003.IN.context.NEC
+构造：
+static struct vmm_vcpu current_vcpu;
+
+*VCAST_SCHED0_CURRENT_VCPU = &current_vcpu;
+*VCAST_SCHED0_IRQ_CONTEXT = TRUE;
+Expected：
+无普通返回；vmm_panic 测试替身 exit(0)
+注释：
+测试目的：验证 IRQ 上下文中调用 yield 会触发 panic 防御处理。 用例类别：接口测试 预置条件：设置调度器 IRQ 上下文标志为 true，并将 vmm_panic 配置为测试替身。 测试步骤： step1、构造当前 VCPU。 step2、设置调度器 IRQ 上下文标志为 true。 step3、调用 vmm_scheduler_yield。 step4、观察是否进入 vmm_panic 测试替身。 用例来源：无效等价类 追溯ID：vmm_scheduler_yield 等价列表：IRQ 上下文中调用 yield。 其它说明：本用例覆盖 IRQ 上下文防御路径。 通过准则：用例通过 vmm_panic 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+vmm_scheduler_yield.004.IN.vcpu.NEC
+构造：
+*VCAST_SCHED0_CURRENT_VCPU = NULL;
+*VCAST_SCHED0_IRQ_CONTEXT = FALSE;
+Expected：
+无普通返回；vmm_panic 测试替身 exit(0)
+注释：
+测试目的：验证非 IRQ 上下文中当前 VCPU 为空时，yield 会触发 panic 防御处理。 用例类别：接口测试 预置条件：当前 VCPU 指针为空，IRQ 上下文标志为 false，vmm_panic 设置为测试替身。 测试步骤： step1、设置当前 VCPU 指针为空。 step2、设置 IRQ 上下文标志为 false。 step3、调用 vmm_scheduler_yield。 step4、观察是否进入 vmm_panic 测试替身。 用例来源：无效等价类 追溯ID：vmm_scheduler_yield 等价列表：当前 VCPU 指针为空。 其它说明：本用例覆盖空当前 VCPU 防御路径。 通过准则：用例通过 vmm_panic 测试替身执行 exit(0) 结束。
+ 
+⸻
+ 
+四十一、
+idle_orphan
+idle_orphan() 是无限循环，必须使用 vmm_scheduler_yield Stub 控制退出。
+idle_orphan.001.R
+覆盖：
+rq_length == 0
+arch_cpu_wait_for_irq
+vmm_scheduler_yield
+构造：
+static int rq_dummy;
+
+*VCAST_SCHED0_RQ = &rq_dummy;
+
+vcast_idle_orphan_yield_count = 0U;
+Stub：
+vmm_schedalgo_rq_length.return = 0
+vmm_scheduler_yield Stub：第一次调用 exit(0)
+Expected：
+arch_cpu_wait_for_irq 被调用一次
+vmm_scheduler_yield 被调用一次，然后 exit(0)
+注释：
+测试目的：验证 idle orphan 在 ready queue 为空时等待 IRQ，然后调用 yield。 用例类别：基于需求的测试 预置条件：ready queue 指定优先级长度返回 0，vmm_scheduler_yield 使用测试替身控制退出。 测试步骤： step1、设置调度控制结构中的 ready queue 指针。 step2、设置 ready queue 长度查询返回 0。 step3、设置 vmm_scheduler_yield 测试替身在第一次调用时退出。 step4、调用 idle_orphan。 step5、观察 wait-for-irq 和 yield 调用情况。 用例来源：需求分析、有效等价类 追溯ID：idle_orphan 等价列表：idle priority ready queue 为空。 其它说明：该函数为无限循环函数，必须使用测试替身受控退出。 通过准则：arch_cpu_wait_for_irq 被调用一次，vmm_scheduler_yield 被调用一次后用例退出。
+ 
+⸻
+ 
+idle_orphan.002.R
+覆盖：
+rq_length != 0
+不调用 arch_cpu_wait_for_irq
+构造同上。
+Stub：
+vmm_schedalgo_rq_length.return = 1
+vmm_scheduler_yield Stub：第一次调用 exit(0)
+Expected：
+arch_cpu_wait_for_irq 未被调用
+vmm_scheduler_yield 被调用一次
+注释：
+测试目的：验证 idle orphan 在 ready queue 非空时不等待 IRQ，直接调用 yield。 用例类别：基于需求的测试 预置条件：ready queue 长度查询返回 1，vmm_scheduler_yield 使用测试替身控制退出。 测试步骤： step1、设置调度控制结构中的 ready queue 指针。 step2、设置 ready queue 长度查询返回 1。 step3、设置 vmm_scheduler_yield 测试替身在第一次调用时退出。 step4、调用 idle_orphan。 step5、观察 wait-for-irq 和 yield 调用情况。 用例来源：需求分析、有效等价类 追溯ID：idle_orphan 等价列表：idle priority ready queue 非空。 其它说明：该函数为无限循环函数，必须使用测试替身受控退出。 通过准则：arch_cpu_wait_for_irq 未被调用，vmm_scheduler_yield 被调用一次后用例退出。
+ 
+⸻
+ 
+四十二、
+scheduler_startup
+scheduler_startup.001.FI
+rq_create 失败。
+构造：
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+<<vmm_scheduler.scheduler_startup.cpuhp>> = &cpuhp_obj;
+<<vmm_scheduler.scheduler_startup.cpu>> = 0U;
+Stub：
+vmm_schedalgo_rq_create.return = NULL
+Expected：
+return = -1
+注释：
+测试目的：通过故障注入模拟 ready queue 创建失败，验证 scheduler CPU 启动回调返回失败。 用例类别：故障注入测试 预置条件：ready queue 创建接口返回空指针。 测试步骤： step1、构造 CPU 热插拔通知对象。 step2、设置 CPU 编号为 0。 step3、设置 ready queue 创建接口返回空指针。 step4、调用 scheduler_startup。 step5、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：scheduler_startup 等价列表：ready queue 创建失败。 其它说明：本用例覆盖启动阶段 ready queue 创建失败路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+scheduler_startup.002.FI
+idle VCPU 创建失败。
+Stub：
+vmm_schedalgo_rq_create.return = 0x1234
+vmm_manager_vcpu_orphan_create.return = NULL
+Expected：
+return = -1
+注释：
+测试目的：通过故障注入模拟 idle orphan VCPU 创建失败，验证 scheduler CPU 启动回调返回失败。 用例类别：故障注入测试 预置条件：ready queue 创建成功，idle orphan VCPU 创建接口返回空指针。 测试步骤： step1、构造 CPU 热插拔通知对象。 step2、设置 ready queue 创建接口返回有效指针。 step3、设置 idle orphan VCPU 创建接口返回空指针。 step4、调用 scheduler_startup。 step5、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：scheduler_startup 等价列表：idle orphan VCPU 创建失败。 其它说明：本用例覆盖 idle VCPU 创建失败路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+scheduler_startup.003.FI
+kick 失败。
+构造：
+static struct vmm_vcpu idle_vcpu;
+static struct vmm_cpuhp_notify cpuhp_obj;
+
+<<vmm_scheduler.scheduler_startup.cpuhp>> = &cpuhp_obj;
+<<vmm_scheduler.scheduler_startup.cpu>> = 0U;
+Stub：
+vmm_schedalgo_rq_create.return = 0x1234
+vmm_manager_vcpu_orphan_create.return = &idle_vcpu
+vmm_manager_vcpu_kick.return = -2
+Expected：
+return = -2
+注释：
+测试目的：通过故障注入模拟 idle VCPU kick 失败，验证 scheduler CPU 启动回调返回该错误码。 用例类别：故障注入测试 预置条件：ready queue 创建成功，idle VCPU 创建成功，kick 接口返回 -2。 测试步骤： step1、构造 idle VCPU 和 CPU 热插拔通知对象。 step2、设置 ready queue 创建接口返回有效指针。 step3、设置 idle VCPU 创建接口返回 idle VCPU。 step4、设置 kick 接口返回 -2。 step5、调用 scheduler_startup。 step6、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：scheduler_startup 等价列表：idle VCPU kick 失败。 其它说明：本用例覆盖 kick 失败路径。 通过准则：函数返回 -2。
+ 
+⸻
+ 
+scheduler_startup.004.R
+成功。
+Stub：
+vmm_schedalgo_rq_create.return = 0x1234
+vmm_manager_vcpu_orphan_create.return = &idle_vcpu
+vmm_manager_vcpu_kick.return = 0
+vmm_timer_event_start.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_RQ = 0x1234
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu
+注释：
+测试目的：验证 scheduler CPU 启动回调在所有依赖成功时，能够初始化调度控制结构、创建 idle VCPU 并启动定时器事件。 用例类别：基于需求的测试 预置条件：ready queue 创建成功，idle VCPU 创建成功，kick 接口返回成功。 测试步骤： step1、构造 idle VCPU 和 CPU 热插拔通知对象。 step2、设置 ready queue 创建接口返回有效指针。 step3、设置 idle VCPU 创建接口返回 idle VCPU。 step4、设置 kick 接口返回成功。 step5、调用 scheduler_startup。 step6、观察返回值、ready queue 指针、idle VCPU 指针和定时器启动调用情况。 用例来源：需求分析、有效等价类 追溯ID：scheduler_startup 等价列表：scheduler CPU 启动成功。 其它说明：本用例覆盖 CPU 启动成功路径。 通过准则：函数返回 0，ready queue 指针和 idle VCPU 指针均被设置，定时器启动接口被调用。
+ 
+⸻
+ 
+四十三、
+scheduler_teardown
+scheduler_teardown.001.R
+成功。
+构造：
+static struct vmm_cpuhp_notify cpuhp_obj;
+static struct vmm_vcpu idle_vcpu;
+
+*VCAST_SCHED0_IDLE_VCPU = &idle_vcpu;
+*VCAST_SCHED0_RQ = (void *)0x1234;
+
+<<vmm_scheduler.scheduler_teardown.cpuhp>> = &cpuhp_obj;
+<<vmm_scheduler.scheduler_teardown.cpu>> = 0U;
+Stub：
+vmm_timer_event_stop.return = 0
+vmm_manager_vcpu_orphan_destroy.return = 0
+vmm_schedalgo_rq_destroy.return = 0
+Expected：
+return = 0
+*VCAST_SCHED0_IDLE_VCPU = NULL
+*VCAST_SCHED0_RQ = NULL
+注释：
+测试目的：验证 scheduler CPU 关闭回调能够停止定时器、销毁 idle VCPU、销毁 ready queue 并清空调度控制结构。 用例类别：基于需求的测试 预置条件：调度控制结构中 idle VCPU 和 ready queue 指针有效，各销毁接口返回成功。 测试步骤： step1、构造 CPU 热插拔通知对象和 idle VCPU。 step2、设置调度控制结构中的 idle VCPU 和 ready queue 指针。 step3、设置定时器停止、idle VCPU 销毁和 ready queue 销毁接口返回成功。 step4、调用 scheduler_teardown。 step5、观察返回值和调度控制结构字段。 用例来源：需求分析、有效等价类 追溯ID：scheduler_teardown 等价列表：scheduler CPU 关闭成功。 其它说明：本用例覆盖关闭成功路径。 通过准则：函数返回 0，idle VCPU 和 ready queue 指针被清空。
+ 
+⸻
+ 
+scheduler_teardown.002.FI
+rq_destroy 失败。
+Stub：
+vmm_timer_event_stop.return = 0
+vmm_manager_vcpu_orphan_destroy.return = 0
+vmm_schedalgo_rq_destroy.return = -2
+Expected：
+return = -2
+注释：
+测试目的：通过故障注入模拟 ready queue 销毁失败，验证 scheduler CPU 关闭回调返回 ready queue 销毁错误码。 用例类别：故障注入测试 预置条件：idle VCPU 销毁成功，ready queue 销毁接口返回 -2。 测试步骤： step1、设置调度控制结构中的 idle VCPU 和 ready queue 指针。 step2、设置 idle VCPU 销毁接口返回成功。 step3、设置 ready queue 销毁接口返回 -2。 step4、调用 scheduler_teardown。 step5、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：scheduler_teardown 等价列表：ready queue 销毁失败。 其它说明：当前实现最终返回 vmm_schedalgo_rq_destroy 的返回值。 通过准则：函数返回 -2。
+ 
+⸻
+ 
+四十四、
+vmm_scheduler_init
+vmm_scheduler_init.001.R
+Stub：
+vmm_cpuhp_register.return = 0
+Expected：
+return = 0
+注释：
+测试目的：验证调度器初始化接口能够注册 CPU 热插拔通知对象并返回注册结果。 用例类别：基于需求的测试 预置条件：CPU 热插拔注册接口返回成功。 测试步骤： step1、设置 CPU 热插拔注册接口返回 0。 step2、调用 vmm_scheduler_init。 step3、观察函数返回值和注册接口调用情况。 用例来源：需求分析、有效等价类 追溯ID：vmm_scheduler_init 等价列表：CPU 热插拔注册成功。 其它说明：本用例覆盖调度器初始化成功路径。 通过准则：函数返回 0，CPU 热插拔注册接口被调用一次。
+ 
+⸻
+ 
+vmm_scheduler_init.002.FI
+Stub：
+vmm_cpuhp_register.return = -1
+Expected：
+return = -1
+注释：
+测试目的：通过故障注入模拟 CPU 热插拔注册失败，验证调度器初始化接口返回注册接口错误码。 用例类别：故障注入测试 预置条件：CPU 热插拔注册接口返回 -1。 测试步骤： step1、设置 CPU 热插拔注册接口返回 -1。 step2、调用 vmm_scheduler_init。 step3、观察函数返回值。 用例来源：故障注入、无效等价类 追溯ID：vmm_scheduler_init 等价列表：CPU 热插拔注册失败。 其它说明：本用例覆盖初始化阶段外部注册失败路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+四十五、测试回调函数 
+vcast_sched_wq_cleanup_cb
+vcast_sched_wq_cleanup_cb.001.R
+构造：
+static struct vmm_vcpu vcpu;
+
+vcast_sched_wq_cleanup_called = 0U;
+
+<<vmm_scheduler.vcast_sched_wq_cleanup_cb.vcpu>> = &vcpu;
+Expected：
+vcast_sched_wq_cleanup_called = 1
+注释：
+测试目的：验证测试回调函数 vcast_sched_wq_cleanup_cb 被调用后，能够正确记录一次等待队列清理回调触发事件。 用例类别：基于需求的测试 预置条件：使用测试全局变量 vcast_sched_wq_cleanup_called 记录回调触发次数，并在调用前将其清零。 测试步骤： step1、构造有效 VCPU 对象。 step2、将 vcast_sched_wq_cleanup_called 清零。 step3、将 VCPU 对象作为 vcast_sched_wq_cleanup_cb 的入参。 step4、调用 vcast_sched_wq_cleanup_cb。 step5、观察 vcast_sched_wq_cleanup_called 的值。 用例来源：需求分析、有效等价类 追溯ID：vcast_sched_wq_cleanup_cb 等价列表：回调入参为有效 VCPU 对象。 其它说明：该用例仅用于覆盖测试夹具回调函数，不属于产品功能验证目标。 通过准则：函数无返回值，vcast_sched_wq_cleanup_called 由 0 增加为 1。
+ 
+⸻
+ 
+四十六、需要覆盖率排除的 dead code / 条件编译代码
+1. 
+vmm_scheduler_state_change()
+中的明确 dead code
+if (0 && schedp->current_vcpu->is_normal) {
+    schedp->yield_on_irq_exit = TRUE;
+}
+排除说明：
+该分支条件包含常量 0，逻辑恒为 false，属于源码中显式屏蔽的 dead code，无法通过任何输入触发，应从覆盖率中排除。
+ 
+⸻
+ 
+2. 条件编译代码
+以下函数是否需要测试取决于编译开关：
+rq_total_length_except_idle
+vmm_scheduler_vcpu_halt_trap_toggle 的 CONFIG_ADAPTIVE_HALT_TRAP 版本
+trace_ctx_switch
+如果对应宏未定义，这些函数不参与编译，不需要覆盖。
+ 
+⸻
+ 
+3. 
+CONFIG_CMD_LAT_CTX
+下的 
+trace_ctx_switch
+如果定义了 CONFIG_CMD_LAT_CTX，补两条：
+trace_ctx_switch.001.R：trace group 使能，调用 trace
+trace_ctx_switch.002.R：trace group 未使能，不调用 trace
+如果未定义 CONFIG_CMD_LAT_CTX，该函数不编译，不需要测试。
+ 
+⸻
+ 
+四十七、完整用例清单
+rq_dequeue.001.R
+rq_dequeue.002.R
+rq_dequeue.003.FI
+rq_dequeue.004.R
+
+rq_enqueue.001.R
+rq_enqueue.002.R
+rq_enqueue.003.FI
+
+rq_detach.001.R
+rq_detach.002.R
+rq_detach.003.FI
+
+rq_prempt_needed.001.R
+rq_prempt_needed.002.R
+
+rq_length.001.R
+
+rq_total_length_except_idle.001.R
+rq_total_length_except_idle.002.R
+rq_total_length_except_idle.003.IN.rq.NEC
+
+__vmm_scheduler_sync_system_time.001.R
+
+__vmm_scheduler_next1.001.R
+__vmm_scheduler_next1.002.FI
+
+__vmm_scheduler_next2.001.R
+__vmm_scheduler_next2.002.R
+__vmm_scheduler_next2.003.R
+__vmm_scheduler_next2.004.FI
+__vmm_scheduler_next2.005.IN.state.NEC
+
+vmm_scheduler_switch.001.IN.regs.NEC
+vmm_scheduler_switch.002.R
+vmm_scheduler_switch.003.R
+vmm_scheduler_switch.004.R
+vmm_scheduler_switch.005.R
+
+scheduler_timer_event.001.R
+scheduler_timer_event.002.R
+
+vmm_scheduler_preempt_disable.001.R
+vmm_scheduler_preempt_disable.002.R
+vmm_scheduler_preempt_disable.003.R
+
+vmm_scheduler_preempt_enable.001.R
+vmm_scheduler_preempt_enable.002.R
+vmm_scheduler_preempt_enable.003.R
+
+vmm_scheduler_preempt_orphan.001.R
+
+scheduler_ipi_resched.001.R
+scheduler_ipi_resched.002.R
+scheduler_ipi_resched.003.R
+
+vmm_scheduler_force_resched.001.IN.hcpu.NEC
+vmm_scheduler_force_resched.002.IN.hcpu.NEC
+vmm_scheduler_force_resched.003.R
+vmm_scheduler_force_resched.004.R
+vmm_scheduler_force_resched.005.R
+
+scheduler_system_time_sync.001.R
+scheduler_system_time_sync.002.R
+
+vmm_scheduler_stats.001.IN.vcpu.NEC
+vmm_scheduler_stats.002.FI
+vmm_scheduler_stats.003.FI
+vmm_scheduler_stats.004.R
+vmm_scheduler_stats.005.R
+vmm_scheduler_stats.006.R
+vmm_scheduler_stats.007.R
+vmm_scheduler_stats.008.R
+
+vmm_scheduler_state_change.001.IN.vcpu.NEC
+vmm_scheduler_state_change.002.R
+vmm_scheduler_state_change.003.FI
+vmm_scheduler_state_change.004.R
+vmm_scheduler_state_change.005.FI
+vmm_scheduler_state_change.006.FI
+vmm_scheduler_state_change.007.R
+vmm_scheduler_state_change.008.R
+vmm_scheduler_state_change.009.R
+vmm_scheduler_state_change.010.R
+vmm_scheduler_state_change.011.R
+vmm_scheduler_state_change.012.IN.state.NEC
+vmm_scheduler_state_change.013.IN.state.NEC
+vmm_scheduler_state_change.014.R
+vmm_scheduler_state_change.015.R
+vmm_scheduler_state_change.016.R
+vmm_scheduler_state_change.017.R
+vmm_scheduler_state_change.018.R
+vmm_scheduler_state_change.019.IN.state.NEC
+vmm_scheduler_state_change.020.R
+vmm_scheduler_state_change.021.R
+vmm_scheduler_state_change.022.R
+vmm_scheduler_state_change.023.R
+vmm_scheduler_state_change.024.IN.state.NEC
+
+scheduler_ipi_migrate_vcpu.001.R
+scheduler_ipi_migrate_vcpu.002.R
+scheduler_ipi_migrate_vcpu.003.R
+scheduler_ipi_migrate_vcpu.004.R
+
+vmm_scheduler_set_hcpu.001.IN.vcpu.NEC
+vmm_scheduler_set_hcpu.002.R
+vmm_scheduler_set_hcpu.003.IN.affinity.NEC
+vmm_scheduler_set_hcpu.004.R
+vmm_scheduler_set_hcpu.005.R
+
+vmm_scheduler_irq_enter.001.R
+vmm_scheduler_irq_enter.002.R
+
+vmm_scheduler_irq_regs.001.R
+
+vmm_scheduler_irq_exit.001.R
+vmm_scheduler_irq_exit.002.R
+vmm_scheduler_irq_exit.003.R
+vmm_scheduler_irq_exit.004.R
+
+vmm_scheduler_irq_context.001.R
+
+vmm_scheduler_orphan_context.001.R
+vmm_scheduler_orphan_context.002.R
+vmm_scheduler_orphan_context.003.R
+
+vmm_scheduler_normal_context.001.R
+vmm_scheduler_normal_context.002.R
+vmm_scheduler_normal_context.003.R
+
+vmm_scheduler_current_ready_vcpu_count.001.R
+
+vmm_scheduler_ready_count.001.IN.hcpu.NEC
+vmm_scheduler_ready_count.002.IN.cpu.NEC
+vmm_scheduler_ready_count.003.IN.priority.NEC
+vmm_scheduler_ready_count.004.R
+
+scheduler_sample_event.001.R
+
+vmm_scheduler_get_sample_period.001.R
+vmm_scheduler_get_sample_period.002.IN.hcpu.NEC
+
+vmm_scheduler_set_sample_period.001.R
+vmm_scheduler_set_sample_period.002.IN.hcpu.NEC
+
+vmm_scheduler_irq_time.001.R
+vmm_scheduler_irq_time.002.IN.hcpu.NEC
+
+vmm_scheduler_idle_time.001.R
+vmm_scheduler_idle_time.002.IN.hcpu.NEC
+
+vmm_scheduler_idle_vcpu.001.R
+vmm_scheduler_idle_vcpu.002.IN.hcpu.NEC
+
+vmm_scheduler_current_vcpu.001.R
+
+vmm_scheduler_current_priority.001.R
+vmm_scheduler_current_priority.002.R
+
+vmm_scheduler_current_guest.001.R
+vmm_scheduler_current_guest.002.R
+
+vmm_scheduler_yield.001.R
+vmm_scheduler_yield.002.R
+vmm_scheduler_yield.003.IN.context.NEC
+vmm_scheduler_yield.004.IN.vcpu.NEC
+
+idle_orphan.001.R
+idle_orphan.002.R
+
+scheduler_startup.001.FI
+scheduler_startup.002.FI
+scheduler_startup.003.FI
+scheduler_startup.004.R
+
+scheduler_teardown.001.R
+scheduler_teardown.002.FI
+
+vmm_scheduler_init.001.R
+vmm_scheduler_init.002.FI
+
+vcast_sched_wq_cleanup_cb.001.R
+这套用例按函数逐一补齐了之前漏掉的函数，并修正了 rq_dequeue 输出指针地址不一致导致的覆盖问题。真正需要排除的是 vmm_scheduler_state_change() 中 0 && ... 的 dead code，以及未启用配置宏时不参与编译的条件编译函数。
