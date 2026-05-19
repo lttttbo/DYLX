@@ -1,0 +1,1145 @@
+下面给一版 emulate_arm.c 的单元测试设计基线。这个文件函数非常多，直接逐条硬编码会非常难维护，所以建议采用：
+	1.	静态函数直接测：arm_inst_ldrh_i、arm_inst_str_i 等 static 函数都单独作为 UUT 测；
+	2.	分组函数用 SBF 隔离派发逻辑：arm_instgrp_dataproc、arm_instgrp_ldrstr、arm_instgrp_coproc 等主要验证派发分支，不重复验证子函数内部；
+	3.	少量 User Code 变量 + 通用 Stub：寄存器读写、内存读写、coproc 回调都用全局变量控制，避免每条用例重复写大量代码；
+	4.	无法到达的 dead code 明确排除。
+ 
+⸻
+ 
+一、公共 User Code
+1. Unit Prefix User Code
+放到：
+Environment User Code -> Unit Prefix User Code -> emulate_arm
+#include <string.h>
+#include <vmm_types.h>
+#include <vmm_error.h>
+#include <arch_regs.h>
+#include <cpu_defines.h>
+#include <cpu_vcpu_coproc.h>
+#include <emulate_arm.h>
+
+/*
+ * 用于构造 instruction bit field。
+ * 注意：只用于 32 bit 指令字段，避免 1U << 32。
+ */
+#define VCAST_ARM_FIELD_MASK(end, start) \
+    ((u32)((((u64)1ULL << ((end) - (start) + 1U)) - 1ULL) << (start)))
+
+#define VCAST_ARM_SET_FIELD(inst, end, start, val)             \
+    do {                                                       \
+        (inst) &= ~VCAST_ARM_FIELD_MASK((end), (start));       \
+        (inst) |= (((u32)(val) << (start)) &                   \
+                   VCAST_ARM_FIELD_MASK((end), (start)));      \
+    } while (0)
+
+#define VCAST_ARM_SET_BIT(inst, bit, val)                      \
+    do {                                                       \
+        if (val) {                                             \
+            (inst) |= ((u32)1U << (bit));                      \
+        } else {                                               \
+            (inst) &= ~((u32)1U << (bit));                     \
+        }                                                      \
+    } while (0)
+
+#define VCAST_ARM_SET_COND(inst, cond)                         \
+    do {                                                       \
+        (inst) &= ~ARM_INST_COND_MASK;                         \
+        (inst) |= (((u32)(cond) << ARM_INST_COND_SHIFT) &      \
+                   ARM_INST_COND_MASK);                        \
+    } while (0)
+
+#define VCAST_COND_EQ     0x0U
+#define VCAST_COND_NE     0x1U
+#define VCAST_COND_AL     0xEU
+#define VCAST_COND_NV     0xFU
+
+#define VCAST_ARM_INIT_REGS(regs_ptr, pc_value, cpsr_value)    \
+    do {                                                       \
+        memset((regs_ptr), 0, sizeof(*(regs_ptr)));            \
+        arm_pc((regs_ptr)) = (pc_value);                       \
+        arm_cpsr((regs_ptr)) = (cpsr_value);                   \
+    } while (0)
+
+#define VCAST_ARM_RESET_ARRAYS()                               \
+    do {                                                       \
+        memset(vcast_reg_read_value, 0, sizeof(vcast_reg_read_value)); \
+        memset(vcast_reg_write_value, 0, sizeof(vcast_reg_write_value)); \
+        memset(vcast_reg_write_called, 0, sizeof(vcast_reg_write_called)); \
+        memset(vcast_mem_read_value_seq, 0, sizeof(vcast_mem_read_value_seq)); \
+        memset(vcast_mem_read_rc_seq, 0, sizeof(vcast_mem_read_rc_seq)); \
+        memset(vcast_mem_write_rc_seq, 0, sizeof(vcast_mem_write_rc_seq)); \
+        memset(vcast_mem_write_addr_seq, 0, sizeof(vcast_mem_write_addr_seq)); \
+        memset(vcast_mem_write_size_seq, 0, sizeof(vcast_mem_write_size_seq)); \
+        memset(vcast_mem_write_value_seq, 0, sizeof(vcast_mem_write_value_seq)); \
+        vcast_mem_read_call = 0U;                              \
+        vcast_mem_write_call = 0U;                             \
+        vcast_irq_assert_called = 0U;                          \
+        vcast_irq_assert_irq = 0U;                             \
+        vcast_cpu_halt_called = 0U;                            \
+    } while (0)
+ 
+⸻
+ 
+2. User Globals
+放到：
+Environment User Code -> User Globals
+struct vmm_vcpu vcast_arm_vcpu;
+arch_regs_t vcast_arm_regs;
+
+/* register read/write */
+u32 vcast_reg_read_value[16];
+u32 vcast_reg_write_value[16];
+u32 vcast_reg_write_called[16];
+
+/* memory read */
+u32 vcast_mem_read_value_seq[8];
+int vcast_mem_read_rc_seq[8];
+u32 vcast_mem_read_call;
+
+/* memory write */
+int vcast_mem_write_rc_seq[8];
+u32 vcast_mem_write_addr_seq[8];
+u32 vcast_mem_write_size_seq[8];
+u32 vcast_mem_write_value_seq[8];
+u32 vcast_mem_write_call;
+
+/* exclusive memory */
+u32 vcast_mem_readex_value;
+int vcast_mem_readex_rc;
+u32 vcast_mem_writeex_value;
+int vcast_mem_writeex_rc;
+
+/* irq/halt */
+u32 vcast_irq_assert_called;
+u32 vcast_irq_assert_irq;
+u32 vcast_cpu_halt_called;
+
+/* common out variables */
+u32 vcast_shift_t;
+u32 vcast_cout;
+u32 vcast_oout;
+
+/* coproc control */
+struct cpu_vcpu_coproc vcast_cp;
+u32 vcast_cp_accept_ret;
+u32 vcast_cp_done_after;
+u32 vcast_cp_read_value_seq[8];
+u32 vcast_cp_write_value_seq[8];
+u32 vcast_cp_write_call;
+u32 vcast_cp_read_call;
+u32 vcast_cp_done_call;
+u32 vcast_cp_data_process_ret;
+u32 vcast_cp_read_ret;
+u32 vcast_cp_write_ret;
+u32 vcast_cp_read2_ret;
+u32 vcast_cp_write2_ret;
+u32 vcast_cp_read2_data0;
+u32 vcast_cp_read2_data1;
+ 
+⸻
+ 
+3. Test Case Init
+memset(&vcast_arm_vcpu, 0, sizeof(vcast_arm_vcpu));
+VCAST_ARM_INIT_REGS(&vcast_arm_regs, 0x1000U, 0U);
+VCAST_ARM_RESET_ARRAYS();
+
+memset(&vcast_cp, 0, sizeof(vcast_cp));
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+memset(vcast_cp_read_value_seq, 0, sizeof(vcast_cp_read_value_seq));
+memset(vcast_cp_write_value_seq, 0, sizeof(vcast_cp_write_value_seq));
+vcast_cp_write_call = 0U;
+vcast_cp_read_call = 0U;
+vcast_cp_done_call = 0U;
+vcast_cp_data_process_ret = 1U;
+vcast_cp_read_ret = 1U;
+vcast_cp_write_ret = 1U;
+vcast_cp_read2_ret = 1U;
+vcast_cp_write2_ret = 1U;
+vcast_cp_read2_data0 = 0x11111111U;
+vcast_cp_read2_data1 = 0x22222222U;
+
+vcast_arm_vcpu.is_normal = TRUE;
+ 
+⸻
+ 
+二、公共 Stub User Code
+1. 
+vmm_printf
+return 0;
+ 
+⸻
+ 
+2. 
+cpu_vcpu_halt
+extern u32 vcast_cpu_halt_called;
+
+vcast_cpu_halt_called++;
+
+return;
+ 
+⸻
+ 
+3. 
+vmm_vcpu_irq_assert
+extern u32 vcast_irq_assert_called;
+extern u32 vcast_irq_assert_irq;
+
+vcast_irq_assert_called++;
+vcast_irq_assert_irq = irq;
+
+return;
+如果 VectorCAST 参数名不是 irq，用实际参数名替换。
+ 
+⸻
+ 
+4. 
+cpu_vcpu_reg_read
+extern u32 vcast_reg_read_value[16];
+
+if (reg > 15U) {
+    return 0U;
+}
+
+return vcast_reg_read_value[reg];
+ 
+⸻
+ 
+5. 
+cpu_vcpu_reg_write
+extern u32 vcast_reg_write_value[16];
+extern u32 vcast_reg_write_called[16];
+
+if (reg <= 15U) {
+    vcast_reg_write_called[reg]++;
+    vcast_reg_write_value[reg] = data;
+}
+
+return;
+如果参数名不是 reg/data，按 stub 生成代码替换。
+ 
+⸻
+ 
+6. 
+cpu_vcpu_mem_read
+extern u32 vcast_mem_read_value_seq[8];
+extern int vcast_mem_read_rc_seq[8];
+extern u32 vcast_mem_read_call;
+
+u32 idx = vcast_mem_read_call;
+u32 value;
+
+if (idx > 7U) {
+    idx = 7U;
+}
+
+value = vcast_mem_read_value_seq[idx];
+vcast_mem_read_call++;
+
+if (dst != (void *)0) {
+    if (len == 1U) {
+        *((u8 *)dst) = (u8)value;
+    } else if (len == 2U) {
+        *((u16 *)dst) = (u16)value;
+    } else {
+        *((u32 *)dst) = (u32)value;
+    }
+}
+
+return vcast_mem_read_rc_seq[idx];
+ 
+⸻
+ 
+7. 
+cpu_vcpu_mem_write
+extern int vcast_mem_write_rc_seq[8];
+extern u32 vcast_mem_write_addr_seq[8];
+extern u32 vcast_mem_write_size_seq[8];
+extern u32 vcast_mem_write_value_seq[8];
+extern u32 vcast_mem_write_call;
+
+u32 idx = vcast_mem_write_call;
+u32 value = 0U;
+
+if (idx > 7U) {
+    idx = 7U;
+}
+
+if (src != (void *)0) {
+    if (len == 1U) {
+        value = *((u8 *)src);
+    } else if (len == 2U) {
+        value = *((u16 *)src);
+    } else {
+        value = *((u32 *)src);
+    }
+}
+
+vcast_mem_write_addr_seq[idx] = address;
+vcast_mem_write_size_seq[idx] = len;
+vcast_mem_write_value_seq[idx] = value;
+vcast_mem_write_call++;
+
+return vcast_mem_write_rc_seq[idx];
+ 
+⸻
+ 
+8. 
+cpu_vcpu_mem_readex
+extern u32 vcast_mem_readex_value;
+extern int vcast_mem_readex_rc;
+
+if (dst != (void *)0) {
+    *((u32 *)dst) = vcast_mem_readex_value;
+}
+
+return vcast_mem_readex_rc;
+ 
+⸻
+ 
+9. 
+cpu_vcpu_mem_writeex
+extern u32 vcast_mem_writeex_value;
+extern int vcast_mem_writeex_rc;
+
+if (src != (void *)0) {
+    vcast_mem_writeex_value = *((u32 *)src);
+}
+
+return vcast_mem_writeex_rc;
+ 
+⸻
+ 
+10. 
+cpu_vcpu_coproc_get
+extern struct cpu_vcpu_coproc vcast_cp;
+
+return &vcast_cp;
+ 
+⸻
+ 
+三、少量必要 coproc 回调函数
+这些函数是为了覆盖 stc/ldc/mcr/mrc/cdp 的成功路径。函数指针签名不同，无法完全避免新增函数。
+放到：
+Unit Prefix User Code -> emulate_arm
+static bool vcast_cp_ldcstc_accept(struct vmm_vcpu *vcpu,
+                                   arch_regs_t *regs,
+                                   u32 D, u32 CRd,
+                                   bool uopt, u32 imm8)
+{
+    (void)vcpu; (void)regs; (void)D; (void)CRd; (void)uopt; (void)imm8;
+    return vcast_cp_accept_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_ldcstc_done(struct vmm_vcpu *vcpu,
+                                 arch_regs_t *regs,
+                                 u32 i, u32 D,
+                                 u32 CRd, bool uopt, u32 imm8)
+{
+    (void)vcpu; (void)regs; (void)D; (void)CRd; (void)uopt; (void)imm8;
+    vcast_cp_done_call++;
+    return (i >= vcast_cp_done_after) ? TRUE : FALSE;
+}
+
+static u32 vcast_cp_ldcstc_read(struct vmm_vcpu *vcpu,
+                                arch_regs_t *regs,
+                                u32 i, u32 D,
+                                u32 CRd, bool uopt, u32 imm8)
+{
+    (void)vcpu; (void)regs; (void)D; (void)CRd; (void)uopt; (void)imm8;
+    vcast_cp_read_call++;
+    return vcast_cp_read_value_seq[i & 7U];
+}
+
+static void vcast_cp_ldcstc_write(struct vmm_vcpu *vcpu,
+                                  arch_regs_t *regs,
+                                  u32 i, u32 D,
+                                  u32 CRd, bool uopt, u32 imm8,
+                                  u32 data)
+{
+    (void)vcpu; (void)regs; (void)D; (void)CRd; (void)uopt; (void)imm8;
+    vcast_cp_write_value_seq[i & 7U] = data;
+    vcast_cp_write_call++;
+}
+
+static bool vcast_cp_write(struct vmm_vcpu *vcpu, arch_regs_t *regs,
+                           u32 opc1, u32 opc2, u32 CRn, u32 CRm, u32 data)
+{
+    (void)vcpu; (void)regs; (void)opc1; (void)opc2; (void)CRn; (void)CRm; (void)data;
+    return vcast_cp_write_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_read(struct vmm_vcpu *vcpu, arch_regs_t *regs,
+                          u32 opc1, u32 opc2, u32 CRn, u32 CRm, u32 *data)
+{
+    (void)vcpu; (void)regs; (void)opc1; (void)opc2; (void)CRn; (void)CRm;
+    if (data) {
+        *data = vcast_cp_read2_data0;
+    }
+    return vcast_cp_read_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_write2(struct vmm_vcpu *vcpu, arch_regs_t *regs,
+                            u32 opc1, u32 CRm, u32 data, u32 data2)
+{
+    (void)vcpu; (void)regs; (void)opc1; (void)CRm; (void)data; (void)data2;
+    return vcast_cp_write2_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_read2(struct vmm_vcpu *vcpu, arch_regs_t *regs,
+                           u32 opc1, u32 CRm, u32 *data, u32 *data2)
+{
+    (void)vcpu; (void)regs; (void)opc1; (void)CRm;
+    if (data) {
+        *data = vcast_cp_read2_data0;
+    }
+    if (data2) {
+        *data2 = vcast_cp_read2_data1;
+    }
+    return vcast_cp_read2_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_data_process(struct vmm_vcpu *vcpu, arch_regs_t *regs,
+                                  u32 opc1, u32 opc2, u32 CRd, u32 CRn, u32 CRm)
+{
+    (void)vcpu; (void)regs; (void)opc1; (void)opc2; (void)CRd; (void)CRn; (void)CRm;
+    return vcast_cp_data_process_ret ? TRUE : FALSE;
+}
+如果 VectorCAST 把这些测试回调也计入覆盖率，可以把它们作为测试夹具函数排除，或者每个写一条简单用例。它们不是产品代码。
+ 
+⸻
+ 
+四、基础函数用例
+1. 
+arm_unpredictable.001.R
+构造
+VCAST_ARM_INIT_REGS(&vcast_arm_regs, 0x1000U, 0U);
+vcast_cpu_halt_called = 0U;
+
+<<emulate_arm.arm_unpredictable.regs>> = &vcast_arm_regs;
+<<emulate_arm.arm_unpredictable.vcpu>> = &vcast_arm_vcpu;
+<<emulate_arm.arm_unpredictable.inst>> = 0x12345678U;
+<<emulate_arm.arm_unpredictable.reason>> = "test";
+Expected
+vcast_cpu_halt_called = 1
+注释
+测试目的：验证不可预测指令处理函数会输出诊断信息并 halt 当前 VCPU。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象和 VCPU 对象，对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造寄存器对象和 VCPU 对象。 step2、设置测试指令值为 0x12345678。 step3、调用 arm_unpredictable。 step4、观察 halt 接口调用次数。 用例来源：需求分析、有效等价类 追溯ID：arm_unpredictable 等价列表：不可预测指令处理路径。 其它说明：vmm_printf 可打桩为空实现。 通过准则：cpu_vcpu_halt 被调用一次。
+ 
+⸻
+ 
+2. 
+arm_sign_extend
+arm_sign_extend.001.R
+<<emulate_arm.arm_sign_extend.imm>> = 0x80U;
+<<emulate_arm.arm_sign_extend.len>> = 8U;
+<<emulate_arm.arm_sign_extend.bits>> = 16U;
+Expected：
+return = 0xFF80
+十进制 = 65408
+arm_sign_extend.002.R
+<<emulate_arm.arm_sign_extend.imm>> = 0x7FU;
+<<emulate_arm.arm_sign_extend.len>> = 8U;
+<<emulate_arm.arm_sign_extend.bits>> = 16U;
+Expected：
+return = 0x007F
+十进制 = 127
+注释模板
+测试目的：验证立即数符号扩展函数在符号位为 1/0 时分别执行扩展和不扩展路径。 用例类别：基于需求的测试 预置条件：构造 imm、len 和 bits 入参。 测试步骤： step1、设置待扩展立即数。 step2、设置源位宽和目标位宽。 step3、调用 arm_sign_extend。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 1；符号位为 0。 其它说明：源码中 bits = 32 时存在 1 << 32 的未定义行为风险，独立函数测试建议使用 bits = 16。 通过准则：符号位为 1 时返回 0xFF80；符号位为 0 时返回 0x007F。
+ 
+⸻
+ 
+3. 
+arm_condition_check
+需要覆盖：
+cond == 0xE
+case 0 ~ 7
+invert 分支 true / false
+case 5、case 6 中 N 为 true/false
+case 4、case 6 中 Z 对结果影响
+用例	cond	CPSR	Expected
+arm_condition_check.001.R	0xE	0	TRUE
+arm_condition_check.002.R	0x0	CPSR_ZERO_MASK	TRUE
+arm_condition_check.003.R	0x1	CPSR_ZERO_MASK	FALSE
+arm_condition_check.004.R	0x2	CPSR_CARRY_MASK	TRUE
+arm_condition_check.005.R	0x3	0	TRUE
+arm_condition_check.006.R	0x4	CPSR_NEGATIVE_MASK	TRUE
+arm_condition_check.007.R	0x5	0	TRUE
+arm_condition_check.008.R	0x6	CPSR_OVERFLOW_MASK	TRUE
+arm_condition_check.009.R	0x7	0	TRUE
+arm_condition_check.010.R	0x8	CPSR_CARRY_MASK	TRUE
+arm_condition_check.011.R	0x8	CPSR_CARRY_MASK | CPSR_ZERO_MASK	FALSE
+arm_condition_check.012.R	0xA	CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK	TRUE
+arm_condition_check.013.R	0xA	CPSR_NEGATIVE_MASK	FALSE
+arm_condition_check.014.R	0xC	CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK	TRUE
+arm_condition_check.015.R	0xC	CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK | CPSR_ZERO_MASK	FALSE
+arm_condition_check.016.R	0xF	0	TRUE
+单条构造示例
+VCAST_ARM_INIT_REGS(&vcast_arm_regs, 0x1000U, CPSR_ZERO_MASK);
+
+<<emulate_arm.arm_condition_check.cond>> = 0x0U;
+<<emulate_arm.arm_condition_check.regs>> = &vcast_arm_regs;
+注释模板
+测试目的：验证 ARM 条件码判断函数在不同条件码和 CPSR 标志组合下返回正确判断结果。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 标志位。 测试步骤： step1、设置条件码 cond。 step2、设置寄存器对象中的 CPSR 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：EQ/NE、CS/CC、MI/PL、VS/VC、HI/LS、GE/LT、GT/LE、AL/NV。 其它说明：本组用例覆盖 switch 的所有 case 和条件反转分支。 通过准则：函数返回值与表格中 Expected 一致。
+ 
+⸻
+ 
+4. 
+arm_decode_imm_shift
+用例	type	imm5	Expected shift_t	Expected return
+.001.R	0	3	arm_shift_lsl	3
+.002.R	1	5	arm_shift_lsr	5
+.003.R	1	0	arm_shift_lsr	32
+.004.R	2	7	arm_shift_asr	7
+.005.R	2	0	arm_shift_asr	32
+.006.R	3	9	arm_shift_ror	9
+.007.R	3	0	arm_shift_rrx	1
+.008.IN.type.NEC	4	0	不关心	0
+构造示例
+vcast_shift_t = 0U;
+
+<<emulate_arm.arm_decode_imm_shift.type>> = 1U;
+<<emulate_arm.arm_decode_imm_shift.imm5>> = 0U;
+<<emulate_arm.arm_decode_imm_shift.shift_t>> = &vcast_shift_t;
+Expected：
+return = 32
+vcast_shift_t = arm_shift_lsr
+注释模板
+测试目的：验证立即数移位解码函数对 LSL、LSR、ASR、ROR、RRX 和非法类型的解码结果。 用例类别：基于需求的测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型 type。 step2、设置立即数 imm5。 step3、调用 arm_decode_imm_shift。 step4、观察返回的移位位数和输出的移位类型。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_decode_imm_shift 等价列表：LSL、LSR、ASR、ROR、RRX、非法 type。 通过准则：返回值和 shift_t 与表格期望一致。
+ 
+⸻
+ 
+5. 
+arm_shift_c
+用例	val	shift_t	shift_n	cin	cout ptr	Expected return	Expected cout
+.001.R	0x12345678	arm_shift_lsl	0	1	&cout	0x12345678	1
+.002.R	0x80000000	arm_shift_lsl	1	0	&cout	0x00000000	1
+.003.R	0x00000003	arm_shift_lsr	1	0	&cout	0x00000001	1
+.004.R	0x80000000	arm_shift_asr	1	0	&cout	0xC0000000	0
+.005.R	0x00000002	arm_shift_asr	1	0	&cout	0x00000001	0
+.006.R	0x80000001	arm_shift_ror	4	0	&cout	0x18000000	0
+.007.R	0x00000001	arm_shift_rrx	1	1	&cout	0x80000000	1
+.008.R	0x12345678	arm_shift_lsl	1	0	NULL	0x2468ACF0	不检查
+注释模板
+测试目的：验证带进位输出的 ARM 移位函数覆盖无移位、LSL、LSR、ASR、ROR、RRX 以及 cout 为空的路径。 用例类别：基于需求的测试 预置条件：构造移位值、移位类型、移位位数、输入 carry 和可选输出指针。 测试步骤： step1、设置 val、shift_t、shift_n 和 cin。 step2、根据用例设置 cout 是否为空。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：无移位、逻辑左移、逻辑右移、算术右移、循环右移、带扩展循环右移。 通过准则：返回值和 carry 输出与表格一致。
+ 
+⸻
+ 
+6. 
+arm_add_with_carry
+用例	x	y	cin	cout ptr	oout ptr	return	cout	oout
+.001.R	1	2	0	&cout	&oout	3	0	0
+.002.R	0xFFFFFFFF	1	0	&cout	&oout	0	1	0
+.003.R	0x7FFFFFFF	1	0	&cout	&oout	0x80000000	0	1
+.004.R	1	2	1	NULL	NULL	4	不检查	不检查
+注释模板
+测试目的：验证带 carry 的加法函数覆盖无进位、无符号进位、有符号溢出以及输出指针为空的路径。 用例类别：基于需求的测试 预置条件：构造加数、被加数、输入 carry 和可选输出指针。 测试步骤： step1、设置 x、y 和 cin。 step2、根据用例设置 cout 和 oout。 step3、调用 arm_add_with_carry。 step4、观察返回值、carry 输出和 overflow 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_add_with_carry 等价列表：普通加法、无符号进位、有符号溢出、输出指针为空。 通过准则：返回值、cout、oout 与表格一致。
+ 
+⸻
+ 
+五、指令构造公共模板
+多数指令函数都需要构造 inst 字段。下面这些模板用于后面所有 handler。
+1. 半字/双字额外 load/store 类
+用于：
+ldrh_i / ldrh_l / ldrh_r / ldrht
+strh_i / strh_r / strht
+ldrsh_i / ldrsh_l / ldrsh_r / ldrsht
+ldrsb_i / ldrsb_l / ldrsb_r / ldrsbt
+ldrd_i / ldrd_l / ldrd_r
+strd_i / strd_r
+u32 inst = 0U;
+
+VCAST_ARM_SET_COND(inst, VCAST_COND_AL);
+
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_P_END, ARM_INST_LDRSTR_P_START, P);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_U_END, ARM_INST_LDRSTR_U_START, U);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_W_END, ARM_INST_LDRSTR_W_START, W);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RN_END, ARM_INST_LDRSTR_RN_START, Rn);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RT_END, ARM_INST_LDRSTR_RT_START, Rt);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RM_END, ARM_INST_LDRSTR_RM_START, Rm);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_IMM4H_END, ARM_INST_LDRSTR_IMM4H_START, imm4H);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_IMM4L_END, ARM_INST_LDRSTR_IMM4L_START, imm4L);
+ 
+⸻
+ 
+2. 普通 word/byte load/store 类
+用于：
+str_i / str_r / strt
+strb_i / strb_r / strbt
+ldr_i / ldr_l / ldr_r / ldrt
+ldrb_i / ldrb_l / ldrb_r / ldrbt
+u32 inst = 0U;
+
+VCAST_ARM_SET_COND(inst, VCAST_COND_AL);
+
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_P_END, ARM_INST_LDRSTR_P_START, P);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_U_END, ARM_INST_LDRSTR_U_START, U);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_W_END, ARM_INST_LDRSTR_W_START, W);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RN_END, ARM_INST_LDRSTR_RN_START, Rn);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RT_END, ARM_INST_LDRSTR_RT_START, Rt);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_RM_END, ARM_INST_LDRSTR_RM_START, Rm);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_IMM12_END, ARM_INST_LDRSTR_IMM12_START, imm12);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_IMM5_END, ARM_INST_LDRSTR_IMM5_START, imm5);
+VCAST_ARM_SET_FIELD(inst, ARM_INST_LDRSTR_TYPE_END, ARM_INST_LDRSTR_TYPE_START, type);
+ 
+⸻
+ 
+3. 统一有效入参
+大多数正常路径可以用：
+VCAST_ARM_INIT_REGS(&vcast_arm_regs, 0x1000U, CPSR_CARRY_MASK);
+VCAST_ARM_RESET_ARRAYS();
+
+vcast_reg_read_value[1] = 0x2000U;       /* Rn base */
+vcast_reg_read_value[2] = 0xABCD1234U;   /* Rt data */
+vcast_reg_read_value[3] = 0x10U;         /* Rm offset */
+
+vcast_mem_read_value_seq[0] = 0x12345678U;
+vcast_mem_read_value_seq[1] = 0x87654321U;
+
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.<function>.inst>> = inst;
+<<emulate_arm.<function>.regs>> = &vcast_arm_regs;
+<<emulate_arm.<function>.vcpu>> = &vcast_arm_vcpu;
+正常路径通用期望：
+return = 0
+arm_pc(&vcast_arm_regs) = 0x1004
+内存错误路径：
+return = 注入 rc
+arm_pc(&vcast_arm_regs) = 0x1000
+条件不成立路径：
+inst cond = 0x0
+CPSR 不设置 Z 位
+return = 0
+arm_pc(&vcast_arm_regs) = 0x1004
+不发生 mem/reg 写
+ 
+⸻
+ 
+六、半字/符号扩展/双字指令 handler 用例矩阵
+下面矩阵里的字段含义：
+P/U/W/Rn/Rt/Rm/imm4H/imm4L
+均用上面的模板设置。
+1. 
+arm_inst_ldrh_i
+用例	目的	关键字段	Stub / 期望
+.001.R	正常 pre-index add，无 wback	P=1,U=1,W=0,Rn=1,Rt=2,imm=0x10	return=0, PC=0x1004, R2=mem16
+.002.R	condition false	cond=0,Rt=2,Rn=1	return=0, PC=0x1004, mem_read 调用 0
+.003.IN.PW.NEC	P=0,W=1 unpredictable	P=0,W=1	return=-1, halt_called=1
+.004.IN.Rt.NEC	Rt=15 unpredictable	Rt=15	return=-1
+.005.IN.RnRt.NEC	wback 且 Rn==Rt	P=0,W=0,Rn=2,Rt=2	return=-1
+.006.FI	mem_read 失败	mem_read_rc_seq[0]=-2	return=-2, PC不变
+.007.R	post-index sub + wback	P=0,U=0,W=0,Rn=1,Rt=2,imm=0x10	R1=0x1FF0, R2=mem16
+注释模板
+测试目的：验证 ldrh immediate 在正常寻址、条件不成立、不可预测组合、内存读取失败和写回路径下的行为。 用例类别：基于需求的测试 / 接口测试 / 故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；通过 instruction 字段设置 P/U/W/Rn/Rt/imm；对寄存器读写和内存读接口打桩。 测试步骤： step1、初始化寄存器对象 PC 为 0x1000。 step2、设置基础寄存器 Rn 的返回值。 step3、按用例设置指令字段。 step4、按用例设置内存读取返回值或错误码。 step5、调用 arm_inst_ldrh_i。 step6、观察返回值、PC、寄存器写入和内存访问情况。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：arm_inst_ldrh_i 等价列表：正常读取、条件不通过、不可预测编码、内存读失败、写回。 通过准则：返回值、PC、写回寄存器和目标寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+2. 
+arm_inst_ldrh_l
+用例	目的	字段	期望
+.001.R	literal add	U=1,Rt=2,imm=0x10	mem address=align(0x1000,4)+0x10
+.002.R	literal sub	U=0,Rt=2,imm=0x10	mem address=0x1000-0x10
+.003.IN.Rt.NEC	Rt=15	Rt=15	return=-1
+.004.R	condition false	cond=0	PC=0x1004, no mem
+.005.FI	mem_read fail	rc=-2	return=-2
+ 
+⸻
+ 
+3. 
+arm_inst_ldrh_r
+用例	目的	字段	期望
+.001.R	normal index add	P=1,U=1,W=0,Rn=1,Rt=2,Rm=3	address=R1+R3
+.002.R	post-index sub wback	P=0,U=0,W=0	Rn 写回 R1-R3
+.003.IN.PW.NEC	P=0,W=1	P=0,W=1	return=-1
+.004.IN.RtRm.NEC	Rt=15 或 Rm=15	Rt=15	return=-1
+.005.IN.wback.NEC	wback 且 Rn=15/Rn==Rt	P=0,Rn=2,Rt=2	return=-1
+.006.R	condition false	cond=0	PC+4,no mem
+.007.FI	mem_read fail	rc=-2	return=-2
+ 
+⸻
+ 
+4. 以下函数按同构矩阵执行
+这些函数的结构和 ldrh_i/l/r 几乎完全一致，只是数据宽度、是否 sign extend、是否 privileged 不同。
+函数	正常路径数据宽度	目标写入
+arm_inst_ldrsh_i	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsh_l	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsh_r	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsb_i	1	arm_sign_extend(data,8,32)
+arm_inst_ldrsb_l	1	arm_sign_extend(data,8,32)
+arm_inst_ldrsb_r	1	arm_sign_extend(data,8,32)
+每个函数至少用例：
+.001.R normal add/index
+.002.R condition false
+.003.IN.PW.NEC P=0,W=1 unpredictable
+.004.IN.RtRm.NEC Rt=15 或 Rm=15 unpredictable
+.005.IN.wback.NEC wback 且 Rn==Rt 或 Rn==15
+.006.FI mem_read fail
+.007.R post-index sub + wback
+literal 函数没有 P/W/Rn/Rm，只需要：
+normal add
+normal sub
+Rt=15 unpredictable
+condition false
+mem_read fail
+ 
+⸻
+ 
+七、
+ldrht/strht/ldrsht/ldrsbt/strbt/ldrbt/ldrt/strt
+unprivileged 类
+这些函数都有：
+regform = 某 bit ? TRUE/FALSE
+if (regform) { 检查 Rm/Rn/Rt } else { 检查 Rn/Rt }
+add = U
+if condition passed { offset = regform ? Rm : imm; ... privileged = TRUE }
+通用矩阵
+用例	目的	字段	期望
+.001.R	regform normal add	regform=1,U=1,Rn=1,Rt=2,Rm=3	address=R1, Rn写回R1+R3
+.002.R	immform normal sub	regform=0,U=0,imm=0x10	Rn写回R1-0x10
+.003.IN.regform.NEC	regform invalid	Rt=15 或 Rn=15 或 Rn==Rt 或 Rm=15	return=-1
+.004.IN.immform.NEC	immform invalid	Rt=15 或 Rn=15 或 Rn==Rt	return=-1
+.005.R	condition false	cond=0	PC+4,no mem
+.006.FI	mem fail	mem rc=-2	return=-2
+适用：
+arm_inst_ldrht
+arm_inst_strht
+arm_inst_ldrsht
+arm_inst_ldrsbt
+arm_inst_ldrt
+arm_inst_strt
+arm_inst_ldrbt
+arm_inst_strbt
+差异：
+load 类使用 cpu_vcpu_mem_read(..., privileged=TRUE)
+store 类使用 cpu_vcpu_mem_write(..., privileged=TRUE)
+ldrs* 使用 arm_sign_extend
+ldr* 使用 arm_zero_extend
+ 
+⸻
+ 
+八、exclusive 指令
+1. 
+arm_inst_ldrex
+用例	字段	期望
+.001.R	Rn=1,Rt=2,cond=AL	mem_readex called, R2=data, PC+4
+.002.R	cond=false	no mem, PC+4
+.003.IN.Rt.NEC	Rt=15	return=-1
+.004.IN.Rn.NEC	Rn=15	return=-1
+.005.FI	mem_readex rc=-2	return=-2, PC不变
+2. 
+arm_inst_strex
+用例	字段	期望
+.001.R	Rn=1,Rd=2,Rt=3	mem_writeex called, Rd写0, PC+4
+.002.R	cond=false	no mem, PC+4
+.003.IN.R15.NEC	Rd=15 或 Rt=15 或 Rn=15	return=-1
+.004.IN.alias.NEC	Rd==Rn 或 Rd==Rt	return=-1
+.005.FI	mem_writeex rc=-2	return=-2
+ 
+⸻
+ 
+九、双字 
+ldrd/strd
+1. 
+arm_inst_ldrd_i / arm_inst_ldrd_r / arm_inst_ldrd_l
+每个至少：
+.001.R normal，两次 mem_read，写 Rt 和 Rt+1
+.002.IN.RtOdd.NEC Rt 为奇数，return=-1
+.003.IN.PW.NEC P=0,W=1，return=-1，literal 无此项
+.004.IN.wback.NEC wback 且 Rn==Rt 或 Rn==Rt+1，return=-1，literal 无此项
+.005.IN.Rt14.NEC Rt=14，return=-1
+.006.FI first mem_read fail，return=-2
+.007.FI second mem_read fail，return=-3
+.008.R condition false，PC+4，无 mem
+ldrd_r 额外：
+Rm==15 或 Rm==Rt 或 Rm==Rt+1 unpredictable
+2. 
+arm_inst_strd_i / arm_inst_strd_r
+每个至少：
+.001.R normal，两次 mem_write，PC+4
+.002.IN.RtOdd.NEC Rt 奇数
+.003.IN.PW.NEC P=0,W=1
+.004.IN.wback.NEC wback 且 Rn==15/Rt/Rt+1
+.005.IN.Rt14.NEC Rt=14
+.006.FI first mem_write fail
+.007.FI second mem_write fail
+.008.R condition false
+特殊：
+arm_inst_strd_r 中 Rt 奇数不是 return -1，而是：
+vmm_vcpu_irq_assert 被调用，return = 0，PC 不增加。
+ 
+⸻
+ 
+十、普通 word/byte load/store
+1. 
+arm_inst_str_i
+用例	字段	期望
+.001.R	P=1,U=1,W=0,Rn=1,Rt=2,imm12=0x20	write addr=R1+0x20, PC+4
+.002.R	P=0,U=0,W=0	write addr=R1, Rn写回R1-imm
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.wback.NEC	wback 且 Rn=15 或 Rn==Rt	return=-1
+.005.R	cond=false	no write, PC+4
+.006.FI	mem_write rc=-2	return=-2
+2. 
+arm_inst_ldr_i
+用例	字段	期望
+.001.R	P=1,U=1,W=0	read addr=R1+imm, R2=data
+.002.R	P=0,U=0,W=0	read addr=R1, Rn写回
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.wback.NEC	wback 且 Rn==Rt	return=-1
+.005.R	cond=false	PC+4,no mem
+.006.FI	mem_read fail	return=-2
+3. 
+arm_inst_ldr_l
+normal add
+normal sub
+condition false
+mem_read fail
+4. 
+arm_inst_str_r / ldr_r / strb_r / ldrb_r
+normal index add
+post-index sub + wback
+P=0,W=1 unpredictable
+Rm=15 unpredictable
+wback && Rn==15/Rn==Rt unpredictable
+condition false
+mem fail
+5. 
+arm_inst_strb_i / ldrb_i / strb_l / ldrb_l
+类似 immediate/literal：
+normal add
+normal sub 或 post-index
+Rt=15 unpredictable
+wback invalid
+condition false
+mem fail
+ 
+⸻
+ 
+十一、block transfer
+1. 
+arm_inst_ldm
+用例	目的	构造	期望
+.001.R	increment after，无 PC，无 wback	Rn=1, reg_list=0x0003, op bit inc	两次 mem_read，R0/R1 写入，PC+4
+.002.R	decrement before + wback	wback=1, reg_list=0x0003, op decrement/before	Rn 写回 old - 8
+.003.R	reg_list bit15 包含 PC	reg_list=0x8001	mem_read 写 R0 和 PC
+.004.IN.Rn.NEC	Rn=15	return=-1	
+.005.IN.list.NEC	reg_list=0	return=-1	
+.006.IN.wback.NEC	wback && reg_list 包含 Rn	return=-1	
+.007.R	condition false	cond=0	PC+4,no mem
+.008.FI	mem_read fail	rc=-2	return=-2
+2. 
+arm_inst_stm
+用例	目的	构造
+.001.R	increment after，无 PC，无 wback	
+.002.R	decrement before + wback	
+.003.R	reg_list bit15，写 PC+8	
+.004.IN.Rn.NEC	Rn=15	
+.005.IN.list.NEC	reg_list=0	
+.006.R	condition false	
+.007.FI	mem_write fail	
+ 
+⸻
+ 
+十二、coprocessor handler
+1. 公共成功路径初始化
+memset(&vcast_cp, 0, sizeof(vcast_cp));
+
+vcast_cp.ldcstc_accept = vcast_cp_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_cp_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_cp_ldcstc_read;
+vcast_cp.ldcstc_write = vcast_cp_ldcstc_write;
+vcast_cp.write = vcast_cp_write;
+vcast_cp.read = vcast_cp_read;
+vcast_cp.write2 = vcast_cp_write2;
+vcast_cp.read2 = vcast_cp_read2;
+vcast_cp.data_process = vcast_cp_data_process;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+vcast_cp_read_value_seq[0] = 0xAABBCCDDU;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x11111111U;
+vcast_reg_read_value[3] = 0x22222222U;
+2. 
+arm_inst_stcx
+用例：
+.001.R normal success，accept true，done after 1，mem_write 一次，PC+4
+.002.IN.RnWback.NEC Rn=15 且 W=1，return=-1
+.003.IN.nullcb.NEC ldcstc_accept=NULL，irq_assert，return=0
+.004.IN.accept.NEC accept 返回 false，irq_assert，return=0
+.005.FI mem_write fail，return=-2
+.006.R condition false，PC+4，无 mem
+.007.R wback true，Rn 写回 offset_addr
+3. 
+arm_inst_ldcx_i
+.001.R normal success，mem_read 一次，ldcstc_write 一次
+.002.IN.RnWback.NEC Rn=15 && W=1
+.003.IN.nullcb.NEC accept/done/write NULL
+.004.IN.accept.NEC accept false
+.005.FI mem_read fail
+.006.R condition false
+.007.R wback true
+4. 
+arm_inst_ldcx_l
+.001.R normal literal success
+.002.IN.W.NEC W=1 unpredictable
+.003.IN.nullcb.NEC
+.004.IN.accept.NEC
+.005.FI mem_read fail
+.006.R condition false
+5. 
+arm_inst_mcrrx / mrrcx
+mcrrx:
+.001.R normal write2 true
+.002.IN.Rt.NEC Rt=15 或 Rt2=15
+.003.IN.nullcb.NEC write2=NULL -> irq_assert return 0
+.004.IN.write2.NEC write2 false -> irq_assert return 0
+.005.R condition false
+
+mrrcx:
+.001.R normal read2 true，写 Rt/Rt2
+.002.IN.Rt.NEC Rt=15 或 Rt2=15
+.003.IN.nullcb.NEC read2=NULL
+.004.IN.read2.NEC read2 false
+.005.R condition false
+6. 
+arm_inst_cdpx / mcrx / mrcx
+cdpx:
+.001.R data_process true
+.002.IN.nullcb.NEC data_process=NULL
+.003.IN.dp.NEC data_process false
+.004.R condition false
+
+mcrx:
+.001.R write true
+.002.IN.nullcb.NEC write=NULL
+.003.IN.write.NEC write false
+.004.R condition false
+
+mrcx:
+.001.R read true Rt<15，写 Rt
+.002.R read true Rt=15，不写寄存器但 PC+4
+.003.IN.nullcb.NEC read=NULL
+.004.IN.read.NEC read false
+.005.R condition false
+ 
+⸻
+ 
+十三、dispatcher/group 函数
+建议对 group 函数采用 SBF，子函数返回唯一值，验证派发分支。
+1. 
+arm_instgrp_dataproc
+需要覆盖：
+op != 0:
+  op1=10000 -> movw_i
+  op1=10100 -> fallthrough unpredictable
+  op1=10010/10110 -> fallthrough unpredictable
+  default -> fallthrough unpredictable
+
+op == 0:
+  unprivileged extra load/store:
+    op2=1011 op1 bit0=1 -> ldrht
+    op2=1011 op1 bit0=0 -> strht
+    op2=1101 bit0=1 -> ldrsbt
+    op2=1111 bit0=1 -> ldrsht
+    default -> unpredictable
+
+  extra load/store:
+    op2=1011 -> strh_r / ldrh_r / strh_i / ldrh_l / ldrh_i
+    op2=1101 -> ldrd_r / ldrsb_r / ldrd_l / ldrd_i / ldrsb_l / ldrsb_i
+    op2=1111 -> strd_r / ldrsh_r / strd_i / ldrsh_l / ldrsh_i
+
+  synchronization:
+    op1=11000 -> strex
+    op1=11001 -> ldrex
+
+  no match -> unpredictable
+每个派发分支一条用例，子函数 SBF 返回不同值，例如：
+arm_inst_movw_i.return = -101
+arm_inst_ldrht.return = -102
+arm_inst_strht.return = -103
+...
+Expected 就是对应唯一返回值。
+注释模板：
+测试目的：验证 data processing 指令分组函数能够根据 op/op1/op2/Rn 字段正确派发到对应子指令处理函数，或在未支持组合下进入不可预测处理。 用例类别：基于需求的测试 预置条件：构造 instruction 的 op、op1、op2、Rn 字段；对子指令处理函数进行 SBF 打桩并设置唯一返回值。 测试步骤： step1、构造有效寄存器对象和 VCPU 对象。 step2、设置 instruction 字段以匹配目标派发分支。 step3、设置目标子函数返回唯一错误码。 step4、调用 arm_instgrp_dataproc。 step5、观察返回值是否等于目标子函数返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：MOVW、unprivileged extra load/store、extra load/store、exclusive、unsupported。 通过准则：函数返回对应子函数的唯一返回值；未支持组合返回 -1 且触发不可预测处理。
+ 
+⸻
+ 
+2. 
+arm_instgrp_ldrstr
+需要覆盖：
+!(inst & A_MASK):
+  op1 -> str_i / strt / ldr_l / ldr_i / ldrt / strb_i / strbt / ldrb_l / ldrb_i / ldrbt
+
+(inst & A_MASK) && !(inst & B_MASK):
+  op1 -> str_r / strt / ldr_r / ldrt / strb_r / strbt / ldrb_r / ldrbt
+
+else:
+  unpredictable
+用 SBF 子函数唯一返回值验证派发。
+ 
+⸻
+ 
+3. 
+arm_instgrp_brblk
+覆盖：
+!is_1xxxxx:
+  store path:
+    PUSH TODO 条件 -> unpredictable
+    normal -> stm
+  load path:
+    POP TODO 条件 -> unpredictable
+    normal -> ldm
+is_1xxxxx:
+  branch TODO -> unpredictable
+ 
+⸻
+ 
+4. 
+arm_instgrp_coproc
+覆盖：
+cpro = 0xA/0xB:
+  op1=000000/000001 -> undef irq return 0
+  op1=100xxx + OP bit + cpro=10 + (op1&0xF)=0xF -> mrcx
+  op1=100xxx + OP bit + cpro=10 + (op1&0xF)=0xE -> mcrx
+  op1=110xxx -> svc
+  unsupported -> unpredictable
+
+generic cpro:
+  op1 000000/000001 -> undef irq
+  op1 store coproc -> stcx
+  op1 load coproc rn=15 -> ldcx_l
+  op1 load coproc rn!=15 -> ldcx_i
+  op1=000100 -> mcrrx
+  op1=000101 -> mrrcx
+  op1=10xxx0 + OP bit -> mcrx
+  op1=10xxx0 + !OP bit -> cdpx
+  op1=10xxx1 + OP bit -> mrcx
+  op1=10xxx1 + !OP bit -> cdpx
+  op1=110xxx -> svc
+  unsupported -> unpredictable
+ 
+⸻
+ 
+5. 
+arm_instgrp_uncond
+覆盖：
+op1 bit7 = 0 且 preload op1 列表内 -> PC += 4, return 0
+op1 bit7 = 0 但不在列表 -> unpredictable
+op1 bit7 = 1 -> unpredictable
+ 
+⸻
+ 
+6. 
+emulate_arm_inst
+覆盖：
+vcpu NULL -> -1
+vcpu->is_normal false -> -1
+cond != 0xF:
+  op1&0x6 = 0x0 -> dataproc
+  op1&0x6 = 0x2:
+    load/store 条件 true -> ldrstr
+    media 条件 -> media
+  op1&0x6 = 0x4 -> brblk
+  op1&0x6 = 0x6 -> coproc
+cond == 0xF -> uncond
+op1 & 0x6 的 default 不可达，因为结果只能是 0/2/4/6。
+ 
+⸻
+ 
+十四、明确 dead code / 覆盖率排除
+1. 
+arm_inst_movw_i
+源码：
+if (Rd == 15) {
+    arm_unpredictable(...);
+    return VMM_EFAIL;
+}
+...
+if (arm_condition_passed(cond, regs)) {
+    if (Rd == 15) {
+        arm_pc(regs) = result;
+    } else {
+        cpu_vcpu_reg_write(...);
+    }
+}
+内部：
+if (Rd == 15) {
+    arm_pc(regs) = result;
+}
+不可达，因为前面 Rd == 15 已经 return。
+ 
+排除说明：
+`arm_inst_movw_i` 中 condition passed 内部的 `if (Rd == 15)` 分支不可达。函数前部已经对 `Rd == 15` 执行不可预测处理并返回，后续相同条件不可能再次成立，属于源代码逻辑 dead code，应从覆盖率排除。
+ 
+⸻
+ 
+2. 
+emulate_arm_inst
+switch default
+switch (op1 & 0x6) {
+case 0x0:
+case 0x2:
+case 0x4:
+case 0x6:
+...
+default:
+    break;
+}
+op1 & 0x6 只能为 0/2/4/6，default 不可达。
+ 
+排除说明：
+`emulate_arm_inst` 中 `switch (op1 & 0x6)` 的 default 分支不可达，因为按位与 `0x6` 的结果只能为 0x0、0x2、0x4、0x6。该 default 属于防御性 dead code，应从覆盖率排除。
+ 
+⸻
+ 
+3. 
+arm_sign_extend
+的 
+bits = 32
+风险
+return imm & ((1 << bits) - 1);
+当 bits = 32 时存在 1 << 32 未定义行为。产品代码中多处调用：
+arm_sign_extend(data, 8, 32)
+arm_sign_extend(data, 16, 32)
+如果 VectorCAST 中结果不稳定，应记录为源码风险；测试期望按当前工具链实际行为设置，或对 standalone 测试避免 bits = 32。
+ 
+⸻
+ 
+十五、建议的最小高覆盖用例清单
+完整文件建议分批执行，避免一次过多难以调试：
+基础函数：
+arm_unpredictable.001.R
+arm_sign_extend.001.R
+arm_sign_extend.002.R
+arm_condition_check.001.R ~ .016.R
+arm_decode_imm_shift.001.R ~ .008.IN.type.NEC
+arm_shift_c.001.R ~ .008.R
+arm_add_with_carry.001.R ~ .004.R
+
+单指令 handler：
+每个 load/store handler 按对应矩阵覆盖 normal / condition false / unpredictable / mem fail / wback。
+exclusive 指令按 ldrex/strex 矩阵。
+block transfer 按 ldm/stm 矩阵。
+coproc handler 按 stcx/ldcx/mcr/mrc/cdp 矩阵。
+
+分组 dispatcher：
+arm_instgrp_dataproc 派发矩阵
+arm_instgrp_ldrstr 派发矩阵
+arm_instgrp_brblk 派发矩阵
+arm_instgrp_coproc 派发矩阵
+arm_instgrp_uncond.001.R ~ .003.IN.op1.NEC
+emulate_arm_inst.001.IN.vcpu.NEC ~ dispatch 全路径
+这套设计能保证：
+if 判断两侧都覆盖；
+switch case 均覆盖；
+unpredictable/error/condition false/normal path 均覆盖；
+内存读写失败和成功均覆盖；
+写回和非写回均覆盖；
+子分组 dispatcher 派发全部覆盖；
+dead code 单独说明并排除。
