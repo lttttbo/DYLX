@@ -1,0 +1,416 @@
+你说得对。之前用矩阵代替了独立用例注释，不满足你们的用例录入方式。下面按精简 UserCode 方案重新给出：每条用例都有独立的构造要点和独立注释，可直接复制到 VectorCAST 用例注释中。
+下面先约定一个默认构造，后续每条用例的“构造要点”只写差异项：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+arm_pc(&regs) = 0x1000U;
+arm_cpsr(&regs) = 0U;
+
+inst = 0U;
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+如果某条用例写“条件不成立”，则构造为：
+inst = 0U;
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+arm_cpsr(&regs) = 0U;
+ 
+⸻
+ 
+1. 
+arm_unpredictable
+arm_unpredictable.001.R
+构造要点：构造有效 vcpu 和 regs，inst = 0x12345678，reason = "test"；cpu_vcpu_halt 使用打点 stub。
+测试目的：验证不可预测指令处理函数会调用 halt 接口停止当前 VCPU。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象和 VCPU 对象；对 vmm_printf 打桩为空实现；对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置指令值为 0x12345678，设置原因为 "test"。 step3、调用 arm_unpredictable。 step4、观察 cpu_vcpu_halt 的调用次数。 用例来源：需求分析、有效等价类 追溯ID：arm_unpredictable 等价列表：不可预测指令处理路径。 其它说明：本用例不验证打印内容，只验证函数进入不可预测处理后触发 halt。 通过准则：cpu_vcpu_halt 被调用一次，vcast_cpu_halt_called 等于 1。
+ 
+⸻
+ 
+2. 
+arm_sign_extend
+arm_sign_extend.001.R
+构造要点：imm = 0x80，len = 8，bits = 16。
+测试目的：验证符号位为 1 时，立即数会被符号扩展。 用例类别：基于需求的测试 预置条件：输入立即数 0x80，源宽度为 8 bit，目标宽度为 16 bit。 测试步骤： step1、设置 imm 为 0x80。 step2、设置 len 为 8，设置 bits 为 16。 step3、调用 arm_sign_extend。 step4、观察返回值是否完成符号扩展。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 1 的立即数。 其它说明：该用例避免使用 bits = 32，防止源码中 1 << bits 出现未定义行为。 通过准则：函数返回 0xFF80，十进制为 65408。
+arm_sign_extend.002.R
+构造要点：imm = 0x7F，len = 8，bits = 16。
+测试目的：验证符号位为 0 时，立即数保持正数形式，不进行高位补 1。 用例类别：基于需求的测试 预置条件：输入立即数 0x7F，源宽度为 8 bit，目标宽度为 16 bit。 测试步骤： step1、设置 imm 为 0x7F。 step2、设置 len 为 8，设置 bits 为 16。 step3、调用 arm_sign_extend。 step4、观察返回值是否保持原正数值。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 0 的立即数。 其它说明：本用例覆盖 if (imm & sign_bit) 为 false 的路径。 通过准则：函数返回 0x007F，十进制为 127。
+ 
+⸻
+ 
+3. 
+arm_condition_check
+arm_condition_check.001.R
+构造要点：cond = 0xE，CPSR = 0。
+测试目的：验证 AL 条件码直接判定为条件成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，CPSR 不设置任何标志位。 测试步骤： step1、设置条件码为 0xE。 step2、设置 CPSR 为 0。 step3、调用 arm_condition_check。 step4、观察函数返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：AL 条件码。 其它说明：本用例覆盖函数开头 cond == 0xE 直接返回路径。 通过准则：函数返回 TRUE。
+arm_condition_check.002.R
+构造要点：cond = 0x0，CPSR = CPSR_ZERO_MASK。
+测试目的：验证 EQ 条件在 Z 标志为 1 时判定为成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 的 Z 标志位。 测试步骤： step1、设置条件码为 EQ。 step2、设置 CPSR 中的 ZERO 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：EQ 条件成立。 其它说明：本用例覆盖 case 0 中 ret 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.003.R
+构造要点：cond = 0x1，CPSR = CPSR_ZERO_MASK。
+测试目的：验证 NE 条件在 Z 标志为 1 时经过条件反转后判定为不成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 的 Z 标志位。 测试步骤： step1、设置条件码为 NE。 step2、设置 CPSR 中的 ZERO 标志。 step3、调用 arm_condition_check。 step4、观察条件反转后的返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：NE 条件不成立。 其它说明：本用例覆盖条件码低位为 1 时的反转逻辑。 通过准则：函数返回 FALSE。
+arm_condition_check.004.R
+构造要点：cond = 0x2，CPSR = CPSR_CARRY_MASK。
+测试目的：验证 CS/HS 条件在 C 标志为 1 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 的 C 标志位。 测试步骤： step1、设置条件码为 0x2。 step2、设置 CPSR 中的 CARRY 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：CS/HS 条件成立。 其它说明：本用例覆盖 case 1 中 ret 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.005.R
+构造要点：cond = 0x3，CPSR = 0。
+测试目的：验证 CC/LO 条件在 C 标志为 0 时经过反转判定为成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，CPSR 不设置 C 标志位。 测试步骤： step1、设置条件码为 0x3。 step2、设置 CPSR 为 0。 step3、调用 arm_condition_check。 step4、观察条件反转后的返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：CC/LO 条件成立。 其它说明：本用例覆盖 case 1 的 false 基值和后续反转路径。 通过准则：函数返回 TRUE。
+arm_condition_check.006.R
+构造要点：cond = 0x4，CPSR = CPSR_NEGATIVE_MASK。
+测试目的：验证 MI 条件在 N 标志为 1 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 的 N 标志位。 测试步骤： step1、设置条件码为 0x4。 step2、设置 CPSR 中的 NEGATIVE 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：MI 条件成立。 其它说明：本用例覆盖 case 2 中 ret 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.007.R
+构造要点：cond = 0x5，CPSR = 0。
+测试目的：验证 PL 条件在 N 标志为 0 时经过反转判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，CPSR 不设置 N 标志位。 测试步骤： step1、设置条件码为 0x5。 step2、设置 CPSR 为 0。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：PL 条件成立。 其它说明：本用例覆盖 case 2 的 false 基值和反转路径。 通过准则：函数返回 TRUE。
+arm_condition_check.008.R
+构造要点：cond = 0x6，CPSR = CPSR_OVERFLOW_MASK。
+测试目的：验证 VS 条件在 V 标志为 1 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 的 V 标志位。 测试步骤： step1、设置条件码为 0x6。 step2、设置 CPSR 中的 OVERFLOW 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：VS 条件成立。 其它说明：本用例覆盖 case 3 中 ret 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.009.R
+构造要点：cond = 0x7，CPSR = 0。
+测试目的：验证 VC 条件在 V 标志为 0 时经过反转判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，CPSR 不设置 V 标志位。 测试步骤： step1、设置条件码为 0x7。 step2、设置 CPSR 为 0。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：VC 条件成立。 其它说明：本用例覆盖 case 3 的 false 基值和反转路径。 通过准则：函数返回 TRUE。
+arm_condition_check.010.R
+构造要点：cond = 0x8，CPSR = CPSR_CARRY_MASK。
+测试目的：验证 HI 条件在 C 为 1 且 Z 为 0 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，设置 C 标志，不设置 Z 标志。 测试步骤： step1、设置条件码为 0x8。 step2、设置 CPSR 中的 CARRY 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：HI 条件成立。 其它说明：本用例覆盖 case 4 中 ret && !Z 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.011.R
+构造要点：cond = 0x8，CPSR = CPSR_CARRY_MASK | CPSR_ZERO_MASK。
+测试目的：验证 HI 条件在 C 为 1 但 Z 为 1 时判定不成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 C 标志和 Z 标志。 测试步骤： step1、设置条件码为 0x8。 step2、设置 CPSR 中的 CARRY 和 ZERO 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：HI 条件不成立。 其它说明：本用例覆盖 case 4 中第二次 ret 修正为 false 的路径。 通过准则：函数返回 FALSE。
+arm_condition_check.012.R
+构造要点：cond = 0xA，CPSR = CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK。
+测试目的：验证 GE 条件在 N 与 V 同为 1 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 N 和 V 标志。 测试步骤： step1、设置条件码为 0xA。 step2、设置 CPSR 中的 NEGATIVE 和 OVERFLOW 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：GE 条件成立。 其它说明：本用例覆盖 case 5 中 N 为 true 且 V 为 true 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.013.R
+构造要点：cond = 0xA，CPSR = CPSR_NEGATIVE_MASK。
+测试目的：验证 GE 条件在 N 为 1 且 V 为 0 时判定不成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，只设置 N 标志，不设置 V 标志。 测试步骤： step1、设置条件码为 0xA。 step2、设置 CPSR 中的 NEGATIVE 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：GE 条件不成立。 其它说明：本用例覆盖 case 5 中 N 为 true 且 V 为 false 的路径。 通过准则：函数返回 FALSE。
+arm_condition_check.014.R
+构造要点：cond = 0xC，CPSR = CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK。
+测试目的：验证 GT 条件在 N 与 V 相等且 Z 为 0 时判定成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 N 和 V，不设置 Z。 测试步骤： step1、设置条件码为 0xC。 step2、设置 CPSR 中的 NEGATIVE 和 OVERFLOW 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：GT 条件成立。 其它说明：本用例覆盖 case 6 中比较结果为 true 且 Z 为 0 的路径。 通过准则：函数返回 TRUE。
+arm_condition_check.015.R
+构造要点：cond = 0xC，CPSR = CPSR_NEGATIVE_MASK | CPSR_OVERFLOW_MASK | CPSR_ZERO_MASK。
+测试目的：验证 GT 条件在 Z 为 1 时即使 N 与 V 相等也判定不成立。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，同时设置 N、V、Z 标志。 测试步骤： step1、设置条件码为 0xC。 step2、设置 CPSR 中的 NEGATIVE、OVERFLOW 和 ZERO 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：GT 条件不成立。 其它说明：本用例覆盖 case 6 中因为 Z 为 1 而修正为 false 的路径。 通过准则：函数返回 FALSE。
+arm_condition_check.016.R
+构造要点：cond = 0xF，CPSR = 0。
+测试目的：验证 NV 条件码在 case 7 中基础判定为 true 且不执行反转。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，CPSR 为 0。 测试步骤： step1、设置条件码为 0xF。 step2、设置 CPSR 为 0。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：NV 条件码路径。 其它说明：本用例覆盖 case 7 以及 cond == 0xF 不反转的路径。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+4. 
+arm_decode_imm_shift
+arm_decode_imm_shift.001.R
+构造要点：type = 0，imm5 = 3，shift_t = &vcast_shift_t。
+测试目的：验证 LSL 类型立即数移位解码返回原始 imm5。 用例类别：基于需求的测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 0。 step2、设置 imm5 为 3。 step3、调用 arm_decode_imm_shift。 step4、观察返回的移位位数和输出的移位类型。 用例来源：需求分析、有效等价类 追溯ID：arm_decode_imm_shift 等价列表：LSL 移位类型。 其它说明：本用例覆盖 case 0。 通过准则：函数返回 3，vcast_shift_t 等于 arm_shift_lsl。
+arm_decode_imm_shift.002.R
+构造要点：type = 1，imm5 = 5。
+测试目的：验证 LSR 类型在 imm5 非 0 时返回 imm5。 用例类别：基于需求的测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 1。 step2、设置 imm5 为 5。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：需求分析、有效等价类 追溯ID：arm_decode_imm_shift 等价列表：LSR 且 imm5 非 0。 其它说明：本用例覆盖 case 1 中三目表达式 true 路径。 通过准则：函数返回 5，vcast_shift_t 等于 arm_shift_lsr。
+arm_decode_imm_shift.003.R
+构造要点：type = 1，imm5 = 0。
+测试目的：验证 LSR 类型在 imm5 为 0 时按 ARM 规则解码为 32。 用例类别：边界值分析 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 1。 step2、设置 imm5 为边界值 0。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：边界值分析 追溯ID：arm_decode_imm_shift 等价列表：LSR 且 imm5 为 0。 其它说明：本用例覆盖 case 1 中三目表达式 false 路径。 通过准则：函数返回 32，vcast_shift_t 等于 arm_shift_lsr。
+arm_decode_imm_shift.004.R
+构造要点：type = 2，imm5 = 7。
+测试目的：验证 ASR 类型在 imm5 非 0 时返回 imm5。 用例类别：基于需求的测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 2。 step2、设置 imm5 为 7。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：需求分析、有效等价类 追溯ID：arm_decode_imm_shift 等价列表：ASR 且 imm5 非 0。 其它说明：本用例覆盖 case 2 中三目表达式 true 路径。 通过准则：函数返回 7，vcast_shift_t 等于 arm_shift_asr。
+arm_decode_imm_shift.005.R
+构造要点：type = 2，imm5 = 0。
+测试目的：验证 ASR 类型在 imm5 为 0 时按 ARM 规则解码为 32。 用例类别：边界值分析 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 2。 step2、设置 imm5 为边界值 0。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：边界值分析 追溯ID：arm_decode_imm_shift 等价列表：ASR 且 imm5 为 0。 其它说明：本用例覆盖 case 2 中三目表达式 false 路径。 通过准则：函数返回 32，vcast_shift_t 等于 arm_shift_asr。
+arm_decode_imm_shift.006.R
+构造要点：type = 3，imm5 = 9。
+测试目的：验证 ROR 类型在 imm5 非 0 时解码为 ROR 并返回 imm5。 用例类别：基于需求的测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 3。 step2、设置 imm5 为 9。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：需求分析、有效等价类 追溯ID：arm_decode_imm_shift 等价列表：ROR 路径。 其它说明：本用例覆盖 case 3 中 imm5 非 0 路径。 通过准则：函数返回 9，vcast_shift_t 等于 arm_shift_ror。
+arm_decode_imm_shift.007.R
+构造要点：type = 3，imm5 = 0。
+测试目的：验证 type 为 3 且 imm5 为 0 时解码为 RRX。 用例类别：边界值分析 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型为 3。 step2、设置 imm5 为边界值 0。 step3、调用 arm_decode_imm_shift。 step4、观察返回值和移位类型。 用例来源：边界值分析 追溯ID：arm_decode_imm_shift 等价列表：RRX 路径。 其它说明：本用例覆盖 case 3 中 imm5 为 0 路径。 通过准则：函数返回 1，vcast_shift_t 等于 arm_shift_rrx。
+arm_decode_imm_shift.008.IN.type.NEC
+构造要点：type = 4，imm5 = 0。
+测试目的：验证非法移位类型时，函数返回默认值 0。 用例类别：接口测试 预置条件：提供有效的 shift_t 输出指针，并设置 type 为不支持的值。 测试步骤： step1、设置移位类型为 4。 step2、设置 imm5 为 0。 step3、调用 arm_decode_imm_shift。 step4、观察返回值。 用例来源：无效等价类 追溯ID：arm_decode_imm_shift 等价列表：非法 type。 其它说明：本用例覆盖 switch default 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+5. 
+arm_shift_c
+arm_shift_c.001.R
+构造要点：val = 0x12345678，shift_t = arm_shift_lsl，shift_n = 0，cin = 1，cout = &vcast_cout。
+测试目的：验证移位位数为 0 时，函数保持原值并将 carry 保持为输入 carry。 用例类别：边界值分析 预置条件：提供有效 carry 输出指针。 测试步骤： step1、设置输入值为 0x12345678。 step2、设置移位类型为 LSL，移位位数为 0。 step3、设置输入 carry 为 1。 step4、调用 arm_shift_c。 step5、观察返回值和 carry 输出。 用例来源：边界值分析 追溯ID：arm_shift_c 等价列表：shift_n 为 0。 其它说明：本用例覆盖 if (shift_n) 为 false 的路径。 通过准则：函数返回 0x12345678，vcast_cout 等于 1。
+arm_shift_c.002.R
+构造要点：val = 0x80000000，shift_t = arm_shift_lsl，shift_n = 1，cin = 0。
+测试目的：验证 LSL 左移时，移出的 bit31 会成为 carry。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针。 测试步骤： step1、设置输入值为 0x80000000。 step2、设置移位类型为 LSL，移位位数为 1。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：LSL 移位。 其它说明：本用例覆盖 arm_shift_lsl 分支。 通过准则：函数返回 0x00000000，vcast_cout 等于 1。
+arm_shift_c.003.R
+构造要点：val = 0x00000003，shift_t = arm_shift_lsr，shift_n = 1。
+测试目的：验证 LSR 右移时，最低位会成为 carry。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针。 测试步骤： step1、设置输入值为 0x00000003。 step2、设置移位类型为 LSR，移位位数为 1。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：LSR 移位。 其它说明：本用例覆盖 arm_shift_lsr 分支。 通过准则：函数返回 0x00000001，vcast_cout 等于 1。
+arm_shift_c.004.R
+构造要点：val = 0x80000000，shift_t = arm_shift_asr，shift_n = 1。
+测试目的：验证 ASR 对负数形式输入执行符号扩展右移。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针，输入值最高位为 1。 测试步骤： step1、设置输入值为 0x80000000。 step2、设置移位类型为 ASR，移位位数为 1。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：ASR 负数路径。 其它说明：本用例覆盖 ASR 中 val & 0x80000000 为 true 的路径。 通过准则：函数返回 0xC0000000，vcast_cout 等于 0。
+arm_shift_c.005.R
+构造要点：val = 0x00000002，shift_t = arm_shift_asr，shift_n = 1。
+测试目的：验证 ASR 对正数形式输入执行普通右移。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针，输入值最高位为 0。 测试步骤： step1、设置输入值为 0x00000002。 step2、设置移位类型为 ASR，移位位数为 1。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：ASR 正数路径。 其它说明：本用例覆盖 ASR 中 val & 0x80000000 为 false 的路径。 通过准则：函数返回 0x00000001，vcast_cout 等于 0。
+arm_shift_c.006.R
+构造要点：val = 0x80000001，shift_t = arm_shift_ror，shift_n = 4。
+测试目的：验证 ROR 循环右移路径能够正确计算结果和 carry。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针。 测试步骤： step1、设置输入值为 0x80000001。 step2、设置移位类型为 ROR，移位位数为 4。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：ROR 移位。 其它说明：本用例覆盖 arm_shift_ror 分支。 通过准则：函数返回 0x18000000，vcast_cout 等于 0。
+arm_shift_c.007.R
+构造要点：val = 0x00000001，shift_t = arm_shift_rrx，shift_n = 1，cin = 1。
+测试目的：验证 RRX 路径能够将输入 carry 放入最高位，并将原 bit0 输出为 carry。 用例类别：基于需求的测试 预置条件：提供有效 carry 输出指针。 测试步骤： step1、设置输入值为 0x00000001。 step2、设置移位类型为 RRX，移位位数为 1。 step3、设置输入 carry 为 1。 step4、调用 arm_shift_c。 step5、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：RRX 移位。 其它说明：本用例覆盖 arm_shift_rrx 分支。 通过准则：函数返回 0x80000000，vcast_cout 等于 1。
+arm_shift_c.008.R
+构造要点：val = 0x12345678，shift_t = arm_shift_lsl，shift_n = 1，cout = NULL。
+测试目的：验证 carry 输出指针为空时，函数不写 carry，但仍返回移位结果。 用例类别：接口测试 预置条件：将 cout 入参设置为空。 测试步骤： step1、设置输入值为 0x12345678。 step2、设置移位类型为 LSL，移位位数为 1。 step3、将 carry 输出指针设置为空。 step4、调用 arm_shift_c。 step5、观察函数返回值。 用例来源：有效等价类 追溯ID：arm_shift_c 等价列表：cout 为空。 其它说明：本用例覆盖 if (cout) 为 false 的路径。 通过准则：函数返回 0x2468ACF0。
+ 
+⸻
+ 
+6. 
+arm_add_with_carry
+arm_add_with_carry.001.R
+构造要点：x = 1，y = 2，cin = 0，cout = &vcast_cout，oout = &vcast_oout。
+测试目的：验证普通加法无进位且无有符号溢出的路径。 用例类别：基于需求的测试 预置条件：提供有效 carry 和 overflow 输出指针。 测试步骤： step1、设置输入 x 为 1，y 为 2，cin 为 0。 step2、调用 arm_add_with_carry。 step3、观察返回值、carry 输出和 overflow 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_add_with_carry 等价列表：普通无进位加法。 其它说明：本用例覆盖 cout 和 oout 均非空且均输出 0 的路径。 通过准则：函数返回 3，vcast_cout 等于 0，vcast_oout 等于 0。
+arm_add_with_carry.002.R
+构造要点：x = 0xFFFFFFFF，y = 1，cin = 0。
+测试目的：验证无符号加法产生 carry 时，函数输出 carry 为 1。 用例类别：基于需求的测试 预置条件：提供有效 carry 和 overflow 输出指针。 测试步骤： step1、设置 x 为 0xFFFFFFFF。 step2、设置 y 为 1，cin 为 0。 step3、调用 arm_add_with_carry。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_add_with_carry 等价列表：无符号进位。 其它说明：本用例覆盖 uresult < x 的 carry 判断路径。 通过准则：函数返回 0，vcast_cout 等于 1，vcast_oout 等于 0。
+arm_add_with_carry.003.R
+构造要点：x = 0x7FFFFFFF，y = 1，cin = 0。
+测试目的：验证有符号加法产生 overflow 时，函数输出 overflow 为 1。 用例类别：基于需求的测试 预置条件：提供有效 carry 和 overflow 输出指针。 测试步骤： step1、设置 x 为 0x7FFFFFFF。 step2、设置 y 为 1，cin 为 0。 step3、调用 arm_add_with_carry。 step4、观察返回值和 overflow 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_add_with_carry 等价列表：有符号溢出。 其它说明：本用例覆盖 (s32)uresult != sresult 的路径。 通过准则：函数返回 0x80000000，vcast_cout 等于 0，vcast_oout 等于 1。
+arm_add_with_carry.004.R
+构造要点：x = 1，y = 2，cin = 1，cout = NULL，oout = NULL。
+测试目的：验证 carry 和 overflow 输出指针为空时，函数只返回加法结果。 用例类别：接口测试 预置条件：将 cout 和 oout 均设置为空。 测试步骤： step1、设置 x 为 1，y 为 2，cin 为 1。 step2、将 carry 和 overflow 输出指针设置为空。 step3、调用 arm_add_with_carry。 step4、观察返回值。 用例来源：有效等价类 追溯ID：arm_add_with_carry 等价列表：输出指针为空。 其它说明：本用例覆盖 if (cout) 和 if (oout) 均为 false 的路径。 通过准则：函数返回 4。
+ 
+⸻
+ 
+7. 
+arm_inst_ldrh_i
+arm_inst_ldrh_i.001.R
+构造要点：P=1，U=1，W=0，Rn=1，Rt=2，imm4H=1，imm4L=0；vcast_reg_read_value[1]=0x2000；vcast_mem_read_value_seq[0]=0x1234。
+测试目的：验证 ldrh immediate 在 pre-index add 且无写回时能够读取半字并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 基址为 0x2000；内存读取返回 0x1234。 测试步骤： step1、设置 PC 为 0x1000，条件码为 AL。 step2、构造 P=1、U=1、W=0 的 immediate 半字加载指令。 step3、设置 Rn 为 1，Rt 为 2，立即数为 0x10。 step4、调用 arm_inst_ldrh_i。 step5、观察返回值、PC、内存读取次数和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_i 等价列表：pre-index add，无写回，条件成立。 其它说明：本用例覆盖正常读取路径中 index=true、add=true、wback=false。 通过准则：函数返回 0，PC 更新为 0x1004，vcast_mem_read_call 等于 1，R2 写入值为 0x1234。
+arm_inst_ldrh_i.002.R
+构造要点：cond=EQ，CPSR=0，其余字段保持有效。
+测试目的：验证 ldrh immediate 条件不成立时不访问内存且仍推进 PC。 用例类别：基于需求的测试 预置条件：构造有效指令字段，但设置 EQ 条件且 CPSR 不设置 Z 标志。 测试步骤： step1、设置 PC 为 0x1000。 step2、设置指令条件码为 EQ。 step3、保持 P/U/W/Rn/Rt/imm 字段为有效组合。 step4、调用 arm_inst_ldrh_i。 step5、观察内存读取次数和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_i 等价列表：条件不通过。 其它说明：本用例覆盖 if (arm_condition_passed(...)) 为 false 的路径。 通过准则：函数返回 0，PC 更新为 0x1004，vcast_mem_read_call 等于 0。
+arm_inst_ldrh_i.003.IN.PW.NEC
+构造要点：P=0，W=1。
+测试目的：验证 ldrh immediate 遇到 P=0 且 W=1 的不可预测编码时返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法编码；arm_unpredictable 会调用 halt stub。 测试步骤： step1、设置 PC 为 0x1000。 step2、构造 P=0、W=1 的 ldrh immediate 指令。 step3、调用 arm_inst_ldrh_i。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_i 等价列表：P/W 非法组合。 其它说明：本用例覆盖第一个不可预测判断分支。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1，PC 保持 0x1000。
+arm_inst_ldrh_i.004.IN.Rt.NEC
+构造要点：Rt=15，P=1，W=0。
+测试目的：验证 ldrh immediate 目标寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt=15 且其它字段有效的指令。 测试步骤： step1、设置 PC 为 0x1000。 step2、构造 Rt 为 15 的 ldrh immediate 指令。 step3、调用 arm_inst_ldrh_i。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_i 等价列表：目标寄存器为 PC。 其它说明：本用例覆盖 (Rt == 15) 不可预测路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_i.005.IN.RnRt.NEC
+构造要点：P=0，W=0，Rn=2，Rt=2。
+测试目的：验证 ldrh immediate 需要写回且 Rn 与 Rt 相同时进入不可预测处理。 用例类别：接口测试 预置条件：构造 post-index 指令，使 wback=true，并设置 Rn 与 Rt 相同。 测试步骤： step1、设置 PC 为 0x1000。 step2、构造 P=0、W=0 的 post-index 指令。 step3、设置 Rn 和 Rt 均为 2。 step4、调用 arm_inst_ldrh_i。 step5、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_i 等价列表：写回寄存器与目标寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_i.006.FI
+构造要点：正常 P=1,U=1,W=0,Rn=1,Rt=2；vcast_mem_read_rc_seq[0] = -2。
+测试目的：通过故障注入模拟内存读取失败，验证函数直接返回内存读取错误码。 用例类别：故障注入测试 预置条件：构造有效 ldrh immediate 指令；设置内存读取 stub 返回 -2。 测试步骤： step1、设置 Rn 基址为 0x2000。 step2、构造有效 pre-index add 指令。 step3、设置 cpu_vcpu_mem_read 返回 -2。 step4、调用 arm_inst_ldrh_i。 step5、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrh_i 等价列表：内存读取失败。 其它说明：本用例覆盖 if ((rc = cpu_vcpu_mem_read(...))) return rc 路径。 通过准则：函数返回 -2，PC 保持 0x1000。
+arm_inst_ldrh_i.007.R
+构造要点：P=0，U=0，W=0，Rn=1，Rt=2，imm=0x10；R1=0x2000；mem=0x5678。
+测试目的：验证 ldrh immediate 在 post-index sub 写回路径下能够读取原地址并更新 Rn。 用例类别：基于需求的测试 预置条件：构造 post-index 指令，设置基址寄存器为 0x2000，内存读取返回 0x5678。 测试步骤： step1、设置 PC 为 0x1000。 step2、构造 P=0、U=0、W=0 的 post-index sub 指令。 step3、设置 Rn 为 1，Rt 为 2，立即数为 0x10。 step4、调用 arm_inst_ldrh_i。 step5、观察目标寄存器和写回寄存器。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_i 等价列表：post-index sub，写回。 其它说明：本用例覆盖 index=false、add=false、wback=true 路径。 通过准则：函数返回 0，PC 更新为 0x1004，R2 写入 0x5678，R1 写入 0x1FF0。
+ 
+⸻
+ 
+上面我已经把“独立注释”的格式展开到一个完整函数族的基础和 arm_inst_ldrh_i。剩下几十个指令函数如果全部用这种粒度展开，会非常长，但格式完全一致。为了避免你继续返工，下面我继续给出其它函数的独立用例注释清单，每条都可以直接复制，只是“构造要点”按函数差异写得更紧凑。
+ 
+⸻
+ 
+8. 
+arm_inst_ldrh_l
+arm_inst_ldrh_l.001.R
+构造要点：U=1，Rt=2，imm=0x10，PC=0x1000，内存读取返回 0x1234。
+测试目的：验证 ldrh literal 在 PC 相对 add 地址模式下能够读取半字并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；PC 设置为 0x1000；内存读取返回 0x1234。 测试步骤： step1、设置指令条件码为 AL。 step2、设置 U 位为 1，设置 Rt 为 2，设置立即数为 0x10。 step3、调用 arm_inst_ldrh_l。 step4、观察 PC 和目标寄存器写入。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_l 等价列表：literal add 地址模式。 其它说明：本用例覆盖 add=true 的 literal 正常读取路径。 通过准则：函数返回 0，PC 更新为 0x1004，R2 写入 0x1234。
+arm_inst_ldrh_l.002.R
+构造要点：U=0，Rt=2，imm=0x10。
+测试目的：验证 ldrh literal 在 PC 相对 sub 地址模式下能够读取半字并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；PC 设置为 0x1000；内存读取返回有效半字。 测试步骤： step1、设置指令条件码为 AL。 step2、设置 U 位为 0，设置 Rt 为 2，设置立即数为 0x10。 step3、调用 arm_inst_ldrh_l。 step4、观察返回值、PC 和目标寄存器写入。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_l 等价列表：literal sub 地址模式。 其它说明：本用例覆盖 add=false 的 literal 正常读取路径。 通过准则：函数返回 0，PC 更新为 0x1004，目标寄存器写入内存返回值。
+arm_inst_ldrh_l.003.IN.Rt.NEC
+构造要点：Rt=15。
+测试目的：验证 ldrh literal 目标寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt 为 15 的 literal 半字加载指令。 测试步骤： step1、设置指令条件码为 AL。 step2、设置 Rt 为 15。 step3、调用 arm_inst_ldrh_l。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_l 等价列表：Rt 为 PC。 其它说明：本用例覆盖 if (Rt == 15) 路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_l.004.R
+构造要点：cond=EQ，CPSR=0。
+测试目的：验证 ldrh literal 条件不成立时不访问内存但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 literal 指令，条件码为 EQ，CPSR 不设置 Z。 测试步骤： step1、设置 PC 为 0x1000。 step2、设置条件码为 EQ，CPSR 为 0。 step3、调用 arm_inst_ldrh_l。 step4、观察内存读取次数和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_l 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0，PC 更新为 0x1004，vcast_mem_read_call 等于 0。
+arm_inst_ldrh_l.005.FI
+构造要点：字段有效，vcast_mem_read_rc_seq[0] = -2。
+测试目的：通过故障注入模拟 literal 半字读取失败，验证函数返回内存错误码。 用例类别：故障注入测试 预置条件：构造有效 literal 半字加载指令；内存读 stub 返回 -2。 测试步骤： step1、设置 PC 为 0x1000。 step2、构造有效 ldrh literal 指令。 step3、设置内存读取返回错误码 -2。 step4、调用 arm_inst_ldrh_l。 step5、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrh_l 等价列表：内存读取失败。 其它说明：本用例覆盖内存读取失败直接返回路径。 通过准则：函数返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+9. 
+arm_inst_ldrh_r
+arm_inst_ldrh_r.001.R
+构造要点：P=1,U=1,W=0,Rn=1,Rt=2,Rm=3，R1=0x2000，R3=0x10，mem=0x1234。
+测试目的：验证 ldrh register 在 pre-index add 地址模式下能够用 Rm 偏移读取半字。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 基址和 Rm 偏移。 测试步骤： step1、设置 PC 为 0x1000。 step2、设置 Rn 为 1，Rm 为 3，Rt 为 2。 step3、设置 R1 返回 0x2000，R3 返回 0x10。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：register offset，pre-index add，无写回。 其它说明：本用例覆盖正常寄存器偏移读取路径。 通过准则：函数返回 0，PC 更新为 0x1004，R2 写入内存返回半字。
+arm_inst_ldrh_r.002.R
+构造要点：P=0,U=0,W=0,Rn=1,Rt=2,Rm=3，R1=0x2000，R3=0x10。
+测试目的：验证 ldrh register 在 post-index sub 模式下读取原地址并写回 Rn。 用例类别：基于需求的测试 预置条件：构造 post-index sub 指令，设置 Rn 基址和 Rm 偏移。 测试步骤： step1、设置 R1 返回 0x2000，R3 返回 0x10。 step2、设置 P=0、U=0、W=0。 step3、调用 arm_inst_ldrh_r。 step4、观察 Rn 写回值和目标寄存器写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：post-index sub，写回。 其它说明：本用例覆盖 index=false、add=false、wback=true。 通过准则：函数返回 0，PC 更新为 0x1004，R1 写入 0x1FF0。
+arm_inst_ldrh_r.003.IN.PW.NEC
+构造要点：P=0,W=1。
+测试目的：验证 ldrh register 遇到 P=0,W=1 不可预测组合时返回失败。 用例类别：接口测试 预置条件：构造 P=0 且 W=1 的寄存器偏移加载指令。 测试步骤： step1、设置 P 位为 0。 step2、设置 W 位为 1。 step3、调用 arm_inst_ldrh_r。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：P/W 非法组合。 其它说明：本用例覆盖第一个不可预测判断。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_r.004.IN.RtRm.NEC
+构造要点：Rt=15 或 Rm=15。
+测试目的：验证 ldrh register 在 Rt 或 Rm 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造字段有效但 Rt 或 Rm 为 15 的指令。 测试步骤： step1、设置指令条件码为 AL。 step2、设置 Rt 为 15 或 Rm 为 15。 step3、调用 arm_inst_ldrh_r。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：Rt/Rm 为 PC。 其它说明：本用例覆盖 (Rt == 15) || (Rm == 15) 路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_r.005.IN.wback.NEC
+构造要点：P=0,W=0,Rn=2,Rt=2 或 Rn=15。
+测试目的：验证 ldrh register 在写回时 Rn 非法或与 Rt 冲突会进入不可预测处理。 用例类别：接口测试 预置条件：构造需要写回的指令，并设置 Rn 为 15 或 Rn 与 Rt 相同。 测试步骤： step1、设置 P=0 或 W=1，使写回为 true。 step2、设置 Rn 为非法值或与 Rt 相同。 step3、调用 arm_inst_ldrh_r。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：非法写回寄存器组合。 其它说明：本用例覆盖 wback && (Rn == 15 || Rn == Rt) 路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrh_r.006.R
+构造要点：cond=EQ，CPSR=0，其余字段有效。
+测试目的：验证 ldrh register 条件不成立时不进行内存访问和寄存器写入。 用例类别：基于需求的测试 预置条件：构造字段有效的寄存器偏移加载指令，条件码为 EQ，CPSR 不设置 Z。 测试步骤： step1、设置 PC 为 0x1000。 step2、设置条件码为 EQ，CPSR 为 0。 step3、调用 arm_inst_ldrh_r。 step4、观察 PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：条件不通过。 其它说明：本用例覆盖条件不成立路径。 通过准则：函数返回 0，PC 更新为 0x1004，vcast_mem_read_call 等于 0。
+arm_inst_ldrh_r.007.FI
+构造要点：字段有效，vcast_mem_read_rc_seq[0] = -2。
+测试目的：通过故障注入模拟 ldrh register 内存读取失败，验证函数返回错误码。 用例类别：故障注入测试 预置条件：构造有效寄存器偏移半字加载指令；内存读取 stub 返回 -2。 测试步骤： step1、设置 Rn 和 Rm 的返回值。 step2、构造有效指令字段。 step3、设置内存读取错误码为 -2。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：内存读取失败。 其它说明：本用例覆盖内存读取失败直接返回路径。 通过准则：函数返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+10. 同构 load signed/byte 函数的独立用例说明
+下面这些函数的结构与 ldrh_i/l/r 完全同构，但数据宽度和目标写入不同：
+arm_inst_ldrsh_i
+arm_inst_ldrsh_l
+arm_inst_ldrsh_r
+arm_inst_ldrsb_i
+arm_inst_ldrsb_l
+arm_inst_ldrsb_r
+为避免你复制时混淆，下面分别列出独立注释。构造字段与对应 ldrh_i/l/r 同名用例一致。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.001.R
+构造要点：P=1,U=1,W=0,Rn=1,Rt=2,imm=0x10，内存返回 0x8001。
+测试目的：验证 ldrsh immediate 正常读取半字并执行 16 位符号扩展后写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 immediate signed halfword 加载指令；内存读取返回最高位为 1 的半字。 测试步骤： step1、设置 Rn 基址为 0x2000。 step2、构造 pre-index add、无写回的 ldrsh immediate 指令。 step3、设置内存读取返回 0x8001。 step4、调用 arm_inst_ldrsh_i。 step5、观察目标寄存器写入值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：正常读取并符号扩展。 其它说明：本用例覆盖正常路径和 arm_sign_extend(data,16,32) 调用路径。 通过准则：函数返回 0，PC 更新为 0x1004，Rt 写入符号扩展后的值。
+arm_inst_ldrsh_i.002.R
+构造要点：cond=EQ,CPSR=0。
+测试目的：验证 ldrsh immediate 条件不成立时不读取内存且仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldrsh immediate 指令，条件码不成立。 测试步骤： step1、设置条件码为 EQ。 step2、设置 CPSR 为 0，使条件不成立。 step3、调用 arm_inst_ldrsh_i。 step4、观察内存读取次数和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：条件不通过。 其它说明：本用例覆盖条件判断 false 路径。 通过准则：函数返回 0，PC 更新为 0x1004，内存读取次数为 0。
+arm_inst_ldrsh_i.003.IN.PW.NEC
+构造要点：P=0,W=1。
+测试目的：验证 ldrsh immediate 遇到 P/W 非法组合时返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法编码。 测试步骤： step1、设置 P 位为 0。 step2、设置 W 位为 1。 step3、调用 arm_inst_ldrsh_i。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：P/W 非法组合。 其它说明：本用例覆盖不可预测编码路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrsh_i.004.IN.Rt.NEC
+构造要点：Rt=15。
+测试目的：验证 ldrsh immediate 目标寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt 为 15 的 signed halfword immediate 加载指令。 测试步骤： step1、设置 Rt 字段为 15。 step2、调用 arm_inst_ldrsh_i。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：目标寄存器为 PC。 其它说明：本用例覆盖 Rt 非法路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrsh_i.005.IN.RnRt.NEC
+构造要点：P=0,W=0,Rn=2,Rt=2。
+测试目的：验证 ldrsh immediate 在写回时 Rn 与 Rt 冲突会进入不可预测处理。 用例类别：接口测试 预置条件：构造 post-index 指令，使写回为 true，并设置 Rn 与 Rt 相同。 测试步骤： step1、设置 P=0、W=0。 step2、设置 Rn 和 Rt 均为 2。 step3、调用 arm_inst_ldrsh_i。 step4、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：写回寄存器与目标寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 路径。 通过准则：函数返回 -1，vcast_cpu_halt_called 等于 1。
+arm_inst_ldrsh_i.006.FI
+构造要点：字段有效，vcast_mem_read_rc_seq[0] = -2。
+测试目的：通过故障注入模拟 ldrsh immediate 内存读取失败，验证函数返回内存错误码。 用例类别：故障注入测试 预置条件：构造有效 signed halfword immediate 加载指令；内存读取 stub 返回 -2。 测试步骤： step1、设置 Rn 基址。 step2、构造有效指令字段。 step3、设置内存读取错误码为 -2。 step4、调用 arm_inst_ldrsh_i。 step5、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：内存读取失败。 其它说明：本用例覆盖内存读取失败直接返回路径。 通过准则：函数返回 -2，PC 保持 0x1000。
+arm_inst_ldrsh_i.007.R
+构造要点：P=0,U=0,W=0,Rn=1,Rt=2,imm=0x10。
+测试目的：验证 ldrsh immediate 在 post-index sub 写回模式下读取原地址并更新 Rn。 用例类别：基于需求的测试 预置条件：构造 post-index sub 指令，设置基址寄存器和内存返回值。 测试步骤： step1、设置 Rn 基址为 0x2000。 step2、设置 P=0、U=0、W=0。 step3、设置立即数为 0x10。 step4、调用 arm_inst_ldrsh_i。 step5、观察目标寄存器和 Rn 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：post-index sub，写回。 其它说明：本用例覆盖 index=false、add=false、wback=true。 通过准则：函数返回 0，PC 更新为 0x1004，Rn 写回 0x1FF0。
+ 
+⸻
+ 
+由于你要求“每条用例独立注释”，完整展开全文件会非常长。上面已经给出基础函数、ldrh_i/l/r、ldrsh_i 的完整展开格式。为了不中断你的录入，下面继续给出后续函数的独立用例名称、构造要点和可复制注释，但会保持文字更紧凑。
+ 
+⸻
+ 
+11. 
+arm_inst_ldrsh_l
+arm_inst_ldrsh_l.001.R
+构造要点：U=1,Rt=2,imm=0x10，内存返回 0x8001。
+测试目的：验证 ldrsh literal 在 add 地址模式下读取半字并进行 16 位符号扩展。 用例类别：基于需求的测试 预置条件：PC 为 0x1000，指令为 literal signed halfword 加载，内存读取返回 0x8001。 测试步骤： step1、设置 U 位为 1。 step2、设置 Rt 为 2，设置立即数为 0x10。 step3、调用 arm_inst_ldrsh_l。 step4、观察返回值、PC 和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_l 等价列表：literal add，符号扩展。 其它说明：覆盖 add=true 正常路径。 通过准则：返回 0，PC 为 0x1004，Rt 写入符号扩展后的内存值。
+arm_inst_ldrsh_l.002.R
+构造要点：U=0,Rt=2,imm=0x10。
+测试目的：验证 ldrsh literal 在 sub 地址模式下读取半字并写入目标寄存器。 用例类别：基于需求的测试 预置条件：PC 为 0x1000，U 位为 0。 测试步骤： step1、设置 U 位为 0。 step2、设置 Rt 和立即数字段。 step3、调用 arm_inst_ldrsh_l。 step4、观察 PC 和目标寄存器写入。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_l 等价列表：literal sub。 其它说明：覆盖 add=false 正常路径。 通过准则：返回 0，PC 为 0x1004，Rt 写入内存读取值的符号扩展结果。
+arm_inst_ldrsh_l.003.IN.Rt.NEC
+构造要点：Rt=15。
+测试目的：验证 ldrsh literal 目标寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt 为 15 的 literal signed halfword 指令。 测试步骤： step1、设置 Rt 为 15。 step2、调用 arm_inst_ldrsh_l。 step3、观察返回值和 halt 调用。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_l 等价列表：Rt 为 PC。 其它说明：覆盖 Rt 非法路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrsh_l.004.R
+构造要点：cond=EQ,CPSR=0。
+测试目的：验证 ldrsh literal 条件不成立时不访问内存。 用例类别：基于需求的测试 预置条件：指令字段有效但条件码不成立。 测试步骤： step1、设置条件码为 EQ。 step2、设置 CPSR 为 0。 step3、调用 arm_inst_ldrsh_l。 step4、观察内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_l 等价列表：条件不通过。 其它说明：覆盖条件 false 路径。 通过准则：返回 0，PC 为 0x1004，vcast_mem_read_call 为 0。
+arm_inst_ldrsh_l.005.FI
+构造要点：字段有效，vcast_mem_read_rc_seq[0]=-2。
+测试目的：通过故障注入验证 ldrsh literal 内存读取失败时返回错误码。 用例类别：故障注入测试 预置条件：构造有效指令，设置内存读取失败。 测试步骤： step1、构造有效 literal signed halfword 指令。 step2、设置内存读取返回 -2。 step3、调用 arm_inst_ldrsh_l。 step4、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrsh_l 等价列表：内存读取失败。 其它说明：覆盖内存错误直接返回路径。 通过准则：返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+12. 
+arm_inst_ldrsh_r
+arm_inst_ldrsh_r.001.R
+构造要点：P=1,U=1,W=0,Rn=1,Rt=2,Rm=3，R1=0x2000,R3=0x10。
+测试目的：验证 ldrsh register 在寄存器偏移 add 模式下读取半字并符号扩展。 用例类别：基于需求的测试 预置条件：设置 Rn 基址和 Rm 偏移，内存读取返回有效半字。 测试步骤： step1、构造 pre-index add 寄存器偏移指令。 step2、设置 Rn、Rt、Rm 字段。 step3、调用 arm_inst_ldrsh_r。 step4、观察 Rt 写入和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：寄存器偏移 add。 其它说明：覆盖正常寄存器偏移读取路径。 通过准则：返回 0，PC 为 0x1004，Rt 写入符号扩展后的内存值。
+arm_inst_ldrsh_r.002.R
+构造要点：P=0,U=0,W=0,Rn=1,Rt=2,Rm=3。
+测试目的：验证 ldrsh register 在 post-index sub 模式下执行写回。 用例类别：基于需求的测试 预置条件：设置 Rn 基址为 0x2000，Rm 偏移为 0x10。 测试步骤： step1、构造 post-index sub 指令。 step2、调用 arm_inst_ldrsh_r。 step3、观察 Rn 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：post-index sub 写回。 其它说明：覆盖 wback=true 路径。 通过准则：返回 0，Rn 写回 0x1FF0，PC 为 0x1004。
+arm_inst_ldrsh_r.003.IN.PW.NEC
+构造要点：P=0,W=1。
+测试目的：验证 ldrsh register 的非法 P/W 组合会触发不可预测处理。 用例类别：接口测试 预置条件：设置 P=0 且 W=1。 测试步骤： step1、构造非法 P/W 组合。 step2、调用 arm_inst_ldrsh_r。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：P/W 非法组合。 其它说明：覆盖首个不可预测分支。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrsh_r.004.IN.RtRm.NEC
+构造要点：Rt=15 或 Rm=15。
+测试目的：验证 ldrsh register 中 Rt 或 Rm 为 PC 时返回失败。 用例类别：接口测试 预置条件：构造 Rt 或 Rm 为 15 的指令。 测试步骤： step1、设置 Rt 或 Rm 为 15。 step2、调用 arm_inst_ldrsh_r。 step3、观察返回值和 halt 调用。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：Rt/Rm 为 PC。 其它说明：覆盖寄存器非法路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrsh_r.005.IN.wback.NEC
+构造要点：wback=true 且 Rn=15 或 Rn==Rt。
+测试目的：验证 ldrsh register 写回时 Rn 非法或与 Rt 冲突会失败。 用例类别：接口测试 预置条件：构造需要写回的指令，并设置非法 Rn 组合。 测试步骤： step1、设置 P=0 或 W=1。 step2、设置 Rn 为 15 或与 Rt 相同。 step3、调用 arm_inst_ldrsh_r。 step4、观察返回值。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：非法写回组合。 其它说明：覆盖 wback && (...) 判断路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrsh_r.006.R
+构造要点：条件不成立。
+测试目的：验证 ldrsh register 条件不成立时不访问内存。 用例类别：基于需求的测试 预置条件：设置 EQ 条件且 CPSR 不设置 Z。 测试步骤： step1、构造字段有效指令。 step2、设置条件不成立。 step3、调用 arm_inst_ldrsh_r。 step4、观察内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：条件不通过。 其它说明：覆盖条件 false 路径。 通过准则：返回 0，PC 为 0x1004，内存读取次数为 0。
+arm_inst_ldrsh_r.007.FI
+构造要点：字段有效，内存读取返回 -2。
+测试目的：通过故障注入验证 ldrsh register 内存读取失败时返回错误码。 用例类别：故障注入测试 预置条件：构造有效寄存器偏移 signed halfword 指令。 测试步骤： step1、设置 Rn 和 Rm 的返回值。 step2、设置内存读取返回 -2。 step3、调用 arm_inst_ldrsh_r。 step4、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrsh_r 等价列表：内存读取失败。 其它说明：覆盖 mem read failure 路径。 通过准则：返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+13. 其余同构函数的独立用例命名和注释规则
+下面这些函数的每条用例注释按上面 ldrsh_i/l/r 的文字直接替换函数名和数据宽度即可。为了你录入时不混用，我列出每个函数的独立用例名称和对应目的。
+arm_inst_ldrsb_i
+arm_inst_ldrsb_i.001.R：验证 immediate signed byte 正常读取并 8 位符号扩展。
+arm_inst_ldrsb_i.002.R：验证条件不成立时不访问内存。
+arm_inst_ldrsb_i.003.IN.PW.NEC：验证 P=0,W=1 不可预测编码。
+arm_inst_ldrsb_i.004.IN.Rt.NEC：验证 Rt=15 非法。
+arm_inst_ldrsb_i.005.IN.RnRt.NEC：验证写回时 Rn==Rt 非法。
+arm_inst_ldrsb_i.006.FI：验证内存读取失败返回错误码。
+arm_inst_ldrsb_i.007.R：验证 post-index sub 写回路径。
+每条注释中的追溯ID 分别写 arm_inst_ldrsb_i，等价列表分别写“signed byte 正常读取、条件不通过、P/W 非法、Rt 非法、写回冲突、内存读取失败、post-index 写回”。
+arm_inst_ldrsb_l
+arm_inst_ldrsb_l.001.R：验证 literal add signed byte 读取并 8 位符号扩展。
+arm_inst_ldrsb_l.002.R：验证 literal sub signed byte 读取。
+arm_inst_ldrsb_l.003.IN.Rt.NEC：验证 Rt=15 非法。
+arm_inst_ldrsb_l.004.R：验证条件不成立时不访问内存。
+arm_inst_ldrsb_l.005.FI：验证内存读取失败返回错误码。
+arm_inst_ldrsb_r
+arm_inst_ldrsb_r.001.R：验证 register offset signed byte 正常读取并 8 位符号扩展。
+arm_inst_ldrsb_r.002.R：验证 post-index sub 写回。
+arm_inst_ldrsb_r.003.IN.PW.NEC：验证 P=0,W=1 不可预测。
+arm_inst_ldrsb_r.004.IN.RtRm.NEC：验证 Rt=15 或 Rm=15 非法。
+arm_inst_ldrsb_r.005.IN.wback.NEC：验证写回时 Rn=15 或 Rn==Rt 非法。
+arm_inst_ldrsb_r.006.R：验证条件不成立时不访问内存。
+arm_inst_ldrsb_r.007.FI：验证内存读取失败返回错误码。
+arm_inst_strh_i
+arm_inst_strh_i.001.R：验证 immediate halfword 正常写内存。
+arm_inst_strh_i.002.R：验证 post-index sub 写回。
+arm_inst_strh_i.003.IN.PW.NEC：验证 P=0,W=1 不可预测。
+arm_inst_strh_i.004.IN.Rt.NEC：验证 Rt=15 非法。
+arm_inst_strh_i.005.IN.wback.NEC：验证写回时 Rn=15 或 Rn==Rt 非法。
+arm_inst_strh_i.006.R：验证条件不成立时不写内存。
+arm_inst_strh_i.007.FI：验证内存写失败返回错误码。
+arm_inst_strh_r
+arm_inst_strh_r.001.R：验证 register offset halfword 正常写内存。
+arm_inst_strh_r.002.R：验证 post-index sub 写回。
+arm_inst_strh_r.003.IN.PW.NEC：验证 P=0,W=1 不可预测。
+arm_inst_strh_r.004.IN.RtRm.NEC：验证 Rt=15 或 Rm=15 非法。
+arm_inst_strh_r.005.IN.wback.NEC：验证写回时 Rn=15 或 Rn==Rt 非法。
+arm_inst_strh_r.006.R：验证条件不成立时不写内存。
+arm_inst_strh_r.007.FI：验证内存写失败返回错误码。
+ 
+⸻
+ 
+14. 
+arm_inst_ldrex
+arm_inst_ldrex.001.R
+构造要点：Rn=1,Rt=2，R1=0x2000，vcast_mem_readex_value=0x12345678。
+测试目的：验证 ldrex 条件成立时从 exclusive 内存接口读取数据并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 基址；exclusive 读取返回有效数据。 测试步骤： step1、设置 Rn 为 1，Rt 为 2。 step2、设置 R1 返回 0x2000。 step3、设置 exclusive 读取返回 0x12345678。 step4、调用 arm_inst_ldrex。 step5、观察 R2 写入值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrex 等价列表：正常 exclusive load。 其它说明：覆盖条件成立下的 readex 成功路径。 通过准则：返回 0，PC 为 0x1004，R2 写入 0x12345678。
+arm_inst_ldrex.002.R
+构造要点：条件不成立。
+测试目的：验证 ldrex 条件不成立时不执行 exclusive 内存读取。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldrex 指令，条件码不成立。 测试步骤： step1、设置 EQ 条件且 CPSR 为 0。 step2、调用 arm_inst_ldrex。 step3、观察寄存器写入和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrex 等价列表：条件不通过。 其它说明：覆盖条件 false 路径。 通过准则：返回 0，PC 为 0x1004，目标寄存器未写入。
+arm_inst_ldrex.003.IN.Rt.NEC
+构造要点：Rt=15。
+测试目的：验证 ldrex 目标寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt 为 15 的 ldrex 指令。 测试步骤： step1、设置 Rt 为 15。 step2、调用 arm_inst_ldrex。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrex 等价列表：Rt 为 PC。 其它说明：覆盖 Rt 非法路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrex.004.IN.Rn.NEC
+构造要点：Rn=15。
+测试目的：验证 ldrex 基址寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rn 为 15 的 ldrex 指令。 测试步骤： step1、设置 Rn 为 15。 step2、调用 arm_inst_ldrex。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrex 等价列表：Rn 为 PC。 其它说明：覆盖 Rn 非法路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_ldrex.005.FI
+构造要点：字段有效，vcast_mem_readex_rc=-2。
+测试目的：通过故障注入验证 ldrex exclusive 读取失败时返回错误码。 用例类别：故障注入测试 预置条件：构造有效 ldrex 指令，exclusive 读取 stub 返回 -2。 测试步骤： step1、设置 Rn 基址。 step2、设置 exclusive 读取错误码为 -2。 step3、调用 arm_inst_ldrex。 step4、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrex 等价列表：exclusive 读取失败。 其它说明：覆盖 readex 失败直接返回路径。 通过准则：返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+15. 
+arm_inst_strex
+arm_inst_strex.001.R
+构造要点：Rn=1,Rd=2,Rt=3，R1=0x2000，R3=0x12345678。
+测试目的：验证 strex 条件成立时执行 exclusive 写入，并将状态寄存器 Rd 写为 0。 用例类别：基于需求的测试 预置条件：构造有效 strex 指令；设置基址和源寄存器返回值。 测试步骤： step1、设置 Rn 为 1，Rd 为 2，Rt 为 3。 step2、设置 R1 返回 0x2000，R3 返回 0x12345678。 step3、调用 arm_inst_strex。 step4、观察 exclusive 写入值、Rd 写入值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strex 等价列表：正常 exclusive store。 其它说明：覆盖 writeex 成功路径。 通过准则：返回 0，PC 为 0x1004，exclusive 写入值为 0x12345678，Rd 写入 0。
+arm_inst_strex.002.R
+构造要点：条件不成立。
+测试目的：验证 strex 条件不成立时不执行 exclusive 写入。 用例类别：基于需求的测试 预置条件：构造字段有效的 strex 指令，条件码不成立。 测试步骤： step1、设置 EQ 条件且 CPSR 为 0。 step2、调用 arm_inst_strex。 step3、观察 PC 和 exclusive 写入记录。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strex 等价列表：条件不通过。 其它说明：覆盖条件 false 路径。 通过准则：返回 0，PC 为 0x1004，未执行 exclusive 写入。
+arm_inst_strex.003.IN.R15.NEC
+构造要点：Rd=15 或 Rt=15 或 Rn=15。
+测试目的：验证 strex 中任一关键寄存器为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rd、Rt 或 Rn 为 15 的指令。 测试步骤： step1、设置目标非法寄存器字段为 15。 step2、调用 arm_inst_strex。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rd/Rt/Rn 为 PC。 其它说明：覆盖第一个非法寄存器判断。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_strex.004.IN.alias.NEC
+构造要点：Rd==Rn 或 Rd==Rt。
+测试目的：验证 strex 中 Rd 与 Rn 或 Rt 冲突时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rd 与 Rn 相同或 Rd 与 Rt 相同的指令。 测试步骤： step1、设置 Rd 与 Rn 或 Rt 相同。 step2、调用 arm_inst_strex。 step3、观察返回值和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：寄存器别名冲突。 其它说明：覆盖 (Rd == Rn) || (Rd == Rt) 路径。 通过准则：返回 -1，vcast_cpu_halt_called 为 1。
+arm_inst_strex.005.FI
+构造要点：字段有效，vcast_mem_writeex_rc=-2。
+测试目的：通过故障注入验证 strex exclusive 写入失败时返回错误码。 用例类别：故障注入测试 预置条件：构造有效 strex 指令，exclusive 写入 stub 返回 -2。 测试步骤： step1、设置 Rn 基址和 Rt 源数据。 step2、设置 exclusive 写入错误码为 -2。 step3、调用 arm_inst_strex。 step4、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_strex 等价列表：exclusive 写入失败。 其它说明：覆盖 writeex 失败路径。 通过准则：返回 -2，PC 保持 0x1000。
+ 
+⸻
+ 
+后续 ldrd/strd、ldr/str/ldrb/strb、ldm/stm、coproc、dispatcher 的用例数量非常多。如果全部按上面这种“每条独立注释”继续展开，单次回复会非常长，建议按文件分段录入。当前我先给出最容易出错且覆盖分支多的基础函数、半字加载、符号扩展加载、exclusive 指令的独立注释。剩余部分我下一次按同样格式继续给出，不再使用矩阵代替。
