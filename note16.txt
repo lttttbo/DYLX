@@ -1,0 +1,1015 @@
+下面给你一版基于当前极简 User Code 原则重新整理的完整方案。重点是：
+	1.	不再定义全局 vcast_arm_vcpu、vcast_arm_regs、vcast_cp；
+	2.	每条用例自己在 Value User Code 中定义 static struct vmm_vcpu vcpu; static arch_regs_t regs;；
+	3.	User Code 只保留基础变量和必要 stub 打点；
+	4.	不额外定义一堆宏和 fixture reset 函数；
+	5.	所有 if/条件判断尽量双侧覆盖；
+	6.	确实无法覆盖的 dead code 单独说明。
+ 
+⸻
+ 
+一、最终精简 User Code
+1. User Code -> Header
+#include <string.h>
+
+/*
+ * 如果 Value User Code 中 static struct vmm_vcpu vcpu 或 arch_regs_t regs 编译不过，
+ * 再补充实际定义这些类型的头文件。
+ *
+ * 常见可能需要：
+ * #include <arch_regs.h>
+ * #include <cpu_vcpu_helper.h>
+ * #include <cpu_vcpu_coproc.h>
+ * #include <vmm_manager.h>
+ */
+先只放 string.h。如果局部 static struct vmm_vcpu vcpu; 编译不过，再加实际定义 struct vmm_vcpu 的头文件。
+ 
+⸻
+ 
+2. User Code -> Data
+unsigned int vcast_reg_read_value[16];
+unsigned int vcast_reg_write_value[16];
+unsigned int vcast_reg_write_called[16];
+
+unsigned int vcast_mem_read_value_seq[8];
+int vcast_mem_read_rc_seq[8];
+unsigned int vcast_mem_read_call;
+
+int vcast_mem_write_rc_seq[8];
+unsigned int vcast_mem_write_addr_seq[8];
+unsigned int vcast_mem_write_size_seq[8];
+unsigned int vcast_mem_write_value_seq[8];
+unsigned int vcast_mem_write_call;
+
+unsigned int vcast_mem_readex_value;
+int vcast_mem_readex_rc;
+unsigned int vcast_mem_writeex_value;
+int vcast_mem_writeex_rc;
+
+unsigned int vcast_irq_assert_called;
+unsigned int vcast_irq_assert_irq;
+unsigned int vcast_cpu_halt_called;
+
+unsigned int vcast_cout;
+unsigned int vcast_oout;
+unsigned int vcast_shift_t;
+
+/* coprocessor 控制变量，只有 coproc 类用例需要 */
+unsigned int vcast_cp_mask;
+unsigned int vcast_cp_accept_ret;
+unsigned int vcast_cp_done_after;
+unsigned int vcast_cp_read_value_seq[8];
+unsigned int vcast_cp_write_value_seq[8];
+unsigned int vcast_cp_write_call;
+unsigned int vcast_cp_read_call;
+unsigned int vcast_cp_done_call;
+unsigned int vcast_cp_data_process_ret;
+unsigned int vcast_cp_read_ret;
+unsigned int vcast_cp_write_ret;
+unsigned int vcast_cp_read2_ret;
+unsigned int vcast_cp_write2_ret;
+unsigned int vcast_cp_read2_data0;
+unsigned int vcast_cp_read2_data1;
+ 
+⸻
+ 
+3. User Code -> Test Case Init
+memset(vcast_reg_read_value, 0, sizeof(vcast_reg_read_value));
+memset(vcast_reg_write_value, 0, sizeof(vcast_reg_write_value));
+memset(vcast_reg_write_called, 0, sizeof(vcast_reg_write_called));
+
+memset(vcast_mem_read_value_seq, 0, sizeof(vcast_mem_read_value_seq));
+memset(vcast_mem_read_rc_seq, 0, sizeof(vcast_mem_read_rc_seq));
+vcast_mem_read_call = 0U;
+
+memset(vcast_mem_write_rc_seq, 0, sizeof(vcast_mem_write_rc_seq));
+memset(vcast_mem_write_addr_seq, 0, sizeof(vcast_mem_write_addr_seq));
+memset(vcast_mem_write_size_seq, 0, sizeof(vcast_mem_write_size_seq));
+memset(vcast_mem_write_value_seq, 0, sizeof(vcast_mem_write_value_seq));
+vcast_mem_write_call = 0U;
+
+vcast_mem_readex_value = 0U;
+vcast_mem_readex_rc = 0;
+vcast_mem_writeex_value = 0U;
+vcast_mem_writeex_rc = 0;
+
+vcast_irq_assert_called = 0U;
+vcast_irq_assert_irq = 0U;
+vcast_cpu_halt_called = 0U;
+
+vcast_cout = 0U;
+vcast_oout = 0U;
+vcast_shift_t = 0U;
+
+vcast_cp_mask = 0U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+memset(vcast_cp_read_value_seq, 0, sizeof(vcast_cp_read_value_seq));
+memset(vcast_cp_write_value_seq, 0, sizeof(vcast_cp_write_value_seq));
+vcast_cp_write_call = 0U;
+vcast_cp_read_call = 0U;
+vcast_cp_done_call = 0U;
+vcast_cp_data_process_ret = 1U;
+vcast_cp_read_ret = 1U;
+vcast_cp_write_ret = 1U;
+vcast_cp_read2_ret = 1U;
+vcast_cp_write2_ret = 1U;
+vcast_cp_read2_data0 = 0x11111111U;
+vcast_cp_read2_data1 = 0x22222222U;
+ 
+⸻
+ 
+二、Stub User Code
+下面这些是必要的，因为产品函数依赖寄存器访问、内存访问、halt、irq assert。
+1. 
+vmm_printf
+return 0;
+ 
+⸻
+ 
+2. 
+cpu_vcpu_halt
+extern unsigned int vcast_cpu_halt_called;
+
+vcast_cpu_halt_called++;
+
+return;
+ 
+⸻
+ 
+3. 
+vmm_vcpu_irq_assert
+如果参数名是 irq：
+extern unsigned int vcast_irq_assert_called;
+extern unsigned int vcast_irq_assert_irq;
+
+vcast_irq_assert_called++;
+vcast_irq_assert_irq = irq;
+
+return;
+如果 VectorCAST 生成的参数名不是 irq，替换成实际参数名。
+ 
+⸻
+ 
+4. 
+cpu_vcpu_reg_read
+extern unsigned int vcast_reg_read_value[16];
+
+if (reg > 15U) {
+    return 0U;
+}
+
+return vcast_reg_read_value[reg];
+ 
+⸻
+ 
+5. 
+cpu_vcpu_reg_write
+extern unsigned int vcast_reg_write_value[16];
+extern unsigned int vcast_reg_write_called[16];
+
+if (reg <= 15U) {
+    vcast_reg_write_called[reg]++;
+    vcast_reg_write_value[reg] = data;
+}
+
+return;
+ 
+⸻
+ 
+6. 
+cpu_vcpu_mem_read
+extern unsigned int vcast_mem_read_value_seq[8];
+extern int vcast_mem_read_rc_seq[8];
+extern unsigned int vcast_mem_read_call;
+
+unsigned int idx = vcast_mem_read_call;
+unsigned int value;
+
+if (idx > 7U) {
+    idx = 7U;
+}
+
+value = vcast_mem_read_value_seq[idx];
+vcast_mem_read_call++;
+
+if (dst != (void *)0) {
+    if (len == 1U) {
+        *((unsigned char *)dst) = (unsigned char)value;
+    } else if (len == 2U) {
+        *((unsigned short *)dst) = (unsigned short)value;
+    } else {
+        *((unsigned int *)dst) = (unsigned int)value;
+    }
+}
+
+return vcast_mem_read_rc_seq[idx];
+ 
+⸻
+ 
+7. 
+cpu_vcpu_mem_write
+extern int vcast_mem_write_rc_seq[8];
+extern unsigned int vcast_mem_write_addr_seq[8];
+extern unsigned int vcast_mem_write_size_seq[8];
+extern unsigned int vcast_mem_write_value_seq[8];
+extern unsigned int vcast_mem_write_call;
+
+unsigned int idx = vcast_mem_write_call;
+unsigned int value = 0U;
+
+if (idx > 7U) {
+    idx = 7U;
+}
+
+if (src != (void *)0) {
+    if (len == 1U) {
+        value = *((unsigned char *)src);
+    } else if (len == 2U) {
+        value = *((unsigned short *)src);
+    } else {
+        value = *((unsigned int *)src);
+    }
+}
+
+vcast_mem_write_addr_seq[idx] = address;
+vcast_mem_write_size_seq[idx] = len;
+vcast_mem_write_value_seq[idx] = value;
+vcast_mem_write_call++;
+
+return vcast_mem_write_rc_seq[idx];
+ 
+⸻
+ 
+8. 
+cpu_vcpu_mem_readex
+extern unsigned int vcast_mem_readex_value;
+extern int vcast_mem_readex_rc;
+
+if (dst != (void *)0) {
+    *((unsigned int *)dst) = vcast_mem_readex_value;
+}
+
+return vcast_mem_readex_rc;
+ 
+⸻
+ 
+9. 
+cpu_vcpu_mem_writeex
+extern unsigned int vcast_mem_writeex_value;
+extern int vcast_mem_writeex_rc;
+
+if (src != (void *)0) {
+    vcast_mem_writeex_value = *((unsigned int *)src);
+}
+
+return vcast_mem_writeex_rc;
+ 
+⸻
+ 
+三、通用用例局部构造模板
+每条指令函数用例的 Value User Code 采用这个模板：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+arm_pc(&regs) = 0x1000U;
+arm_cpsr(&regs) = 0U;
+
+inst = 0U;
+
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* 下面按具体函数设置字段 */
+
+<<emulate_arm.<函数名>.inst>> = inst;
+<<emulate_arm.<函数名>.regs>> = &regs;
+<<emulate_arm.<函数名>.vcpu>> = &vcpu;
+如果要构造条件不成立：
+inst |= (0x0U << ARM_INST_COND_SHIFT);  /* EQ */
+arm_cpsr(&regs) = 0U;                   /* Z = 0，所以 EQ 不成立 */
+如果要构造条件成立：
+inst |= (0xEU << ARM_INST_COND_SHIFT);  /* AL */
+ 
+⸻
+ 
+四、基础函数测试用例
+1. 
+arm_unpredictable.001.R
+构造
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+arm_pc(&regs) = 0x1000U;
+
+<<emulate_arm.arm_unpredictable.regs>> = &regs;
+<<emulate_arm.arm_unpredictable.vcpu>> = &vcpu;
+<<emulate_arm.arm_unpredictable.inst>> = 0x12345678U;
+<<emulate_arm.arm_unpredictable.reason>> = "test";
+期望
+vcast_cpu_halt_called = 1
+注释
+测试目的：验证不可预测指令处理函数会输出诊断信息并 halt 当前 VCPU。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象和 VCPU 对象；对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造寄存器对象和 VCPU 对象。 step2、设置测试指令值为 0x12345678。 step3、调用 arm_unpredictable。 step4、观察 halt 接口调用次数。 用例来源：需求分析、有效等价类 追溯ID：arm_unpredictable 等价列表：不可预测指令处理路径。 其它说明：vmm_printf 可打桩为空实现。 通过准则：cpu_vcpu_halt 被调用一次。
+ 
+⸻
+ 
+2. 
+arm_sign_extend
+arm_sign_extend.001.R
+<<emulate_arm.arm_sign_extend.imm>> = 0x80U;
+<<emulate_arm.arm_sign_extend.len>> = 8U;
+<<emulate_arm.arm_sign_extend.bits>> = 16U;
+期望：
+return = 0xFF80
+十进制 = 65408
+arm_sign_extend.002.R
+<<emulate_arm.arm_sign_extend.imm>> = 0x7FU;
+<<emulate_arm.arm_sign_extend.len>> = 8U;
+<<emulate_arm.arm_sign_extend.bits>> = 16U;
+期望：
+return = 0x007F
+十进制 = 127
+注释
+测试目的：验证立即数符号扩展函数在符号位为 1 和符号位为 0 时的处理结果。 用例类别：基于需求的测试 预置条件：构造 imm、len 和 bits 入参。 测试步骤： step1、设置待扩展立即数。 step2、设置源位宽和目标位宽。 step3、调用 arm_sign_extend。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_sign_extend 等价列表：符号位为 1；符号位为 0。 其它说明：源码中 bits = 32 时存在 1 << 32 未定义行为风险，独立函数测试建议使用 bits = 16。 通过准则：符号位为 1 时返回 0xFF80；符号位为 0 时返回 0x007F。
+ 
+⸻
+ 
+3. 
+arm_condition_check
+用例	cond	CPSR	期望
+arm_condition_check.001.R	0xE	0	1
+arm_condition_check.002.R	0x0	CPSR_ZERO_MASK	1
+arm_condition_check.003.R	0x1	CPSR_ZERO_MASK	0
+arm_condition_check.004.R	0x2	CPSR_CARRY_MASK	1
+arm_condition_check.005.R	0x3	0	1
+arm_condition_check.006.R	0x4	CPSR_NEGATIVE_MASK	1
+arm_condition_check.007.R	0x5	0	1
+arm_condition_check.008.R	0x6	CPSR_OVERFLOW_MASK	1
+arm_condition_check.009.R	0x7	0	1
+arm_condition_check.010.R	0x8	CPSR_CARRY_MASK	1
+arm_condition_check.011.R	0x8	`CPSR_CARRY_MASK	CPSR_ZERO_MASK`
+arm_condition_check.012.R	0xA	`CPSR_NEGATIVE_MASK	CPSR_OVERFLOW_MASK`
+arm_condition_check.013.R	0xA	CPSR_NEGATIVE_MASK	0
+arm_condition_check.014.R	0xC	`CPSR_NEGATIVE_MASK	CPSR_OVERFLOW_MASK`
+arm_condition_check.015.R	0xC	`CPSR_NEGATIVE_MASK	CPSR_OVERFLOW_MASK
+arm_condition_check.016.R	0xF	0	1
+构造示例
+static arch_regs_t regs;
+
+memset(&regs, 0, sizeof(regs));
+arm_cpsr(&regs) = CPSR_ZERO_MASK;
+
+<<emulate_arm.arm_condition_check.cond>> = 0x0U;
+<<emulate_arm.arm_condition_check.regs>> = &regs;
+注释
+测试目的：验证 ARM 条件码判断函数在不同条件码和 CPSR 标志组合下返回正确判断结果。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象，并设置 CPSR 标志位。 测试步骤： step1、设置条件码 cond。 step2、设置寄存器对象中的 CPSR 标志。 step3、调用 arm_condition_check。 step4、观察返回值。 用例来源：需求分析、有效等价类 追溯ID：arm_condition_check 等价列表：EQ/NE、CS/CC、MI/PL、VS/VC、HI/LS、GE/LT、GT/LE、AL/NV。 其它说明：本组用例覆盖 switch 的所有 case 和条件反转分支。 通过准则：函数返回值与表格中期望一致。
+ 
+⸻
+ 
+4. 
+arm_decode_imm_shift
+用例	type	imm5	期望 shift_t	期望 return
+.001.R	0	3	arm_shift_lsl	3
+.002.R	1	5	arm_shift_lsr	5
+.003.R	1	0	arm_shift_lsr	32
+.004.R	2	7	arm_shift_asr	7
+.005.R	2	0	arm_shift_asr	32
+.006.R	3	9	arm_shift_ror	9
+.007.R	3	0	arm_shift_rrx	1
+.008.IN.type.NEC	4	0	不检查	0
+构造示例
+vcast_shift_t = 0U;
+
+<<emulate_arm.arm_decode_imm_shift.type>> = 1U;
+<<emulate_arm.arm_decode_imm_shift.imm5>> = 0U;
+<<emulate_arm.arm_decode_imm_shift.shift_t>> = &vcast_shift_t;
+注释
+测试目的：验证立即数移位解码函数对 LSL、LSR、ASR、ROR、RRX 和非法类型的解码结果。 用例类别：基于需求的测试、接口测试 预置条件：提供有效的 shift_t 输出指针。 测试步骤： step1、设置移位类型 type。 step2、设置立即数 imm5。 step3、调用 arm_decode_imm_shift。 step4、观察返回的移位位数和输出的移位类型。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_decode_imm_shift 等价列表：LSL、LSR、ASR、ROR、RRX、非法 type。 通过准则：返回值和 shift_t 与表格期望一致。
+ 
+⸻
+ 
+5. 
+arm_shift_c
+用例	val	shift_t	shift_n	cin	cout	return	cout 期望
+.001.R	0x12345678	arm_shift_lsl	0	1	&vcast_cout	0x12345678	1
+.002.R	0x80000000	arm_shift_lsl	1	0	&vcast_cout	0x00000000	1
+.003.R	0x00000003	arm_shift_lsr	1	0	&vcast_cout	0x00000001	1
+.004.R	0x80000000	arm_shift_asr	1	0	&vcast_cout	0xC0000000	0
+.005.R	0x00000002	arm_shift_asr	1	0	&vcast_cout	0x00000001	0
+.006.R	0x80000001	arm_shift_ror	4	0	&vcast_cout	0x18000000	0
+.007.R	0x00000001	arm_shift_rrx	1	1	&vcast_cout	0x80000000	1
+.008.R	0x12345678	arm_shift_lsl	1	0	NULL	0x2468ACF0	不检查
+注释
+测试目的：验证带进位输出的 ARM 移位函数覆盖无移位、LSL、LSR、ASR、ROR、RRX 以及 cout 为空的路径。 用例类别：基于需求的测试 预置条件：构造移位值、移位类型、移位位数、输入 carry 和可选输出指针。 测试步骤： step1、设置 val、shift_t、shift_n 和 cin。 step2、根据用例设置 cout 是否为空。 step3、调用 arm_shift_c。 step4、观察返回值和 carry 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_shift_c 等价列表：无移位、逻辑左移、逻辑右移、算术右移、循环右移、带扩展循环右移。 通过准则：返回值和 carry 输出与表格一致。
+ 
+⸻
+ 
+6. 
+arm_add_with_carry
+用例	x	y	cin	cout	oout	return	cout 期望	oout 期望
+.001.R	1	2	0	&vcast_cout	&vcast_oout	3	0	0
+.002.R	0xFFFFFFFF	1	0	&vcast_cout	&vcast_oout	0	1	0
+.003.R	0x7FFFFFFF	1	0	&vcast_cout	&vcast_oout	0x80000000	0	1
+.004.R	1	2	1	NULL	NULL	4	不检查	不检查
+注释
+测试目的：验证带 carry 的加法函数覆盖无进位、无符号进位、有符号溢出以及输出指针为空的路径。 用例类别：基于需求的测试 预置条件：构造加数、被加数、输入 carry 和可选输出指针。 测试步骤： step1、设置 x、y 和 cin。 step2、根据用例设置 cout 和 oout。 step3、调用 arm_add_with_carry。 step4、观察返回值、carry 输出和 overflow 输出。 用例来源：需求分析、有效等价类 追溯ID：arm_add_with_carry 等价列表：普通加法、无符号进位、有符号溢出、输出指针为空。 通过准则：返回值、cout、oout 与表格一致。
+ 
+⸻
+ 
+五、半字 Load/Store 指令函数
+下面给出完整矩阵。每条用例的 Value User Code 都使用“三、通用用例局部构造模板”。
+1. 
+arm_inst_ldrh_i
+用例	构造重点	期望
+.001.R	P=1,U=1,W=0,Rn=1,Rt=2,imm=0x10；R1=0x2000；mem_read[0]=0x1234	return=0，PC=0x1004，R2=0x1234
+.002.R	cond=EQ，CPSR=0	return=0，PC=0x1004，mem_read_call=0
+.003.IN.PW.NEC	P=0,W=1	return=-1，vcast_cpu_halt_called=1
+.004.IN.Rt.NEC	Rt=15	return=-1
+.005.IN.RnRt.NEC	P=0,W=0,Rn=2,Rt=2	return=-1
+.006.FI	正常字段，mem_read_rc_seq[0]=-2	return=-2，PC=0x1000
+.007.R	P=0,U=0,W=0,Rn=1,Rt=2,imm=0x10，R1=0x2000	R1=0x1FF0，R2=mem16
+注释
+测试目的：验证 ldrh immediate 在正常寻址、条件不成立、不可预测组合、内存读取失败和写回路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；通过 instruction 字段设置 P/U/W/Rn/Rt/imm；对寄存器读写和内存读接口打桩。 测试步骤： step1、初始化寄存器对象 PC 为 0x1000。 step2、设置基础寄存器 Rn 的返回值。 step3、按用例设置指令字段。 step4、按用例设置内存读取返回值或错误码。 step5、调用 arm_inst_ldrh_i。 step6、观察返回值、PC、寄存器写入和内存访问情况。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：arm_inst_ldrh_i 等价列表：正常读取、条件不通过、不可预测编码、内存读失败、写回。 通过准则：返回值、PC、写回寄存器和目标寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+2. 
+arm_inst_ldrh_l
+用例	构造重点	期望
+.001.R	U=1,Rt=2,imm=0x10，PC=0x1000，mem=0x1234	R2=0x1234，PC=0x1004
+.002.R	U=0,Rt=2,imm=0x10	走 sub 地址路径，PC=0x1004
+.003.IN.Rt.NEC	Rt=15	return=-1
+.004.R	cond=EQ,CPSR=0	return=0，mem_read_call=0，PC=0x1004
+.005.FI	mem_read_rc_seq[0]=-2	return=-2，PC=0x1000
+注释
+测试目的：验证 ldrh literal 在 PC 相对加/减地址、条件不成立、Rt 非法和内存读取失败时的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；通过 instruction 字段设置 U/Rt/imm；对内存读和寄存器写接口打桩。 测试步骤： step1、初始化 PC 为 0x1000。 step2、按用例设置 U、Rt 和 imm 字段。 step3、按用例设置内存读取数据或错误码。 step4、调用 arm_inst_ldrh_l。 step5、观察返回值、PC 和目标寄存器写入情况。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：arm_inst_ldrh_l 等价列表：literal add、literal sub、条件不通过、Rt 非法、内存读失败。 通过准则：返回值、PC 和寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+3. 
+arm_inst_ldrh_r
+用例	构造重点	期望
+.001.R	P=1,U=1,W=0,Rn=1,Rt=2,Rm=3，R1=0x2000,R3=0x10	address=0x2010，R2=mem16
+.002.R	P=0,U=0,W=0	R1=0x1FF0 写回
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.RtRm.NEC	Rt=15 或 Rm=15	return=-1
+.005.IN.wback.NEC	P=0,Rn=2,Rt=2 或 P=0,Rn=15	return=-1
+.006.R	cond=EQ,CPSR=0	PC=0x1004,no mem
+.007.FI	mem_read_rc_seq[0]=-2	return=-2
+注释
+测试目的：验证 ldrh register 在寄存器偏移寻址、条件不成立、不可预测编码、内存读取失败和写回路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn/Rm 的寄存器返回值；对内存读和寄存器写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置 Rn 基址和 Rm 偏移寄存器返回值。 step3、按用例设置 P/U/W/Rn/Rt/Rm 字段。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、内存访问和寄存器写回。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：arm_inst_ldrh_r 等价列表：正常寄存器偏移、条件不通过、非法 Rt/Rm、非法写回、内存读失败。 通过准则：返回值、PC、目标寄存器和写回寄存器符合矩阵期望。
+ 
+⸻
+ 
+4. 同构函数矩阵
+下面这些函数与 ldrh_i/l/r 结构同构，按对应矩阵构造即可：
+函数	正常读取字节数	目标写入
+arm_inst_ldrsh_i	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsh_l	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsh_r	2	arm_sign_extend(data,16,32)
+arm_inst_ldrsb_i	1	arm_sign_extend(data,8,32)
+arm_inst_ldrsb_l	1	arm_sign_extend(data,8,32)
+arm_inst_ldrsb_r	1	arm_sign_extend(data,8,32)
+每个 immediate/register 函数使用：
+.001.R normal add/index
+.002.R condition false
+.003.IN.PW.NEC P=0,W=1
+.004.IN.RtRm.NEC Rt=15 或 Rm=15
+.005.IN.wback.NEC wback 且 Rn==Rt 或 Rn==15
+.006.FI mem_read fail
+.007.R post-index sub + wback
+literal 函数使用：
+.001.R literal add
+.002.R literal sub
+.003.IN.Rt.NEC Rt=15
+.004.R condition false
+.005.FI mem_read fail
+注释
+测试目的：验证对应 load signed/unsigned halfword/byte 指令在正常读取、条件不成立、不可预测编码、内存失败和写回路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置指令字段和寄存器返回值；对内存读和寄存器写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、按用例设置指令字段。 step3、设置内存读取数据或错误码。 step4、调用对应指令处理函数。 step5、观察返回值、PC、目标寄存器写入和写回寄存器。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：正常执行、条件不通过、不可预测编码、内存读失败、写回。 通过准则：返回值、PC 和寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+六、半字 Store 指令
+1. 
+arm_inst_strh_i
+用例	构造重点	期望
+.001.R	P=1,U=1,W=0,Rn=1,Rt=2,imm=0x10，R1=0x2000,R2=0xABCD1234	write addr=0x2010,size=2,value=0x1234,PC=0x1004
+.002.R	P=0,U=0,W=0	write addr=0x2000,R1=0x1FF0
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.Rt.NEC	Rt=15	return=-1
+.005.IN.wback.NEC	P=0,Rn=15 或 P=0,Rn==Rt	return=-1
+.006.R	cond=EQ,CPSR=0	PC=0x1004,no write
+.007.FI	mem_write_rc_seq[0]=-2	return=-2
+2. 
+arm_inst_strh_r
+同 strh_i，imm 改为 Rm 偏移：
+.001.R normal register offset
+.002.R post-index sub + wback
+.003.IN.PW.NEC
+.004.IN.RtRm.NEC Rt=15 或 Rm=15
+.005.IN.wback.NEC
+.006.R condition false
+.007.FI mem_write fail
+注释
+测试目的：验证对应 store halfword 指令在正常写入、条件不成立、不可预测编码、内存写失败和写回路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置源寄存器数据、基址寄存器和偏移字段；对内存写和寄存器写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置 Rn 基址和 Rt 写入数据。 step3、按用例设置指令字段。 step4、调用对应 store halfword 处理函数。 step5、观察返回值、PC、内存写入地址、写入大小、写入值和写回寄存器。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：正常写入、条件不通过、不可预测编码、内存写失败、写回。 通过准则：返回值、PC、内存写入记录和写回寄存器符合矩阵期望。
+ 
+⸻
+ 
+七、Unprivileged/T 类指令
+适用函数：
+arm_inst_ldrht
+arm_inst_strht
+arm_inst_ldrsht
+arm_inst_ldrsbt
+arm_inst_ldrt
+arm_inst_strt
+arm_inst_ldrbt
+arm_inst_strbt
+通用矩阵
+用例	构造重点	期望
+.001.R	regform，U=1,Rn=1,Rt=2,Rm=3，R1=0x2000,R3=0x10	offset_addr=0x2010，privileged mem 访问
+.002.R	immform，U=0,imm=0x10	offset_addr=0x1FF0
+.003.IN.regform.NEC	regform 且 Rt=15 或 Rn=15 或 Rn==Rt 或 Rm=15	return=-1
+.004.IN.immform.NEC	immform 且 Rt=15 或 Rn=15 或 Rn==Rt	return=-1
+.005.R	condition false	return=0,PC=0x1004,no mem
+.006.FI	mem rc = -2	return=-2
+注释
+测试目的：验证 unprivileged load/store 指令在寄存器形式、立即数形式、非法寄存器组合、条件不成立和内存访问失败路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置 regform/immform 对应字段；对寄存器读写和内存访问接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置 Rn 基址、Rm 偏移或立即数偏移。 step3、按用例设置 regform、U、Rn、Rt、Rm 字段。 step4、调用对应 unprivileged 指令处理函数。 step5、观察返回值、PC、内存访问和寄存器写回。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：regform 正常、immform 正常、非法寄存器组合、条件不通过、内存失败。 通过准则：返回值、PC、内存访问记录和寄存器写回符合矩阵期望。
+ 
+⸻
+ 
+八、Exclusive 指令
+1. 
+arm_inst_ldrex
+用例	构造重点	期望
+.001.R	Rn=1,Rt=2,R1=0x2000,readex=0x12345678	R2=0x12345678,PC=0x1004
+.002.R	condition false	no readex,PC=0x1004
+.003.IN.Rt.NEC	Rt=15	return=-1
+.004.IN.Rn.NEC	Rn=15	return=-1
+.005.FI	vcast_mem_readex_rc=-2	return=-2,PC=0x1000
+2. 
+arm_inst_strex
+用例	构造重点	期望
+.001.R	Rn=1,Rd=2,Rt=3,R1=0x2000,R3=0x12345678	writeex value=0x12345678,Rd写0,PC=0x1004
+.002.R	condition false	no writeex,PC=0x1004
+.003.IN.R15.NEC	Rd=15 或 Rt=15 或 Rn=15	return=-1
+.004.IN.alias.NEC	Rd==Rn 或 Rd==Rt	return=-1
+.005.FI	vcast_mem_writeex_rc=-2	return=-2
+注释
+测试目的：验证 exclusive load/store 指令在正常执行、条件不成立、非法寄存器组合和 exclusive 内存访问失败时的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn/Rt/Rd 字段；对 exclusive 内存访问和寄存器读写打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置基址寄存器和源/目标寄存器返回值。 step3、按用例设置指令字段。 step4、调用 arm_inst_ldrex 或 arm_inst_strex。 step5、观察返回值、PC、exclusive 内存访问和寄存器写入。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：正常 exclusive 访问、条件不通过、非法寄存器、内存访问失败。 通过准则：返回值、PC 和寄存器/内存访问记录符合矩阵期望。
+ 
+⸻
+ 
+九、Doubleword Load/Store
+1. 
+arm_inst_ldrd_i
+用例	构造重点	期望
+.001.R	Rt=2,Rn=1,P=1,U=1,W=0,imm=0x10，两次 read	R2=data0,R3=data1,PC=0x1004
+.002.IN.RtOdd.NEC	Rt=3	return=-1
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.wback.NEC	P=0,Rn==Rt 或 Rn==Rt+1	return=-1
+.005.IN.Rt14.NEC	Rt=14	return=-1
+.006.FI.first	first read rc=-2	return=-2
+.007.FI.second	second read rc=-3	return=-3
+.008.R	condition false	PC=0x1004,no mem
+2. 
+arm_inst_ldrd_l
+.001.R normal add
+.002.R normal sub
+.003.IN.RtOdd.NEC Rt 奇数
+.004.IN.Rt14.NEC Rt=14
+.005.FI.first
+.006.FI.second
+.007.R condition false
+3. 
+arm_inst_ldrd_r
+额外非法：
+Rm=15 或 Rm==Rt 或 Rm==Rt+1
+4. 
+arm_inst_strd_i
+类似 ldrd_i，内存访问改为两次 write。
+5. 
+arm_inst_strd_r
+特别注意：
+Rt 奇数时不是 VMM_EFAIL，而是 vmm_vcpu_irq_assert 被调用，return=0，PC 不增加。
+注释
+测试目的：验证 doubleword load/store 指令在双寄存器读写、非法 Rt、非法写回、内存访问失败和条件不成立路径下的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn/Rt/Rm/imm 字段；对内存读写和寄存器读写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置基址寄存器、源寄存器或内存返回数据。 step3、按用例设置指令字段。 step4、调用对应 doubleword 指令处理函数。 step5、观察返回值、PC、两次内存访问和两个寄存器写入。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：正常双字访问、条件不通过、非法 Rt、非法写回、内存访问失败。 通过准则：返回值、PC、内存访问和寄存器读写符合矩阵期望。
+ 
+⸻
+ 
+十、普通 Word/Byte Load/Store
+1. 
+arm_inst_str_i
+用例	构造重点	期望
+.001.R	P=1,U=1,W=0,Rn=1,Rt=2,imm12=0x20	write addr=0x2020,size=4,PC=0x1004
+.002.R	P=0,U=0,W=0	write addr=0x2000,Rn写回0x1FE0
+.003.IN.PW.NEC	P=0,W=1	return=-1
+.004.IN.wback.NEC	wback && (Rn=15 或 Rn==Rt)	return=-1
+.005.R	condition false	PC=0x1004,no write
+.006.FI	mem_write rc=-2	return=-2
+2. 
+arm_inst_ldr_i
+.001.R normal pre-index add
+.002.R post-index sub + wback
+.003.IN.PW.NEC
+.004.IN.wback.NEC Rn==Rt
+.005.R condition false
+.006.FI mem_read fail
+3. 
+arm_inst_ldr_l
+.001.R literal add
+.002.R literal sub
+.003.R condition false
+.004.FI mem_read fail
+4. 
+arm_inst_str_r / arm_inst_ldr_r / arm_inst_strb_r / arm_inst_ldrb_r
+.001.R normal register offset
+.002.R post-index sub + wback
+.003.IN.PW.NEC
+.004.IN.Rm.NEC Rm=15
+.005.IN.wback.NEC Rn=15 或 Rn==Rt
+.006.R condition false
+.007.FI mem access fail
+5. 
+arm_inst_strb_i / arm_inst_ldrb_i
+.001.R normal pre-index add
+.002.R post-index sub + wback
+.003.IN.PW.NEC
+.004.IN.Rt.NEC Rt=15
+.005.IN.wback.NEC
+.006.R condition false
+.007.FI mem access fail
+6. 
+arm_inst_strt / arm_inst_ldrt / arm_inst_strbt / arm_inst_ldrbt
+按第七节 unprivileged 类矩阵执行。
+注释
+测试目的：验证 word/byte load/store 指令在立即数寻址、寄存器寻址、literal 寻址、条件不成立、非法写回和内存访问失败时的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置基址寄存器、源/目标寄存器和偏移字段；对内存读写和寄存器读写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置寄存器读返回值和内存访问返回值。 step3、按用例设置指令字段。 step4、调用对应 word/byte load/store 处理函数。 step5、观察返回值、PC、内存访问记录和寄存器写入。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：正常访问、条件不通过、非法编码、内存访问失败、写回。 通过准则：返回值、PC 和寄存器/内存访问记录符合矩阵期望。
+ 
+⸻
+ 
+十一、Block Transfer
+1. 
+arm_inst_ldm
+用例	构造重点	期望
+.001.R	increment after，无 PC，无 wback，reg_list=0x0003,Rn=1	读两次，写 R0/R1，PC+4
+.002.R	decrement before + wback	Rn 写回 old - 8
+.003.R	reg_list=0x8001	读 R0 和 PC
+.004.IN.Rn.NEC	Rn=15	return=-1
+.005.IN.list.NEC	reg_list=0	return=-1
+.006.IN.wback.NEC	wback && reg_list 包含 Rn	return=-1
+.007.R	condition false	PC=0x1004,no mem
+.008.FI	mem_read rc=-2	return=-2
+2. 
+arm_inst_stm
+用例	构造重点	期望
+.001.R	increment after，无 PC，无 wback	两次 write，PC+4
+.002.R	decrement before + wback	Rn 写回
+.003.R	reg_list 包含 bit15	写入 PC+8
+.004.IN.Rn.NEC	Rn=15	return=-1
+.005.IN.list.NEC	reg_list=0	return=-1
+.006.R	condition false	PC=0x1004,no write
+.007.FI	mem_write rc=-2	return=-2
+注释
+测试目的：验证 block transfer 指令在多寄存器 load/store、PC 参与、写回、非法 Rn、空寄存器列表和内存访问失败时的行为。 用例类别：基于需求的测试、接口测试、故障注入测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn、op、reg_list 和 wback 字段；对内存读写和寄存器读写接口打桩。 测试步骤： step1、初始化 PC 和 CPSR。 step2、设置 Rn 基址和 reg_list。 step3、设置内存读写返回值。 step4、调用 arm_inst_ldm 或 arm_inst_stm。 step5、观察返回值、PC、多次内存访问和寄存器写回。 用例来源：需求分析、有效等价类、无效等价类、故障注入 追溯ID：对应函数名 等价列表：increment/decrement、before/after、PC 位、写回、非法参数、内存失败。 通过准则：返回值、PC、内存访问次数和寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+十二、Coprocessor 函数
+重要说明
+如果只覆盖空回调路径，不需要新增函数。cpu_vcpu_coproc_get Stub 里返回一个静态空 struct cpu_vcpu_coproc 即可：
+static struct cpu_vcpu_coproc cp;
+
+memset(&cp, 0, sizeof(cp));
+
+return &cp;
+但要覆盖 coprocessor 成功路径，必须给函数指针赋真实回调函数。这是唯一无法完全避免新增测试函数的部分。
+如果你当前阶段先不测 coprocessor 成功路径，可以先做这些用例：
+1. 
+arm_inst_stcx
+.001.IN.nullcb.NEC：cp->ldcstc_accept/done/read 为 NULL，irq_assert，return=0
+.002.IN.RnWback.NEC：Rn=15 且 W=1，return=-1
+.003.R：condition false，PC+4
+2. 
+arm_inst_ldcx_i
+.001.IN.nullcb.NEC：accept/done/write NULL，irq_assert，return=0
+.002.IN.RnWback.NEC：Rn=15 且 W=1，return=-1
+.003.R：condition false，PC+4
+3. 
+arm_inst_ldcx_l
+.001.IN.W.NEC：W=1，return=-1
+.002.IN.nullcb.NEC：accept/done/write NULL，irq_assert，return=0
+.003.R：condition false，PC+4
+4. 
+arm_inst_mcrrx / arm_inst_mrrcx / arm_inst_cdpx / arm_inst_mcrx / arm_inst_mrcx
+null callback：irq_assert，return=0
+invalid Rt/Rt2：return=-1，适用于 mcrrx/mrrcx
+condition false：PC+4
+注释
+测试目的：验证 coprocessor 指令在回调函数缺失、非法寄存器字段和条件不成立时的行为。 用例类别：基于需求的测试、接口测试 预置条件：通过 cpu_vcpu_coproc_get Stub 返回静态 coprocessor 对象；默认回调指针为空；对 vmm_vcpu_irq_assert 打点。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 coprocessor 指令字段。 step3、按用例设置非法字段或条件码。 step4、调用对应 coprocessor 指令处理函数。 step5、观察返回值、PC 和 undefined instruction IRQ 断言次数。 用例来源：需求分析、无效等价类 追溯ID：对应函数名 等价列表：回调缺失、非法寄存器、条件不通过。 通过准则：缺失回调时 vmm_vcpu_irq_assert 被调用且返回 0；非法寄存器时返回 -1；条件不通过时 PC 增加 4。
+ 
+⸻
+ 
+十三、简单函数
+1. 
+arm_inst_svc.001.R
+构造：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+arm_pc(&regs) = 0x1000U;
+
+<<emulate_arm.arm_inst_svc.inst>> = 0U;
+<<emulate_arm.arm_inst_svc.regs>> = &regs;
+<<emulate_arm.arm_inst_svc.vcpu>> = &vcpu;
+期望：
+return = 0
+arm_pc(&regs) = 0x1004
+注释：
+测试目的：验证 SVC 指令当前实现作为空操作处理，仅推进 PC。 用例类别：基于需求的测试 预置条件：构造有效寄存器对象和 VCPU 对象。 测试步骤： step1、设置 PC 为 0x1000。 step2、调用 arm_inst_svc。 step3、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_svc 等价列表：SVC 指令基本路径。 通过准则：函数返回 0，PC 更新为 0x1004。
+ 
+⸻
+ 
+2. 
+arm_instgrp_media.001.IN.unsupport.NEC
+构造普通有效 vcpu/regs/inst。
+期望：
+return = -1
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 media 指令分组当前未实现时进入不可预测处理。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象。 测试步骤： step1、构造任意 media 指令值。 step2、调用 arm_instgrp_media。 step3、观察返回值和 halt 调用情况。 用例来源：无效等价类 追溯ID：arm_instgrp_media 等价列表：未支持 media 指令。 通过准则：函数返回 -1，cpu_vcpu_halt 被调用一次。
+ 
+⸻
+ 
+十四、分组 dispatcher 函数
+分组函数建议用 SBF 测派发逻辑，避免重复执行子函数内部逻辑。
+1. 
+arm_instgrp_dataproc
+需要覆盖以下派发路径：
+op != 0:
+  op1 = 0b10000 -> arm_inst_movw_i
+  op1 = 0b10100 -> unsupported -> unpredictable
+  op1 = 0b10010 / 0b10110 -> unsupported -> unpredictable
+  default -> unsupported -> unpredictable
+
+op == 0:
+  unprivileged extra:
+    op2=0b1011 + op1 bit0=1 -> arm_inst_ldrht
+    op2=0b1011 + op1 bit0=0 -> arm_inst_strht
+    op2=0b1101 + op1 bit0=1 -> arm_inst_ldrsbt
+    op2=0b1111 + op1 bit0=1 -> arm_inst_ldrsht
+
+  extra load/store:
+    op2=0b1011 -> strh_r / ldrh_r / strh_i / ldrh_l / ldrh_i
+    op2=0b1101 -> ldrd_r / ldrsb_r / ldrd_l / ldrd_i / ldrsb_l / ldrsb_i
+    op2=0b1111 -> strd_r / ldrsh_r / strd_i / ldrsh_l / ldrsh_i
+
+  synchronization:
+    op1=0b11000 -> arm_inst_strex
+    op1=0b11001 -> arm_inst_ldrex
+
+  no match -> unpredictable
+注释
+测试目的：验证 data processing 指令分组函数能够根据 op、op1、op2、Rn 字段正确派发到对应子指令处理函数，或在未支持组合下进入不可预测处理。 用例类别：基于需求的测试、接口测试 预置条件：构造 instruction 的 op、op1、op2、Rn 字段；对子指令处理函数进行 SBF 打桩并设置唯一返回值。 测试步骤： step1、构造有效寄存器对象和 VCPU 对象。 step2、设置 instruction 字段以匹配目标派发分支。 step3、设置目标子函数返回唯一错误码。 step4、调用 arm_instgrp_dataproc。 step5、观察返回值是否等于目标子函数返回值。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：MOVW、unprivileged extra load/store、extra load/store、exclusive、unsupported。 通过准则：函数返回对应子函数的唯一返回值；未支持组合返回 -1 且触发不可预测处理。
+ 
+⸻
+ 
+2. 
+arm_instgrp_ldrstr
+覆盖：
+A_MASK = 0:
+  str_i / strt / ldr_l / ldr_i / ldrt / strb_i / strbt / ldrb_l / ldrb_i / ldrbt
+
+A_MASK = 1 且 B_MASK = 0:
+  str_r / strt / ldr_r / ldrt / strb_r / strbt / ldrb_r / ldrbt
+
+其它组合：
+  unpredictable
+注释
+测试目的：验证 load/store 指令分组函数能够根据 A/B mask、op1 和 Rn 字段正确派发到对应 word/byte load/store 子函数。 用例类别：基于需求的测试、接口测试 预置条件：构造 instruction 的 A mask、B mask、op1 和 Rn 字段；对子指令处理函数进行 SBF 打桩并设置唯一返回值。 测试步骤： step1、构造有效寄存器对象和 VCPU 对象。 step2、设置 instruction 字段以匹配目标 load/store 派发分支。 step3、设置目标子函数返回唯一错误码。 step4、调用 arm_instgrp_ldrstr。 step5、观察返回值是否等于目标子函数返回值。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_instgrp_ldrstr 等价列表：immediate load/store、register load/store、literal load、unprivileged load/store、unsupported。 通过准则：函数返回对应子函数的唯一返回值；未支持组合返回 -1 且触发不可预测处理。
+ 
+⸻
+ 
+3. 
+arm_instgrp_brblk
+覆盖：
+!is_1xxxxx:
+  store:
+    normal -> arm_inst_stm
+    PUSH TODO -> unpredictable
+  load:
+    normal -> arm_inst_ldm
+    POP TODO -> unpredictable
+
+is_1xxxxx:
+  branch TODO -> unpredictable
+注释
+测试目的：验证 branch/block transfer 分组函数能够识别 load/store multiple 指令并派发到 LDM/STM，且对未实现的 PUSH/POP/branch 路径进入不可预测处理。 用例类别：基于需求的测试、接口测试 预置条件：构造 instruction 的 op、Rn、reg_list 字段；对 LDM/STM 子函数进行 SBF 打桩。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 instruction 字段以匹配 store multiple、load multiple、PUSH、POP 或 branch 路径。 step3、调用 arm_instgrp_brblk。 step4、观察返回值和不可预测处理调用情况。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_instgrp_brblk 等价列表：STM、LDM、PUSH TODO、POP TODO、branch TODO。 通过准则：STM/LDM 路径返回对应子函数值；TODO 路径返回 -1 且触发不可预测处理。
+ 
+⸻
+ 
+4. 
+arm_instgrp_coproc
+覆盖：
+cpro = 0xA/0xB:
+  op1=000000/000001 -> undef irq return 0
+  op1=100xxx + OP bit + cpro=10 + op1&0xF=0xF -> mrcx
+  op1=100xxx + OP bit + cpro=10 + op1&0xF=0xE -> mcrx
+  op1=110xxx -> svc
+  unsupported -> unpredictable
+
+generic cpro:
+  op1=000000/000001 -> undef irq
+  store coproc -> stcx
+  load coproc rn=15 -> ldcx_l
+  load coproc rn!=15 -> ldcx_i
+  op1=000100 -> mcrrx
+  op1=000101 -> mrrcx
+  10xxx0 + OP bit -> mcrx
+  10xxx0 + !OP bit -> cdpx
+  10xxx1 + OP bit -> mrcx
+  10xxx1 + !OP bit -> cdpx
+  110xxx -> svc
+  unsupported -> unpredictable
+注释
+测试目的：验证 coprocessor 指令分组函数能够根据 coprocessor 编号、op1、Rn 和 OP bit 正确派发到对应 coprocessor 子函数或触发 undefined/unpredictable。 用例类别：基于需求的测试、接口测试 预置条件：构造 instruction 的 cpro、op1、Rn 和 OP bit 字段；对子函数进行 SBF 打桩。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 instruction 字段以匹配目标 coprocessor 派发路径。 step3、设置目标子函数返回唯一错误码，或清零 IRQ 打点变量。 step4、调用 arm_instgrp_coproc。 step5、观察返回值、子函数调用或 undefined IRQ 断言。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_instgrp_coproc 等价列表：VFP/SMID 分支、generic coprocessor 分支、undefined 指令、unsupported 指令。 通过准则：派发路径返回对应子函数值；undefined 路径调用 vmm_vcpu_irq_assert；unsupported 路径返回 -1 并触发不可预测处理。
+ 
+⸻
+ 
+5. 
+arm_instgrp_uncond
+用例	构造重点	期望
+.001.R	op1 为 preload 列表之一	return=0,PC=0x1004
+.002.IN.op1.NEC	op1 bit7=0，但不在列表	return=-1
+.003.IN.op1.NEC	op1 bit7=1	return=-1
+注释
+测试目的：验证 unconditional 指令分组函数对 preload 指令按 NOP 处理，对未支持 unconditional 指令进入不可预测处理。 用例类别：基于需求的测试、接口测试 预置条件：构造 op1 字段。 测试步骤： step1、构造有效 VCPU 和寄存器对象。 step2、设置 instruction 的 op1 字段。 step3、调用 arm_instgrp_uncond。 step4、观察返回值、PC 和不可预测处理调用情况。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP、bit7=0 非 preload、bit7=1 未支持。 通过准则：preload 路径返回 0 且 PC 增加 4；未支持路径返回 -1。
+ 
+⸻
+ 
+十五、
+arm_inst_movw_i
+用例	构造重点	期望
+.001.R	Rd=2,imm4=1,imm12=0x234,cond=AL	R2=0x1234,PC=0x1004
+.002.R	condition false	PC=0x1004,no reg write
+.003.IN.Rd.NEC	Rd=15	return=-1
+注释
+测试目的：验证 movw immediate 在正常写寄存器、条件不成立和 Rd 非法时的行为。 用例类别：基于需求的测试、接口测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rd、imm4、imm12 和条件码字段。 测试步骤： step1、初始化 PC 和 CPSR。 step2、按用例设置 Rd 和立即数字段。 step3、调用 arm_inst_movw_i。 step4、观察返回值、PC 和寄存器写入情况。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：arm_inst_movw_i 等价列表：正常 MOVW、条件不通过、Rd=15 非法。 通过准则：返回值、PC 和寄存器写入符合矩阵期望。
+ 
+⸻
+ 
+十六、
+emulate_arm_inst
+用例	构造重点	期望
+.001.IN.vcpu.NEC	vcpu=NULL	return=-1
+.002.IN.normal.NEC	vcpu.is_normal=0	return=-1
+.003.R	cond!=0xF,op1&0x6=0x0	派发 arm_instgrp_dataproc
+.004.R	cond!=0xF,op1&0x6=0x2，load/store 条件成立	派发 arm_instgrp_ldrstr
+.005.R	cond!=0xF,op1&0x6=0x2，media 条件	派发 arm_instgrp_media
+.006.R	op1&0x6=0x4	派发 arm_instgrp_brblk
+.007.R	op1&0x6=0x6	派发 arm_instgrp_coproc
+.008.R	cond=0xF	派发 arm_instgrp_uncond
+注释
+测试目的：验证 ARM 指令顶层模拟入口能够检查 VCPU 合法性，并根据 cond 和 op1 字段正确派发到各类指令分组处理函数。 用例类别：基于需求的测试、接口测试 预置条件：构造有效或无效 VCPU；对分组处理函数进行 SBF 打桩并设置唯一返回值。 测试步骤： step1、根据用例构造 VCPU、寄存器对象和 instruction。 step2、设置 is_normal 或 VCPU 指针状态。 step3、设置 cond 和 op1 字段以匹配目标分组。 step4、调用 emulate_arm_inst。 step5、观察返回值是否等于对应分组函数的返回值，或是否返回失败。 用例来源：需求分析、有效等价类、无效等价类 追溯ID：emulate_arm_inst 等价列表：VCPU 空、非 normal VCPU、data processing、load/store、media、branch/block、coprocessor、unconditional。 通过准则：非法 VCPU 返回 -1；合法派发路径返回对应分组函数返回值。
+ 
+⸻
+ 
+十七、Dead Code / 覆盖率排除
+1. 
+arm_inst_movw_i
+源码中：
+if (Rd == 15) {
+    arm_unpredictable(...);
+    return VMM_EFAIL;
+}
+...
+if (arm_condition_passed(cond, regs)) {
+    if (Rd == 15) {
+        arm_pc(regs) = result;
+    } else {
+        cpu_vcpu_reg_write(...);
+    }
+}
+内部的：
+if (Rd == 15)
+不可达，因为前面已经返回。
+ 
+排除说明：
+`arm_inst_movw_i` 中 condition passed 内部的 `if (Rd == 15)` 分支不可达。函数前部已经对 `Rd == 15` 执行不可预测处理并返回，后续相同条件不可能再次成立，属于源代码逻辑 dead code，应从覆盖率中排除。
+ 
+⸻
+ 
+2. 
+emulate_arm_inst
+switch (op1 & 0x6) {
+case 0x0:
+case 0x2:
+case 0x4:
+case 0x6:
+default:
+}
+op1 & 0x6 只能是 0x0/0x2/0x4/0x6，default 不可达。
+ 
+排除说明：
+`emulate_arm_inst` 中 `switch (op1 & 0x6)` 的 default 分支不可达，因为按位与 `0x6` 的结果只能为 0x0、0x2、0x4、0x6。该 default 属于防御性 dead code，应从覆盖率中排除。
+ 
+⸻
+ 
+3. 
+arm_decode_imm_shift
+源码中 return 后面的 break 不可达：
+return imm5;
+break;
+如果 VectorCAST 把这些 break 标红，应排除。
+ 
+排除说明：
+`arm_decode_imm_shift` 中多个 case 的 `break` 位于 `return` 语句之后，执行流不可能到达，属于 return 后不可达语句，应从覆盖率中排除。
+ 
+⸻
+ 
+十八、完整函数覆盖清单
+基础函数：
+arm_unpredictable.001.R
+arm_sign_extend.001.R
+arm_sign_extend.002.R
+arm_condition_check.001.R ~ arm_condition_check.016.R
+arm_decode_imm_shift.001.R ~ arm_decode_imm_shift.008.IN.type.NEC
+arm_shift_c.001.R ~ arm_shift_c.008.R
+arm_add_with_carry.001.R ~ arm_add_with_carry.004.R
+半字/字节/双字/普通 load-store：
+arm_inst_ldrh_i.001.R ~ .007.R/FI/NEC
+arm_inst_ldrh_l.001.R ~ .005.R/FI/NEC
+arm_inst_ldrh_r.001.R ~ .007.R/FI/NEC
+
+arm_inst_ldrsh_i.001.R ~ .007.R/FI/NEC
+arm_inst_ldrsh_l.001.R ~ .005.R/FI/NEC
+arm_inst_ldrsh_r.001.R ~ .007.R/FI/NEC
+
+arm_inst_ldrsb_i.001.R ~ .007.R/FI/NEC
+arm_inst_ldrsb_l.001.R ~ .005.R/FI/NEC
+arm_inst_ldrsb_r.001.R ~ .007.R/FI/NEC
+
+arm_inst_strh_i.001.R ~ .007.R/FI/NEC
+arm_inst_strh_r.001.R ~ .007.R/FI/NEC
+
+arm_inst_ldrht.001.R ~ .006.R/FI/NEC
+arm_inst_strht.001.R ~ .006.R/FI/NEC
+arm_inst_ldrsht.001.R ~ .006.R/FI/NEC
+arm_inst_ldrsbt.001.R ~ .006.R/FI/NEC
+
+arm_inst_ldrex.001.R ~ .005.R/FI/NEC
+arm_inst_strex.001.R ~ .005.R/FI/NEC
+
+arm_inst_ldrd_i.001.R ~ .008.R/FI/NEC
+arm_inst_ldrd_l.001.R ~ .007.R/FI/NEC
+arm_inst_ldrd_r.001.R ~ .009.R/FI/NEC
+arm_inst_strd_i.001.R ~ .008.R/FI/NEC
+arm_inst_strd_r.001.R ~ .009.R/FI/NEC
+
+arm_inst_str_i.001.R ~ .006.R/FI/NEC
+arm_inst_str_r.001.R ~ .007.R/FI/NEC
+arm_inst_strt.001.R ~ .006.R/FI/NEC
+arm_inst_strb_i.001.R ~ .007.R/FI/NEC
+arm_inst_strb_r.001.R ~ .007.R/FI/NEC
+arm_inst_strbt.001.R ~ .006.R/FI/NEC
+
+arm_inst_ldr_i.001.R ~ .006.R/FI/NEC
+arm_inst_ldr_l.001.R ~ .004.R/FI/NEC
+arm_inst_ldr_r.001.R ~ .007.R/FI/NEC
+arm_inst_ldrt.001.R ~ .006.R/FI/NEC
+arm_inst_ldrb_i.001.R ~ .007.R/FI/NEC
+arm_inst_ldrb_l.001.R ~ .005.R/FI/NEC
+arm_inst_ldrb_r.001.R ~ .007.R/FI/NEC
+arm_inst_ldrbt.001.R ~ .006.R/FI/NEC
+block / coproc / groups：
+arm_inst_ldm.001.R ~ .008.R/FI/NEC
+arm_inst_stm.001.R ~ .007.R/FI/NEC
+
+arm_inst_stcx.001.IN.nullcb.NEC ~ .003.R
+arm_inst_ldcx_i.001.IN.nullcb.NEC ~ .003.R
+arm_inst_ldcx_l.001.IN.W.NEC ~ .003.R
+arm_inst_mcrrx.001.IN.nullcb.NEC ~ .003.R
+arm_inst_mrrcx.001.IN.nullcb.NEC ~ .003.R
+arm_inst_cdpx.001.IN.nullcb.NEC ~ .003.R
+arm_inst_mcrx.001.IN.nullcb.NEC ~ .003.R
+arm_inst_mrcx.001.IN.nullcb.NEC ~ .003.R
+
+arm_inst_svc.001.R
+arm_instgrp_dataproc 派发矩阵
+arm_instgrp_ldrstr 派发矩阵
+arm_instgrp_media.001.IN.unsupport.NEC
+arm_instgrp_brblk 派发矩阵
+arm_instgrp_coproc 派发矩阵
+arm_instgrp_uncond.001.R ~ .003.IN.op1.NEC
+emulate_arm_inst.001.IN.vcpu.NEC ~ .008.R
+这版方案只保留必要的简单全局变量和 stub 打点，不再引入大量宏或夹具函数。每条用例通过局部 static struct vmm_vcpu vcpu; static arch_regs_t regs; 构造入参，既能复用 stub 全局变量，又不会把复杂结构体放入 User Globals 导致编译问题。
