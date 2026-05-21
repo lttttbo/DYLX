@@ -1,0 +1,765 @@
+下面给下一组：半字 T 指令，两个接口：
+arm_inst_ldrht
+arm_inst_strht
+这两个和前面的 ldrh_i / strh_i / ldrh_r / strh_r 不同点是：
+1. 它们没有 P/W 字段参与寻址。
+2. REGFORM1 bit[22] 控制寄存器形式或立即数形式。
+3. 内存访问地址始终是原始 Rn 地址。
+4. offset_addr 只用于写回 Rn。
+5. 内存访问最后一个参数是 TRUE，也就是 unprivileged 访问。
+ 
+⸻
+ 
+一、字段规则
+这两个函数用到的字段是：
+cond      bits[31:28]
+U         bit[23]
+REGFORM1  bit[22]
+Rn        bits[19:16]
+Rt        bits[15:12]
+imm4H     bits[11:8]
+imm4L     bits[3:0]
+Rm        bits[3:0]
+关键规则：
+regform = ARM_INST_BITS(inst, ARM_INST_LDRSTR_REGFORM1_END,
+                        ARM_INST_LDRSTR_REGFORM1_START) ? FALSE : TRUE;
+所以：
+REGFORM1 = 0 -> regform = TRUE，使用 Rm 作为 offset
+REGFORM1 = 1 -> regform = FALSE，使用 imm4H/imm4L 作为 offset
+ 
+⸻
+ 
+二、公共模板
+每条用例的 Value User Code 先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+然后追加每条用例自己的构造代码。
+ 
+⸻
+ 
+三、
+arm_inst_ldrht
+arm_inst_ldrht.001.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* U=1, REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;  /* Rn base */
+vcast_reg_read_value[3] = 0x10U;    /* Rm offset */
+
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x2010
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x1234
+说明：
+offset = Rm = 0x10
+address = Rn = 0x2000
+offset_addr = address + offset = 0x2010
+mem_read 使用 address，也就是 0x2000
+Rn 写回 offset_addr，也就是 0x2010
+注释
+测试目的：验证 ldrht 在寄存器偏移形式、U 位为 1 时，能够从原始 Rn 地址读取半字，并将 Rn 写回为 Rn 加 Rm 偏移后的地址。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置 Rm 读返回 0x10；设置内存读取返回 0x1234。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0，使指令进入寄存器偏移形式。 step3、设置 U=1、Rn=1、Rt=2、Rm=3。 step4、设置 R1 返回 0x2000，R3 返回 0x10。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x1234。 step6、调用 arm_inst_ldrht。 step7、观察返回值、PC、内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrht 等价列表：寄存器偏移形式、U=1、条件成立、内存读取成功。 其它说明：本用例覆盖 regform=true、add=true、条件成立、内存读取成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2000；R1 写回 0x2010；R2 写入 0x1234。
+ 
+⸻
+ 
+arm_inst_ldrht.002.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 -> regform = FALSE，立即数形式 */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+
+/* U=0，不置位 */
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm4H=1, imm4L=0 -> imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x5678U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x5678
+注释
+测试目的：验证 ldrht 在立即数偏移形式、U 位为 0 时，能够从原始 Rn 地址读取半字，并将 Rn 写回为 Rn 减立即数偏移后的地址。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置内存读取返回 0x5678。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1，使指令进入立即数偏移形式。 step3、设置 U=0、Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x5678。 step6、调用 arm_inst_ldrht。 step7、观察返回值、PC、内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrht 等价列表：立即数偏移形式、U=0、条件成立、内存读取成功。 其它说明：本用例覆盖 regform=false、add=false、条件成立、内存读取成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2000；R1 写回 0x1FF0；R2 写入 0x5678。
+ 
+⸻
+ 
+arm_inst_ldrht.003.IN.regform.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 寄存器偏移形式下，Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 REGFORM1=0 的寄存器偏移指令，并设置 Rt=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0，使指令进入寄存器偏移形式。 step3、设置 Rn=1、Rt=15、Rm=3。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：寄存器偏移形式下 Rt 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rt == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.004.IN.regform.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=15, Rt=2, Rm=3 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 寄存器偏移形式下，Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rn=15，同时避免 Rt 为 15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=15、Rt=2、Rm=3。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：寄存器偏移形式下 Rn 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rn == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.005.IN.regform.RnRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2, Rm=3 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 寄存器偏移形式下，Rn 与 Rt 相同时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=2、Rt=2、Rm=3。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：寄存器偏移形式下 Rn 与 Rt 冲突。 其它说明：本用例覆盖 regform 分支中 (Rn == Rt) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.006.IN.regform.Rm.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 寄存器偏移形式下，Rm 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rm=15，同时避免 Rt 和 Rn 非法。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=1、Rt=2、Rm=15。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：寄存器偏移形式下 Rm 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rm == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.007.IN.immform.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 -> regform = FALSE */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 立即数偏移形式下，Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 REGFORM1=1 的立即数偏移指令，并设置 Rt=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=1、Rt=15、imm32=0x10。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：立即数偏移形式下 Rt 为 PC。 其它说明：本用例覆盖 immform 分支中 (Rt == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.008.IN.immform.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 -> regform = FALSE */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=15, Rt=2 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 立即数偏移形式下，Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造立即数偏移形式指令，并设置 Rn=15，同时避免 Rt 为 15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=15、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：立即数偏移形式下 Rn 为 PC。 其它说明：本用例覆盖 immform 分支中 (Rn == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.009.IN.immform.RnRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 -> regform = FALSE */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrht 立即数偏移形式下，Rn 与 Rt 相同时进入不可预测处理。 用例类别：接口测试 预置条件：构造立即数偏移形式指令，并设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=2、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrht 等价列表：立即数偏移形式下 Rn 与 Rt 冲突。 其它说明：本用例覆盖 immform 分支中 (Rn == Rt) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrht.010.R
+构造代码
+/* cond = EQ，Z=0，条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x10U;
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 0
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldrht 条件不成立时，不读取内存、不写回 Rn、不写 Rt，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldrht 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 REGFORM1=0、U=1、Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_ldrht。 step5、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrht 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R1 和 R2 均不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrht.011.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldrht.inst>> = inst;
+<<emulate_arm.arm_inst_ldrht.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrht.vcpu>> = &vcpu;
+期望值
+return = -2
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldrht 内存读取失败，验证函数返回内存读取错误码且不推进 PC、不写寄存器。 用例类别：故障注入测试 预置条件：构造有效寄存器偏移形式 ldrht 指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0、U=1、Rn=1、Rt=2、Rm=3。 step3、设置 R1 返回 0x2000，R3 返回 0x10。 step4、设置 cpu_vcpu_mem_read 第一次调用返回 -2。 step5、调用 arm_inst_ldrht。 step6、观察返回值、PC、内存读取记录和寄存器写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrht 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R1 和 R2 均不发生写入。
+ 
+⸻
+ 
+四、
+arm_inst_strht
+arm_inst_strht.001.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* U=1, REGFORM1=0 -> regform = TRUE */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x1234
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x2010
+注释
+测试目的：验证 strht 在寄存器偏移形式、U 位为 1 时，能够从 Rt 取低 16 位写入原始 Rn 地址，并将 Rn 写回为 Rn 加 Rm 偏移后的地址。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000，Rt 读返回 0xABCD1234，Rm 读返回 0x10。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0，使指令进入寄存器偏移形式。 step3、设置 U=1、Rn=1、Rt=2、Rm=3。 step4、设置 R1 返回 0x2000，R2 返回 0xABCD1234，R3 返回 0x10。 step5、调用 arm_inst_strht。 step6、观察返回值、PC、内存写地址、写入值和 Rn 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strht 等价列表：寄存器偏移形式、U=1、条件成立、内存写成功。 其它说明：本用例覆盖 regform=true、add=true、条件成立、内存写成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存写地址为 0x2000；写入值为 0x1234；R1 写回 0x2010。
+ 
+⸻
+ 
+arm_inst_strht.002.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 -> regform = FALSE，立即数形式 */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+
+/* U=0，不置位 */
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm4H=1, imm4L=0 -> imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x00005678U;
+
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x5678
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+注释
+测试目的：验证 strht 在立即数偏移形式、U 位为 0 时，能够从 Rt 取低 16 位写入原始 Rn 地址，并将 Rn 写回为 Rn 减立即数偏移后的地址。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000，Rt 读返回 0x00005678。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1，使指令进入立即数偏移形式。 step3、设置 U=0、Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000，R2 返回 0x00005678。 step5、调用 arm_inst_strht。 step6、观察返回值、PC、内存写地址、写入值和 Rn 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strht 等价列表：立即数偏移形式、U=0、条件成立、内存写成功。 其它说明：本用例覆盖 regform=false、add=false、条件成立、内存写成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存写地址为 0x2000；写入值为 0x5678；R1 写回 0x1FF0。
+ 
+⸻
+ 
+arm_inst_strht.003.IN.regform.Rt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 寄存器偏移形式下，Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 REGFORM1=0 的寄存器偏移指令，并设置 Rt=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=1、Rt=15、Rm=3。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：寄存器偏移形式下 Rt 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rt == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.004.IN.regform.Rn.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=15, Rt=2, Rm=3 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 寄存器偏移形式下，Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rn=15，同时避免 Rt 为 15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=15、Rt=2、Rm=3。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：寄存器偏移形式下 Rn 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rn == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.005.IN.regform.RnRt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2, Rm=3 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 寄存器偏移形式下，Rn 与 Rt 相同时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=2、Rt=2、Rm=3。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：寄存器偏移形式下 Rn 与 Rt 冲突。 其它说明：本用例覆盖 regform 分支中 (Rn == Rt) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.006.IN.regform.Rm.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 寄存器偏移形式下，Rm 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造寄存器偏移形式指令，并设置 Rm=15，同时避免 Rt 和 Rn 非法。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0。 step3、设置 Rn=1、Rt=2、Rm=15。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：寄存器偏移形式下 Rm 为 PC。 其它说明：本用例覆盖 regform 分支中 (Rm == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.007.IN.immform.Rt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 立即数偏移形式下，Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 REGFORM1=1 的立即数偏移指令，并设置 Rt=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=1、Rt=15、imm32=0x10。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：立即数偏移形式下 Rt 为 PC。 其它说明：本用例覆盖 immform 分支中 (Rt == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.008.IN.immform.Rn.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=15, Rt=2 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 立即数偏移形式下，Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造立即数偏移形式指令，并设置 Rn=15，同时避免 Rt 为 15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=15、Rt=2、imm32=0x10。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：立即数偏移形式下 Rn 为 PC。 其它说明：本用例覆盖 immform 分支中 (Rn == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.009.IN.immform.RnRt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=1 */
+inst |= (1U << ARM_INST_LDRSTR_REGFORM1_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 strht 立即数偏移形式下，Rn 与 Rt 相同时进入不可预测处理。 用例类别：接口测试 预置条件：构造立即数偏移形式指令，并设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=1。 step3、设置 Rn=2、Rt=2、imm32=0x10。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strht 等价列表：立即数偏移形式下 Rn 与 Rt 冲突。 其它说明：本用例覆盖 immform 分支中 (Rn == Rt) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strht.010.R
+构造代码：
+/* cond = EQ，Z=0 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 0
+vcast_reg_write_called[1] = 0
+注释：
+测试目的：验证 strht 条件不成立时，不写内存、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 strht 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 REGFORM1=0、U=1、Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_strht。 step5、观察返回值、PC、内存写次数和 Rn 写回次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strht 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存写；Rn 不发生写回。
+ 
+⸻
+ 
+arm_inst_strht.011.FI
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* REGFORM1=0 */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_write_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_strht.inst>> = inst;
+<<emulate_arm.arm_inst_strht.regs>> = &regs;
+<<emulate_arm.arm_inst_strht.vcpu>> = &vcpu;
+期望：
+return = -2
+regs.pc = 0x1000
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x1234
+
+vcast_reg_write_called[1] = 0
+注释：
+测试目的：通过故障注入模拟 strht 内存写失败，验证函数返回内存写错误码且不推进 PC、不写回 Rn。 用例类别：故障注入测试 预置条件：构造有效寄存器偏移形式 strht 指令；设置内存写 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 REGFORM1=0、U=1、Rn=1、Rt=2、Rm=3。 step3、设置 R1 返回 0x2000，R2 返回 0xABCD1234，R3 返回 0x10。 step4、设置 cpu_vcpu_mem_write 第一次调用返回 -2。 step5、调用 arm_inst_strht。 step6、观察返回值、PC、内存写记录和 Rn 写回次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_strht 等价列表：内存写失败。 其它说明：本用例覆盖 cpu_vcpu_mem_write 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存写；写地址为 0x2000；写入值为 0x1234；Rn 不发生写回。
+ 
+⸻
+ 
+五、本组覆盖点
+这组用例覆盖：
+regform = TRUE
+regform = FALSE
+regform 分支 Rt==15
+regform 分支 Rn==15
+regform 分支 Rn==Rt
+regform 分支 Rm==15
+immform 分支 Rt==15
+immform 分支 Rn==15
+immform 分支 Rn==Rt
+add = TRUE
+add = FALSE
+condition passed TRUE
+condition passed FALSE
+mem_read/mem_write success
+mem_read/mem_write failure
+PC 正常推进
+错误路径 PC 不推进
+先跑这组。下一组建议做：
+arm_inst_ldrsh_i
+arm_inst_ldrsb_i
+也就是 signed halfword / signed byte immediate load。
