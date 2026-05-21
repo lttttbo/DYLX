@@ -1,0 +1,638 @@
+下面给下一组：signed immediate load 两个接口：
+arm_inst_ldrsh_i
+arm_inst_ldrsb_i
+它们都是 immediate 形式，字段和 ldrh_i 一样：
+cond   bits[31:28]
+P      bit[24]
+U      bit[23]
+W      bit[21]
+Rn     bits[19:16]
+Rt     bits[15:12]
+imm4H  bits[11:8]
+imm4L  bits[3:0]
+区别是：
+arm_inst_ldrsh_i：读取 2 字节，调用 arm_sign_extend(data, 16, 32)
+arm_inst_ldrsb_i：读取 1 字节，调用 arm_sign_extend(data, 8, 32)
+每条用例都先使用这个公共模板：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+一、
+arm_inst_ldrsh_i
+arm_inst_ldrsh_i.001.R
+覆盖目标：
+P=1, U=1, W=0
+index=true
+add=true
+wback=false
+condition=true
+mem_read success
+16-bit sign extend
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm4H=1, imm4L=0, imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x8001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xFFFF8001
+注释
+测试目的：验证 ldrsh immediate 在 pre-index add 且不写回时，能够读取半字并进行 16 位符号扩展后写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置内存读取返回 0x8001。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x8001。 step6、调用 arm_inst_ldrsh_i。 step7、观察返回值、PC、内存读取地址、Rn 写回情况和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：pre-index add、无写回、条件成立、符号位为 1。 其它说明：本用例覆盖 index=true、add=true、wback=false 以及 16 位符号扩展路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2010；R1 不写回；R2 写入 0xFFFF8001。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.002.R
+覆盖目标：
+P=0, U=0, W=0
+index=false
+add=false
+wback=true by P==0
+condition=true
+mem_read success
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=0, W=0 */
+/* P/U/W 都不置位 */
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x007FU;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x007F
+注释
+测试目的：验证 ldrsh immediate 在 post-index sub 写回模式下，使用原 Rn 地址读取半字，并将 Rn 写回为减去立即数偏移后的地址。 用例类别：基于需求的测试 预置条件：构造 P=0、U=0、W=0 的 post-index sub 指令；设置 Rn 读返回 0x2000；设置内存读取返回 0x007F。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、U=0、W=0。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x007F。 step6、调用 arm_inst_ldrsh_i。 step7、观察内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：post-index sub、写回、条件成立、符号位为 0。 其它说明：本用例覆盖 index=false、add=false、wback=true by P==0 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2000；R1 写回 0x1FF0；R2 写入 0x007F。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.003.R
+覆盖目标：
+P=1, W=1
+wback=true by W==1
+避免 P=0 && W=1 提前返回
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x0001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x2010
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x0001
+注释
+测试目的：验证 ldrsh immediate 在 P=1,W=1 的写回模式下，能够覆盖 wback 由 W==1 置为 true 的路径，并正确读取、写回和写目标寄存器。 用例类别：基于需求的测试 预置条件：构造 P=1、U=1、W=1 的有效指令；设置 Rn 读返回 0x2000；设置内存读取返回 0x0001。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=1。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置内存读取返回 0x0001。 step6、调用 arm_inst_ldrsh_i。 step7、观察返回值、PC、内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：pre-index add、W 位写回、条件成立。 其它说明：本用例补充覆盖 wback = ((P == 0) || (W == 1)) 中 W==1 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2010；R1 写回 0x2010；R2 写入 0x0001。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.004.IN.PW.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrsh immediate 遇到 P=0 且 W=1 的不可预测编码时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法 signed halfword immediate 加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=1。 step3、设置 Rn=1、Rt=2。 step4、调用 arm_inst_ldrsh_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：P/W 非法组合。 其它说明：本用例覆盖 (P == 0) && (W == 1) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.005.IN.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrsh immediate 目标寄存器 Rt 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rt=15 的 signed halfword immediate 加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=15、imm32=0x10。 step4、调用 arm_inst_ldrsh_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rt == 15) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.006.IN.RnRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=1, W=0，wback=true */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrsh immediate 在需要写回且 Rn 与 Rt 相同时，进入不可预测处理。 用例类别：接口测试 预置条件：构造 P=0、W=0 的 post-index 指令，使 wback=true；设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=0，使写回条件成立。 step3、设置 Rn=2、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrsh_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：写回寄存器与目标寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.007.R
+构造代码
+/* cond = EQ，Z=0，条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 0
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldrsh immediate 条件不成立时，不读取内存、不写目标寄存器、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 signed halfword immediate 加载指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 P=1、U=1、W=0、Rn=1、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrsh_i。 step5、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R1 和 R2 均不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrsh_i.008.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldrsh_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsh_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsh_i.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldrsh immediate 内存读取失败，验证函数返回内存读取错误码且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 signed halfword immediate 加载指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0、Rn=1、Rt=2、imm32=0x10。 step3、设置 R1 返回 0x2000。 step4、设置 cpu_vcpu_mem_read 第一次调用返回 -2。 step5、调用 arm_inst_ldrsh_i。 step6、观察返回值、PC、内存读取记录和目标寄存器写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrsh_i 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R2 不发生写入。
+ 
+⸻
+ 
+二、
+arm_inst_ldrsb_i
+arm_inst_ldrsb_i.001.R
+覆盖目标：
+P=1,U=1,W=0
+8-bit sign extend
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x80U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 1
+
+vcast_reg_write_called[1] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xFFFFFF80
+注释
+测试目的：验证 ldrsb immediate 在 pre-index add 且不写回时，能够读取字节并进行 8 位符号扩展后写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置内存读取返回 0x80。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x80。 step6、调用 arm_inst_ldrsb_i。 step7、观察返回值、PC、内存读取地址、读取大小、Rn 写回情况和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：pre-index add、无写回、条件成立、8 位符号位为 1。 其它说明：本用例覆盖 index=true、add=true、wback=false 以及 8 位符号扩展路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2010；读取大小为 1；R1 不写回；R2 写入 0xFFFFFF80。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.002.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=0, W=0 */
+/* P/U/W 都不置位 */
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x7FU;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 1
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x007F
+注释
+测试目的：验证 ldrsb immediate 在 post-index sub 写回模式下，使用原 Rn 地址读取字节，并将 Rn 写回为减去立即数偏移后的地址。 用例类别：基于需求的测试 预置条件：构造 P=0、U=0、W=0 的 post-index sub 指令；设置 Rn 读返回 0x2000；设置内存读取返回 0x7F。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、U=0、W=0。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x7F。 step6、调用 arm_inst_ldrsb_i。 step7、观察内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：post-index sub、写回、条件成立、8 位符号位为 0。 其它说明：本用例覆盖 index=false、add=false、wback=true by P==0 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2000；R1 写回 0x1FF0；R2 写入 0x007F。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.003.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x01U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 1
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x2010
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x0001
+注释
+测试目的：验证 ldrsb immediate 在 P=1,W=1 的写回模式下，能够覆盖 wback 由 W==1 置为 true 的路径，并正确读取、写回和写目标寄存器。 用例类别：基于需求的测试 预置条件：构造 P=1、U=1、W=1 的有效指令；设置 Rn 读返回 0x2000；设置内存读取返回 0x01。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=1。 step3、设置 Rn=1、Rt=2、imm32=0x10。 step4、设置 R1 返回 0x2000。 step5、设置内存读取返回 0x01。 step6、调用 arm_inst_ldrsb_i。 step7、观察返回值、PC、内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：pre-index add、W 位写回、条件成立。 其它说明：本用例补充覆盖 wback = ((P == 0) || (W == 1)) 中 W==1 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2010；R1 写回 0x2010；R2 写入 0x0001。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.004.IN.PW.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释：
+测试目的：验证 ldrsb immediate 遇到 P=0 且 W=1 的不可预测编码时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法 signed byte immediate 加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=1。 step3、设置 Rn=1、Rt=2。 step4、调用 arm_inst_ldrsb_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：P/W 非法组合。 其它说明：本用例覆盖 (P == 0) && (W == 1) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.005.IN.Rt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释：
+测试目的：验证 ldrsb immediate 目标寄存器 Rt 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rt=15 的 signed byte immediate 加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=15、imm32=0x10。 step4、调用 arm_inst_ldrsb_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rt == 15) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.006.IN.RnRt.NEC
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=1, W=0，wback=true */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释：
+测试目的：验证 ldrsb immediate 在需要写回且 Rn 与 Rt 相同时，进入不可预测处理。 用例类别：接口测试 预置条件：构造 P=0、W=0 的 post-index 指令，使 wback=true；设置 Rn=Rt=2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=0，使写回条件成立。 step3、设置 Rn=2、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrsb_i。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：写回寄存器与目标寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.007.R
+构造代码：
+/* cond = EQ，Z=0 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 0
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[2] = 0
+注释：
+测试目的：验证 ldrsb immediate 条件不成立时，不读取内存、不写目标寄存器、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 signed byte immediate 加载指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 P=1、U=1、W=0、Rn=1、Rt=2、imm32=0x10。 step4、调用 arm_inst_ldrsb_i。 step5、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R1 和 R2 均不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrsb_i.008.FI
+构造代码：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+/* imm32=0x10 */
+inst |= (1U << ARM_INST_LDRSTR_IMM4H_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldrsb_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldrsb_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrsb_i.vcpu>> = &vcpu;
+期望：
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 1
+
+vcast_reg_write_called[2] = 0
+注释：
+测试目的：通过故障注入模拟 ldrsb immediate 内存读取失败，验证函数返回内存读取错误码且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 signed byte immediate 加载指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0、Rn=1、Rt=2、imm32=0x10。 step3、设置 R1 返回 0x2000。 step4、设置 cpu_vcpu_mem_read 第一次调用返回 -2。 step5、调用 arm_inst_ldrsb_i。 step6、观察返回值、PC、内存读取记录和目标寄存器写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrsb_i 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R2 不发生写入。
+ 
+⸻
+ 
+三、本组覆盖点
+这组用例覆盖：
+P==0 && W==1 true / false
+index true / false
+add true / false
+wback false
+wback true by P==0
+wback true by W==1
+Rt==15
+wback && Rn==Rt
+condition passed true / false
+mem_read success
+mem_read failure
+16-bit signed load
+8-bit signed load
+PC 正常推进
+错误路径 PC 不推进
+这组跑完以后，下一组建议做：
+arm_inst_ldrsh_l
+arm_inst_ldrsb_l
+也就是 signed halfword / signed byte literal load。
