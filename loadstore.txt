@@ -1,0 +1,687 @@
+下面这组先给 寄存器偏移半字 load/store 两个函数：
+arm_inst_ldrh_r
+arm_inst_strh_r
+这组和上一组 ldrh_i / strh_i 的区别是：偏移不是立即数 imm4H/imm4L，而是来自 Rm 寄存器。
+ 
+⸻
+ 
+0. 公共说明
+0.1 三个入参传递
+每条用例都传：
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+或：
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+其中：
+inst：手工构造的 32 bit 指令值
+regs：static arch_regs_t regs
+vcpu：static struct vmm_vcpu vcpu
+0.2 每条用例公共模板
+每条用例 Value User Code 先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+注意继续使用：
+regs.pstate = ...
+不要写：
+arm_cpsr(&regs) = ...
+0.3 寄存器偏移字段
+ldrh_r / strh_r 用到这些字段：
+cond   bits[31:28]
+P      bit[24]
+U      bit[23]
+W      bit[21]
+Rn     bits[19:16]
+Rt     bits[15:12]
+Rm     bits[3:0]
+Rm 的设置方式：
+inst |= (3U << ARM_INST_LDRSTR_RM_START);   /* Rm = 3 */
+ 
+⸻
+ 
+1. 
+arm_inst_ldrh_r
+arm_inst_ldrh_r.001.R
+构造代码
+在公共模板后追加：
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;  /* Rn base */
+vcast_reg_read_value[3] = 0x10U;    /* Rm offset */
+
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x1234
+
+vcast_reg_write_called[1] = 0
+注释
+测试目的：验证 ldrh register 在 pre-index add 且无写回时，能够使用 Rm 偏移地址读取半字并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000，Rm 读返回 0x10；设置内存读取返回 0x1234。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、设置 R1 返回 0x2000，R3 返回 0x10。 step5、设置 cpu_vcpu_mem_read 第一次读取返回 0x1234。 step6、调用 arm_inst_ldrh_r。 step7、观察返回值、PC、内存读取地址、目标寄存器写入值和 Rn 写回情况。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：register offset、pre-index add、无写回、条件成立。 其它说明：本用例覆盖 index=true、add=true、wback=false 的正常读取路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2010；R2 写入 0x1234；R1 不发生写回。
+ 
+⸻
+ 
+arm_inst_ldrh_r.002.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=0, W=0，post-index sub，wback=true */
+/* P/U/W 都不置位 */
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_read_value_seq[0] = 0x5678U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x5678
+注释
+测试目的：验证 ldrh register 在 post-index sub 写回模式下，使用原 Rn 地址读取半字，并将 Rn 写回为减去 Rm 偏移后的地址。 用例类别：基于需求的测试 预置条件：构造 P=0、U=0、W=0 的 post-index sub 指令；设置 R1 返回 0x2000，R3 返回 0x10；内存读取返回 0x5678。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、U=0、W=0。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、设置 R1 返回 0x2000，R3 返回 0x10。 step5、调用 arm_inst_ldrh_r。 step6、观察内存读取地址、Rn 写回值和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：register offset、post-index sub、写回。 其它说明：本用例覆盖 index=false、add=false、wback=true 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x2000；R1 写回 0x1FF0；R2 写入 0x5678。
+ 
+⸻
+ 
+arm_inst_ldrh_r.003.IN.PW.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrh register 遇到 P=0 且 W=1 的不可预测编码时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法寄存器偏移半字加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=1。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：P/W 非法组合。 其它说明：本用例覆盖 (P == 0) && (W == 1) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrh_r.004.IN.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrh register 目标寄存器 Rt 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rt=15 的寄存器偏移半字加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=15、Rm=3。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rt == 15) 的不可预测路径，并避免被其它非法条件短路。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrh_r.005.IN.Rm.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrh register 偏移寄存器 Rm 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rm=15 的寄存器偏移半字加载指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、Rm=15。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：Rm 为 PC。 其它说明：本用例覆盖 (Rm == 15) 的不可预测路径，并避免被 Rt==15 条件短路。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrh_r.006.IN.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=15, Rt=2, Rm=3 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrh register 在 P=1,W=1 写回模式下，当 Rn 为 PC 时进入不可预测处理；同时覆盖 wback 计算中 W==1 为 true 的路径。 用例类别：接口测试 预置条件：构造 P=1、W=1 的写回指令，使前置非法组合 (P==0 && W==1) 不成立，同时设置 Rn=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=1。 step3、设置 Rn=15、Rt=2、Rm=3。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：写回模式下 Rn 为 PC。 其它说明：本用例补充覆盖 wback = ((P == 0) || (W == 1)) 中 W == 1 为 true，以及 wback && (Rn == 15) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrh_r.007.IN.RnRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=1, W=0，wback=true */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2, Rm=3 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldrh register 在需要写回且 Rn 与 Rt 相同时，进入不可预测处理。 用例类别：接口测试 预置条件：构造 P=0、W=0 的 post-index 指令，使 wback=true；设置 Rn 与 Rt 相同。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=0，使写回条件成立。 step3、设置 Rn=2、Rt=2、Rm=3。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：写回寄存器与目标寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrh_r.008.R
+构造代码
+/* cond = EQ，Z=0，所以条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x10U;
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 0
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldrh register 条件不成立时，不读取内存、不写目标寄存器、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的寄存器偏移半字加载指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 P=1、U=1、W=0、Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_ldrh_r。 step5、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrh_r 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R1 和 R2 均不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrh_r.009.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldrh_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrh_r.vcpu>> = &vcpu;
+期望
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2010
+vcast_mem_read_size_seq[0] = 2
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldrh register 内存读取失败，验证函数返回内存读取错误码且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 pre-index add 寄存器偏移半字加载指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0、Rn=1、Rt=2、Rm=3。 step3、设置 R1 返回 0x2000，R3 返回 0x10。 step4、设置 cpu_vcpu_mem_read 第一次调用返回 -2。 step5、调用 arm_inst_ldrh_r。 step6、观察返回值、PC、内存读取记录和目标寄存器写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrh_r 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R2 不发生写入。
+ 
+⸻
+ 
+2. 
+arm_inst_strh_r
+arm_inst_strh_r.001.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2010
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x1234
+
+vcast_reg_write_called[1] = 0
+注释
+测试目的：验证 strh register 在 pre-index add 且无写回时，能够将 Rt 的低 16 位写入 Rn 加 Rm 偏移后的地址。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000，Rt 读返回 0xABCD1234，Rm 读返回 0x10。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、设置 R1 返回 0x2000，R2 返回 0xABCD1234，R3 返回 0x10。 step5、调用 arm_inst_strh_r。 step6、观察返回值、PC、内存写地址、写大小、写入值和 Rn 写回情况。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strh_r 等价列表：register offset、pre-index add、无写回、条件成立。 其它说明：本用例覆盖 index=true、add=true、wback=false 的正常写入路径。 通过准则：函数返回 0；PC 更新为 0x1004；写地址为 0x2010；写大小为 2；写入值为 0x1234；R1 不发生写回。
+ 
+⸻
+ 
+arm_inst_strh_r.002.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=0, W=0，post-index sub，wback=true */
+/* P/U/W 都不置位 */
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x00005678U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x5678
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x1FF0
+注释
+测试目的：验证 strh register 在 post-index sub 写回模式下，使用原 Rn 地址写半字，并将 Rn 写回为减去 Rm 偏移后的地址。 用例类别：基于需求的测试 预置条件：构造 P=0、U=0、W=0 的 post-index sub 指令；设置 R1 返回 0x2000，R2 返回 0x00005678，R3 返回 0x10。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、U=0、W=0。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察内存写地址、写入值和 Rn 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strh_r 等价列表：register offset、post-index sub、写回。 其它说明：本用例覆盖 index=false、add=false、wback=true 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存写地址为 0x2000；写入值为 0x5678；R1 写回 0x1FF0。
+ 
+⸻
+ 
+arm_inst_strh_r.003.IN.PW.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释
+测试目的：验证 strh register 遇到 P=0 且 W=1 的不可预测编码时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 P=0、W=1 的非法寄存器偏移半字存储指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=1。 step3、设置 Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strh_r 等价列表：P/W 非法组合。 其它说明：本用例覆盖 (P == 0) && (W == 1) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strh_r.004.IN.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=15, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释
+测试目的：验证 strh register 源寄存器 Rt 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rt=15 的寄存器偏移半字存储指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=15、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strh_r 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rt == 15) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strh_r.005.IN.Rm.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释
+测试目的：验证 strh register 偏移寄存器 Rm 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造字段有效但 Rm=15 的寄存器偏移半字存储指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0。 step3、设置 Rn=1、Rt=2、Rm=15。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strh_r 等价列表：Rm 为 PC。 其它说明：本用例覆盖 (Rm == 15) 的不可预测路径，并避免被 Rt==15 条件短路。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strh_r.006.IN.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=1 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+inst |= (1U << ARM_INST_LDRSTR_W_START);
+
+/* Rn=15, Rt=2, Rm=3 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释
+测试目的：验证 strh register 在 P=1,W=1 写回模式下，当 Rn 为 PC 时进入不可预测处理；同时覆盖 wback 计算中 W==1 为 true 的路径。 用例类别：接口测试 预置条件：构造 P=1、W=1 的写回指令，使前置非法组合 (P==0 && W==1) 不成立，同时设置 Rn=15。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=1。 step3、设置 Rn=15、Rt=2、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strh_r 等价列表：写回模式下 Rn 为 PC。 其它说明：本用例补充覆盖 wback = ((P == 0) || (W == 1)) 中 W == 1 为 true，以及 wback && (Rn == 15) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strh_r.007.IN.RnRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=0, U=1, W=0，wback=true */
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=2, Rt=2, Rm=3 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释
+测试目的：验证 strh register 在需要写回且 Rn 与 Rt 相同时，进入不可预测处理。 用例类别：接口测试 预置条件：构造 P=0、W=0 的 post-index 指令，使 wback=true；设置 Rn 与 Rt 相同。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=0、W=0，使写回条件成立。 step3、设置 Rn=2、Rt=2、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、halt 调用次数和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_strh_r 等价列表：写回寄存器与源寄存器冲突。 其它说明：本用例覆盖 wback && (Rn == Rt) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生内存写。
+ 
+⸻
+ 
+arm_inst_strh_r.008.R
+构造代码
+/* cond = EQ，Z=0，所以条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_write_call = 0
+vcast_reg_write_called[1] = 0
+注释
+测试目的：验证 strh register 条件不成立时，不写内存、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的寄存器偏移半字存储指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 P=1、U=1、W=0、Rn=1、Rt=2、Rm=3。 step4、调用 arm_inst_strh_r。 step5、观察返回值、PC、内存写次数和寄存器写回次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strh_r 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存写；Rn 不发生写回。
+ 
+⸻
+ 
+arm_inst_strh_r.009.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* P=1, U=1, W=0 */
+inst |= (1U << ARM_INST_LDRSTR_P_START);
+inst |= (1U << ARM_INST_LDRSTR_U_START);
+
+/* Rn=1, Rt=2, Rm=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0xABCD1234U;
+vcast_reg_read_value[3] = 0x10U;
+
+vcast_mem_write_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_strh_r.inst>> = inst;
+<<emulate_arm.arm_inst_strh_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strh_r.vcpu>> = &vcpu;
+期望
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2010
+vcast_mem_write_size_seq[0] = 2
+vcast_mem_write_value_seq[0] = 0x1234
+
+vcast_reg_write_called[1] = 0
+注释
+测试目的：通过故障注入模拟 strh register 内存写失败，验证函数返回内存写错误码且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 pre-index add 寄存器偏移半字存储指令；设置内存写 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 P=1、U=1、W=0、Rn=1、Rt=2、Rm=3。 step3、设置 R1 返回 0x2000，R2 返回 0xABCD1234，R3 返回 0x10。 step4、设置 cpu_vcpu_mem_write 第一次调用返回 -2。 step5、调用 arm_inst_strh_r。 step6、观察返回值、PC、内存写记录和 Rn 写回次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_strh_r 等价列表：内存写失败。 其它说明：本用例覆盖 cpu_vcpu_mem_write 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存写；写地址为 0x2010；写入值为 0x1234；Rn 不发生写回。
+ 
+⸻
+ 
+3. 本组建议录入顺序
+先录入：
+arm_inst_ldrh_r.001.R
+arm_inst_ldrh_r.002.R
+arm_inst_ldrh_r.003.IN.PW.NEC
+arm_inst_ldrh_r.004.IN.Rt.NEC
+arm_inst_ldrh_r.005.IN.Rm.NEC
+arm_inst_ldrh_r.006.IN.Rn.NEC
+arm_inst_ldrh_r.007.IN.RnRt.NEC
+arm_inst_ldrh_r.008.R
+arm_inst_ldrh_r.009.FI
+再录入：
+arm_inst_strh_r.001.R
+arm_inst_strh_r.002.R
+arm_inst_strh_r.003.IN.PW.NEC
+arm_inst_strh_r.004.IN.Rt.NEC
+arm_inst_strh_r.005.IN.Rm.NEC
+arm_inst_strh_r.006.IN.Rn.NEC
+arm_inst_strh_r.007.IN.RnRt.NEC
+arm_inst_strh_r.008.R
+arm_inst_strh_r.009.FI
+这组覆盖点包括：
+P==0 && W==1 true / false
+index true / false
+add true / false
+wback false
+wback true by P==0
+wback true by W==1
+Rt==15
+Rm==15
+wback && Rn==15
+wback && Rn==Rt
+condition passed true / false
+mem read/write success
+mem read/write failure
+normal PC advance
+failure PC not advance
