@@ -1,0 +1,516 @@
+下面给下一组：
+arm_inst_ldrex
+arm_inst_strex
+也就是 exclusive load/store。
+这组有两个特点：
+arm_inst_ldrex:
+1. Rn 是基址寄存器。
+2. Rt 是目标寄存器。
+3. 调用 cpu_vcpu_mem_readex。
+4. 成功后把读取数据写入 Rt。
+
+arm_inst_strex:
+1. Rn 是基址寄存器。
+2. Rd 是状态结果寄存器，编码位置在 Rt 字段 bits[15:12]。
+3. Rt 是源数据寄存器，编码位置在 Rm 字段 bits[3:0]。
+4. 调用 cpu_vcpu_mem_writeex。
+5. 成功后把 Rd 写为 0。
+ 
+⸻
+ 
+一、建议补充的简单 User Code 变量
+如果你还没有给 readex/writeex 加打点，建议在 User Code -> Data 里加这几个基础变量：
+unsigned int vcast_mem_readex_call;
+unsigned int vcast_mem_readex_addr;
+unsigned int vcast_mem_readex_size;
+unsigned int vcast_mem_readex_priv;
+
+unsigned int vcast_mem_writeex_call;
+unsigned int vcast_mem_writeex_addr;
+unsigned int vcast_mem_writeex_size;
+unsigned int vcast_mem_writeex_priv;
+在 Test Case Init 里加：
+vcast_mem_readex_call = 0U;
+vcast_mem_readex_addr = 0U;
+vcast_mem_readex_size = 0U;
+vcast_mem_readex_priv = 0U;
+
+vcast_mem_writeex_call = 0U;
+vcast_mem_writeex_addr = 0U;
+vcast_mem_writeex_size = 0U;
+vcast_mem_writeex_priv = 0U;
+ 
+⸻
+ 
+二、
+cpu_vcpu_mem_readex
+Stub 补充
+如果你的 cpu_vcpu_mem_readex stub 当前只有返回值和写 dst，建议补成下面这样。参数名如果不同，按 VectorCAST stub 里的实际参数名替换。
+extern unsigned int vcast_mem_readex_value;
+extern int vcast_mem_readex_rc;
+
+extern unsigned int vcast_mem_readex_call;
+extern unsigned int vcast_mem_readex_addr;
+extern unsigned int vcast_mem_readex_size;
+extern unsigned int vcast_mem_readex_priv;
+
+vcast_mem_readex_call++;
+vcast_mem_readex_addr = address;
+vcast_mem_readex_size = len;
+vcast_mem_readex_priv = privileged;
+
+if (dst != (void *)0) {
+    *((unsigned int *)dst) = vcast_mem_readex_value;
+}
+
+return vcast_mem_readex_rc;
+ 
+⸻
+ 
+三、
+cpu_vcpu_mem_writeex
+Stub 补充
+extern unsigned int vcast_mem_writeex_value;
+extern int vcast_mem_writeex_rc;
+
+extern unsigned int vcast_mem_writeex_call;
+extern unsigned int vcast_mem_writeex_addr;
+extern unsigned int vcast_mem_writeex_size;
+extern unsigned int vcast_mem_writeex_priv;
+
+vcast_mem_writeex_call++;
+vcast_mem_writeex_addr = address;
+vcast_mem_writeex_size = len;
+vcast_mem_writeex_priv = privileged;
+
+if (src != (void *)0) {
+    vcast_mem_writeex_value = *((unsigned int *)src);
+}
+
+return vcast_mem_writeex_rc;
+ 
+⸻
+ 
+四、公共模板
+每条用例先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+五、
+arm_inst_ldrex
+arm_inst_ldrex.001.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_readex_value = 0x12345678U;
+vcast_mem_readex_rc = 0;
+
+<<emulate_arm.arm_inst_ldrex.inst>> = inst;
+<<emulate_arm.arm_inst_ldrex.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrex.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_readex_call = 1
+vcast_mem_readex_addr = 0x2000
+vcast_mem_readex_size = 4
+vcast_mem_readex_priv = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x12345678
+注释
+测试目的：验证 ldrex 在条件成立且寄存器字段有效时，能够从 Rn 指定地址执行 exclusive 读取，并将读取值写入 Rt。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置 exclusive 读取返回 0x12345678。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1、Rt=2。 step3、设置 R1 返回 0x2000。 step4、设置 cpu_vcpu_mem_readex 返回数据 0x12345678 且返回码为 0。 step5、调用 arm_inst_ldrex。 step6、观察返回值、PC、exclusive 读取地址和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrex 等价列表：正常 exclusive load，条件成立，内存读取成功。 其它说明：本用例覆盖 arm_condition_passed 为 true、cpu_vcpu_mem_readex 成功和 cpu_vcpu_reg_write 写 Rt 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；exclusive 读取地址为 0x2000；读取大小为 4；R2 写入 0x12345678。
+ 
+⸻
+ 
+arm_inst_ldrex.002.R
+构造代码
+/* cond = EQ，Z=0，条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+<<emulate_arm.arm_inst_ldrex.inst>> = inst;
+<<emulate_arm.arm_inst_ldrex.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrex.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_readex_call = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldrex 条件不成立时，不执行 exclusive 读取、不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldrex 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 Rn=1、Rt=2。 step4、调用 arm_inst_ldrex。 step5、观察返回值、PC、exclusive 读取次数和目标寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrex 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生 exclusive 读取；R2 不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrex.003.IN.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+
+<<emulate_arm.arm_inst_ldrex.inst>> = inst;
+<<emulate_arm.arm_inst_ldrex.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_readex_call = 0
+注释
+测试目的：验证 ldrex 目标寄存器 Rt 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rt 为 15 的 ldrex 指令；arm_unpredictable 通过 cpu_vcpu_halt stub 打点。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1。 step3、设置 Rt=15。 step4、调用 arm_inst_ldrex。 step5、观察返回值、PC、halt 调用次数和 exclusive 读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrex 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rt == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 读取。
+ 
+⸻
+ 
+arm_inst_ldrex.004.IN.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=15, Rt=2 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+<<emulate_arm.arm_inst_ldrex.inst>> = inst;
+<<emulate_arm.arm_inst_ldrex.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_readex_call = 0
+注释
+测试目的：验证 ldrex 基址寄存器 Rn 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rn 为 15、Rt 为有效寄存器的 ldrex 指令。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=15。 step3、设置 Rt=2，避免被 Rt 非法条件短路。 step4、调用 arm_inst_ldrex。 step5、观察返回值、PC、halt 调用次数和 exclusive 读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrex 等价列表：Rn 为 PC。 其它说明：本用例覆盖 (Rt == 15) || (Rn == 15) 中 Rt 为 false、Rn 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 读取。
+ 
+⸻
+ 
+arm_inst_ldrex.005.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+
+vcast_mem_readex_value = 0x12345678U;
+vcast_mem_readex_rc = -2;
+
+<<emulate_arm.arm_inst_ldrex.inst>> = inst;
+<<emulate_arm.arm_inst_ldrex.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrex.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_readex_call = 1
+vcast_mem_readex_addr = 0x2000
+vcast_mem_readex_size = 4
+vcast_mem_readex_priv = 0
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldrex exclusive 读取失败，验证函数返回读取错误码且不推进 PC、不写目标寄存器。 用例类别：故障注入测试 预置条件：构造有效 ldrex 指令；设置 Rn 读返回 0x2000；设置 exclusive 读取 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1、Rt=2。 step3、设置 R1 返回 0x2000。 step4、设置 cpu_vcpu_mem_readex 返回错误码 -2。 step5、调用 arm_inst_ldrex。 step6、观察返回值、PC、exclusive 读取记录和 Rt 写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrex 等价列表：exclusive 读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_readex 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；exclusive 读取地址为 0x2000；R2 不发生写入。
+ 
+⸻
+ 
+六、
+arm_inst_strex
+arm_inst_strex.001.R
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/*
+ * STREX 编码：
+ * Rn = bits[19:16]
+ * Rd = bits[15:12]
+ * Rt = bits[3:0]
+ */
+
+/* Rn=1, Rd=2, Rt=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x12345678U;
+
+vcast_mem_writeex_rc = 0;
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_writeex_call = 1
+vcast_mem_writeex_addr = 0x2000
+vcast_mem_writeex_size = 4
+vcast_mem_writeex_priv = 0
+vcast_mem_writeex_value = 0x12345678
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0
+注释
+测试目的：验证 strex 在条件成立且寄存器字段有效时，能够从 Rt 读取数据并执行 exclusive 写入，成功后将 Rd 写为 0。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn 读返回 0x2000；设置 Rt 读返回 0x12345678；设置 exclusive 写入返回成功。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1、Rd=2、Rt=3。 step3、设置 R1 返回 0x2000，R3 返回 0x12345678。 step4、设置 cpu_vcpu_mem_writeex 返回 0。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、exclusive 写入地址、写入值和 Rd 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strex 等价列表：正常 exclusive store，条件成立，写入成功。 其它说明：本用例覆盖 arm_condition_passed 为 true、cpu_vcpu_mem_writeex 成功和 Rd 写 0 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；exclusive 写入地址为 0x2000；写入值为 0x12345678；R2 写入 0。
+ 
+⸻
+ 
+arm_inst_strex.002.R
+构造代码
+/* cond = EQ，Z=0，条件不成立 */
+inst |= (0x0U << ARM_INST_COND_SHIFT);
+regs.pstate = 0U;
+
+/* Rn=1, Rd=2, Rt=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x12345678U;
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_writeex_call = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 strex 条件不成立时，不执行 exclusive 写入、不写 Rd，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 strex 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst，设置条件码为 EQ。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 Rn=1、Rd=2、Rt=3。 step4、调用 arm_inst_strex。 step5、观察返回值、PC、exclusive 写入次数和 Rd 写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_strex 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生 exclusive 写入；R2 不发生写入。
+ 
+⸻
+ 
+arm_inst_strex.003.IN.Rd.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rd=15, Rt=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (15U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_writeex_call = 0
+注释
+测试目的：验证 strex 状态结果寄存器 Rd 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rd=15 的 strex 指令；arm_unpredictable 通过 cpu_vcpu_halt stub 打点。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1。 step3、设置 Rd=15。 step4、设置 Rt=3。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、halt 调用次数和 exclusive 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rd 为 PC。 其它说明：本用例覆盖 (Rd == 15) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 写入。
+ 
+⸻
+ 
+arm_inst_strex.004.IN.Rt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rd=2, Rt=15 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_writeex_call = 0
+注释
+测试目的：验证 strex 源数据寄存器 Rt 为 PC时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rt=15 的 strex 指令，并保证 Rd 和 Rn 为有效寄存器。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1。 step3、设置 Rd=2。 step4、设置 Rt=15。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、halt 调用次数和 exclusive 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rt 为 PC。 其它说明：本用例覆盖 (Rd == 15) || (Rt == 15) || (Rn == 15) 中 Rd 为 false、Rt 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 写入。
+ 
+⸻
+ 
+arm_inst_strex.005.IN.Rn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=15, Rd=2, Rt=3 */
+inst |= (15U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_writeex_call = 0
+注释
+测试目的：验证 strex 基址寄存器 Rn 为 PC 时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rn=15 的 strex 指令，并保证 Rd 和 Rt 为有效寄存器。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=15。 step3、设置 Rd=2。 step4、设置 Rt=3。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、halt 调用次数和 exclusive 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rn 为 PC。 其它说明：本用例覆盖 (Rd == 15) || (Rt == 15) || (Rn == 15) 中 Rd 为 false、Rt 为 false、Rn 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 写入。
+ 
+⸻
+ 
+arm_inst_strex.006.IN.RdRn.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=2, Rd=2, Rt=3 */
+inst |= (2U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_writeex_call = 0
+注释
+测试目的：验证 strex 中 Rd 与 Rn 相同时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rd 与 Rn 相同的 strex 指令，并保证三个寄存器都不是 PC。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=2。 step3、设置 Rd=2。 step4、设置 Rt=3。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、halt 调用次数和 exclusive 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rd 与 Rn 冲突。 其它说明：本用例覆盖 (Rd == Rn) 为 true 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 写入。
+ 
+⸻
+ 
+arm_inst_strex.007.IN.RdRt.NEC
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rd=2, Rt=2 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (2U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_writeex_call = 0
+注释
+测试目的：验证 strex 中 Rd 与 Rt 相同时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 Rd 与 Rt 相同的 strex 指令，并保证三个寄存器都不是 PC。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1。 step3、设置 Rd=2。 step4、设置 Rt=2。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、halt 调用次数和 exclusive 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_strex 等价列表：Rd 与 Rt 冲突。 其它说明：本用例覆盖 (Rd == Rt) 为 true 的不可预测路径，并避免被 (Rd == Rn) 短路。 通过准则：函数返回 -1；PC 保持 0x1000；vcast_cpu_halt_called 等于 1；不发生 exclusive 写入。
+ 
+⸻
+ 
+arm_inst_strex.008.FI
+构造代码
+/* cond = AL */
+inst |= (0xEU << ARM_INST_COND_SHIFT);
+
+/* Rn=1, Rd=2, Rt=3 */
+inst |= (1U << ARM_INST_LDRSTR_RN_START);
+inst |= (2U << ARM_INST_LDRSTR_RT_START);
+inst |= (3U << ARM_INST_LDRSTR_RM_START);
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x12345678U;
+
+vcast_mem_writeex_rc = -2;
+
+<<emulate_arm.arm_inst_strex.inst>> = inst;
+<<emulate_arm.arm_inst_strex.regs>> = &regs;
+<<emulate_arm.arm_inst_strex.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_writeex_call = 1
+vcast_mem_writeex_addr = 0x2000
+vcast_mem_writeex_size = 4
+vcast_mem_writeex_priv = 0
+vcast_mem_writeex_value = 0x12345678
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 strex exclusive 写入失败，验证函数返回写入错误码且不推进 PC、不写 Rd。 用例类别：故障注入测试 预置条件：构造有效 strex 指令；设置 Rn 读返回 0x2000；设置 Rt 读返回 0x12345678；设置 exclusive 写入 stub 返回 -2。 测试步骤： step1、构造 inst，设置条件码为 AL。 step2、设置 Rn=1、Rd=2、Rt=3。 step3、设置 R1 返回 0x2000，R3 返回 0x12345678。 step4、设置 cpu_vcpu_mem_writeex 返回错误码 -2。 step5、调用 arm_inst_strex。 step6、观察返回值、PC、exclusive 写入记录和 Rd 写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_strex 等价列表：exclusive 写入失败。 其它说明：本用例覆盖 cpu_vcpu_mem_writeex 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；exclusive 写入地址为 0x2000；写入值为 0x12345678；R2 不发生写入。
+ 
+⸻
+ 
+七、本组覆盖点
+本组覆盖：
+arm_inst_ldrex:
+Rt==15 true / false
+Rn==15 true / false
+condition passed true / false
+mem_readex success
+mem_readex failure
+Rt 写入路径
+PC 正常推进
+错误路径 PC 不推进
+
+arm_inst_strex:
+Rd==15 true / false
+Rt==15 true / false
+Rn==15 true / false
+Rd==Rn true / false
+Rd==Rt true / false
+condition passed true / false
+mem_writeex success
+mem_writeex failure
+Rd 写 0 路径
+PC 正常推进
+错误路径 PC 不推进
+下一组建议做：
+arm_inst_ldrd_i
+arm_inst_strd_i
+也就是 doubleword immediate load/store。
