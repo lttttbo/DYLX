@@ -1,0 +1,865 @@
+下面继续这一组：
+arm_inst_movw_i
+arm_instgrp_dataproc
+先说明一个点：arm_inst_movw_i 里有一段理论不可达代码：
+if (Rd == 15) {
+    arm_unpredictable(...);
+    return VMM_EFAIL;
+}
+
+...
+
+if (arm_condition_passed(cond, regs)) {
+    if (Rd == 15) {
+        arm_pc(regs) = result;
+    } else {
+        cpu_vcpu_reg_write(vcpu, regs, Rd, result);
+    }
+}
+第二个 if (Rd == 15) 的 true 分支被前面的 if (Rd == 15) return 截断，正常单元测试无法进入。这个如果在覆盖率里显示为红色，可以按源码不可达分支记录。
+ 
+⸻
+ 
+一、公共模板
+每条用例 Value User Code 先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+二、
+arm_inst_movw_i
+arm_inst_movw_i.001.R
+构造代码
+/*
+ * cond = AL
+ * imm4 = 0xA
+ * Rd = 2
+ * imm12 = 0xBCD
+ * result = 0xABCD
+ */
+inst = 0xE00A2BCDU;
+
+<<emulate_arm.arm_inst_movw_i.inst>> = inst;
+<<emulate_arm.arm_inst_movw_i.regs>> = &regs;
+<<emulate_arm.arm_inst_movw_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xABCD
+注释
+测试目的：验证 movw immediate 在 AL 条件成立且 Rd 有效时，能够将 16 位立即数写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xE00A2BCD。 step2、该指令解码后 cond=AL、imm4=0xA、Rd=2、imm12=0xBCD。 step3、调用 arm_inst_movw_i。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_movw_i 等价列表：AL 条件成立、Rd 有效、立即数写入。 其它说明：本用例覆盖 cond==0xE 条件成立路径和 Rd 有效写寄存器路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0xABCD。
+ 
+⸻
+ 
+arm_inst_movw_i.002.R
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ * imm4 = 1
+ * Rd = 2
+ * imm12 = 0x234
+ * result = 0x1234
+ */
+inst = 0x00012234U;
+regs.pstate = 0x40000000U;
+
+<<emulate_arm.arm_inst_movw_i.inst>> = inst;
+<<emulate_arm.arm_inst_movw_i.regs>> = &regs;
+<<emulate_arm.arm_inst_movw_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x1234
+注释
+测试目的：验证 movw immediate 在非 AL 条件码成立时，能够通过条件判断并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 CPSR 的 Z 标志。 测试步骤： step1、构造 inst=0x00012234。 step2、设置 regs.pstate=0x40000000，使 EQ 条件成立。 step3、调用 arm_inst_movw_i。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_movw_i 等价列表：非 AL 条件成立、Rd 有效、立即数写入。 其它说明：本用例覆盖 cond!=0xE 且 arm_condition_check 返回 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0x1234。
+ 
+⸻
+ 
+arm_inst_movw_i.003.R
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ * 条件不成立
+ */
+inst = 0x00012234U;
+regs.pstate = 0U;
+
+<<emulate_arm.arm_inst_movw_i.inst>> = inst;
+<<emulate_arm.arm_inst_movw_i.regs>> = &regs;
+<<emulate_arm.arm_inst_movw_i.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 movw immediate 条件不成立时，不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 MOVW 指令；设置 EQ 条件但不设置 Z 标志。 测试步骤： step1、构造 inst=0x00012234。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、调用 arm_inst_movw_i。 step4、观察返回值、PC 和 R2 写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_movw_i 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 不发生写入。
+ 
+⸻
+ 
+arm_inst_movw_i.004.IN.Rd.NEC
+构造代码
+/*
+ * cond = AL
+ * Rd = 15
+ */
+inst = 0xE001F234U;
+
+<<emulate_arm.arm_inst_movw_i.inst>> = inst;
+<<emulate_arm.arm_inst_movw_i.regs>> = &regs;
+<<emulate_arm.arm_inst_movw_i.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_reg_write_called[15] = 0
+注释
+测试目的：验证 movw immediate 目标寄存器 Rd 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rd=15 的 MOVW 指令；对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造 inst=0xE001F234。 step2、该指令解码后 Rd=15。 step3、调用 arm_inst_movw_i。 step4、观察返回值、PC、halt 调用次数和寄存器写入次数。 用例来源：无效等价类 追溯ID：arm_inst_movw_i 等价列表：Rd 为 PC。 其它说明：本用例覆盖第一个 Rd==15 的不可预测路径；函数内部第二个 Rd==15 分支由于前置 return 不可达。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt；R15 不发生写入。
+ 
+⸻
+ 
+三、
+arm_instgrp_dataproc
+arm_instgrp_dataproc 是分派函数，覆盖目标是各类分支分派和未实现路径。下面用固定指令值构造，避免字段拼错。
+公共预置可继续使用：
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x12345678U;
+vcast_reg_read_value[3] = 0x33333333U;
+vcast_reg_read_value[4] = 0x10U;
+对 load 类用例设置：
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+对 store 类用例设置：
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+ 
+⸻
+ 
+A. 
+op=1
+分支
+arm_instgrp_dataproc.001.R.movw
+构造代码：
+/*
+ * op=1
+ * op1=0x10
+ * MOVW immediate
+ */
+inst = 0xE3012234U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x1234
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 op=1, op1=0x10 时能够分派到 arm_inst_movw_i 并执行成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xE3012234。 step2、该指令解码后 op=1、op1=0x10，属于 MOVW immediate。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：数据处理分组中 MOVW 分派。 其它说明：覆盖 op 为 true 且 op1=0x10 的 return 分支。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0x1234。
+ 
+⸻
+ 
+arm_instgrp_dataproc.002.IN.op1_14.NEC
+构造代码：
+/*
+ * op=1
+ * op1=0x14
+ * MOVT TODO，当前未实现
+ */
+inst = 0xE3400000U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 op=1, op1=0x14 的 MOVT 未实现路径下进入不可预测处理。 用例类别：接口测试 预置条件：构造 op=1, op1=0x14 的数据处理指令。 测试步骤： step1、构造 inst=0xE3400000。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：MOVT TODO 未实现路径。 其它说明：覆盖 op=1 分支中 case 0x14。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.003.IN.op1_12.NEC
+构造代码：
+/*
+ * op=1
+ * op1=0x12
+ * MSR/hints TODO
+ */
+inst = 0xE3200000U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 op=1, op1=0x12 的未实现路径下进入不可预测处理。 用例类别：接口测试 预置条件：构造 op=1, op1=0x12 的数据处理指令。 测试步骤： step1、构造 inst=0xE3200000。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：MSR/hints TODO 未实现路径。 其它说明：覆盖 op=1 分支中 case 0x12。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.004.IN.op1_16.NEC
+构造代码：
+/*
+ * op=1
+ * op1=0x16
+ * MSR/hints TODO 同组 case
+ */
+inst = 0xE3600000U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 op=1, op1=0x16 的同组未实现路径下进入不可预测处理。 用例类别：接口测试 预置条件：构造 op=1, op1=0x16 的数据处理指令。 测试步骤： step1、构造 inst=0xE3600000。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：MSR/hints TODO 同组 case。 其它说明：如果 VectorCAST 对 switch case label 单独统计，本用例用于覆盖 case 0x16。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.005.IN.op1_default.NEC
+构造代码：
+/*
+ * op=1
+ * op1=0x00
+ * default TODO
+ */
+inst = 0xE2000000U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 op=1 但 op1 不属于已处理 case 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 op=1, op1=0x00 的数据处理指令。 测试步骤： step1、构造 inst=0xE2000000。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：op=1 default 未实现路径。 其它说明：覆盖 op=1 分支中的 default 路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+B. Extra load/store unprivileged 分支
+arm_instgrp_dataproc.006.R.ldrht
+构造代码：
+inst = 0xE03120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged extra load/store 分支中分派到 arm_inst_ldrht。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R4 返回 0x10；设置内存读取成功。 测试步骤： step1、构造 inst=0xE03120B4。 step2、该指令解码后进入 unprivileged 分支，op2=0xB，且 op1 最低位为 1。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged LDRHT 分派。 其它说明：覆盖 unprivileged 分支中 op2=0xB 且 op1&1 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取；目标寄存器发生写入。
+ 
+⸻
+ 
+arm_instgrp_dataproc.007.R.strht
+构造代码：
+inst = 0xE02120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x00005678U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 1
+vcast_mem_write_value_seq[0] = 0x5678
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged extra load/store 分支中分派到 arm_inst_strht。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R2 返回 0x5678，R4 返回 0x10；设置内存写成功。 测试步骤： step1、构造 inst=0xE02120B4。 step2、该指令解码后进入 unprivileged 分支，op2=0xB，且 op1 最低位为 0。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged STRHT 分派。 其它说明：覆盖 unprivileged 分支中 op2=0xB 且 op1&1 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次半字内存写。
+ 
+⸻
+ 
+arm_instgrp_dataproc.008.R.ldrsbt
+构造代码：
+inst = 0xE03120D4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x80U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xFFFFFF80
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged 分支中分派到 arm_inst_ldrsbt。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R4 返回 0x10；设置字节读取返回 0x80。 测试步骤： step1、构造 inst=0xE03120D4。 step2、该指令解码后 op2=0xD 且 op1&1 为 true。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC、内存读取次数和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged LDRSBT 分派。 其它说明：覆盖 unprivileged 分支中 op2=0xD 且 op1&1 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入符号扩展后的 0xFFFFFF80。
+ 
+⸻
+ 
+arm_instgrp_dataproc.009.IN.op2D_false.NEC
+构造代码：
+inst = 0xE02120D4U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged 分支中 op2=0xD 但 op1&1 为 false 时，最终进入不可预测处理。 用例类别：接口测试 预置条件：构造 op2=0xD 且 op1&1=0 的指令。 测试步骤： step1、构造 inst=0xE02120D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged op2=0xD 未分派路径。 其它说明：覆盖 case 0xD 中 op1&1 为 false 后落入最终不可预测处理的路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.010.R.ldrsht
+构造代码：
+inst = 0xE03120F4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x8001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged 分支中分派到 arm_inst_ldrsht。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R4 返回 0x10；设置半字读取返回 0x8001。 测试步骤： step1、构造 inst=0xE03120F4。 step2、该指令解码后 op2=0xF 且 op1&1 为 true。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC 和寄存器写入情况。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged LDRSHT 分派。 其它说明：覆盖 unprivileged 分支中 op2=0xF 且 op1&1 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 发生写入。
+ 
+⸻
+ 
+arm_instgrp_dataproc.011.IN.op2F_false.NEC
+构造代码：
+inst = 0xE02120F4U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged 分支中 op2=0xF 但 op1&1 为 false 时，最终进入不可预测处理。 用例类别：接口测试 预置条件：构造 op2=0xF 且 op1&1=0 的指令。 测试步骤： step1、构造 inst=0xE02120F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged op2=0xF 未分派路径。 其它说明：覆盖 case 0xF 中 op1&1 为 false 后落入最终不可预测处理的路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.012.IN.unpriv_default.NEC
+构造代码：
+inst = 0xE0212004U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 unprivileged 分支中遇到未支持的 op2 时进入不可预测处理。 用例类别：接口测试 预置条件：构造进入 unprivileged 分支但 op2 不为 0xB/0xD/0xF 的指令。 测试步骤： step1、构造 inst=0xE0212004。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：unprivileged 默认未支持路径。 其它说明：覆盖 unprivileged switch 的 default 路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+C. Extra load/store 普通分支
+下面这些用例用于覆盖普通 extra load/store 分派。它们主要验证 arm_instgrp_dataproc 能进入对应 return arm_inst_xxx(...) 路径。对已在前面单测过的被调函数，这里只验证关键返回和调用行为即可。
+ 
+⸻
+ 
+arm_instgrp_dataproc.013.R.strh_r
+构造代码：
+inst = 0xE00120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x00005678U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在普通 extra load/store 分支中分派到 arm_inst_strh_r。 用例类别：基于需求的测试 预置条件：设置 R1/R2/R4 返回有效值；设置内存写成功。 测试步骤： step1、构造 inst=0xE00120B4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra STRH register 分派。 其它说明：覆盖 op2=0xB 且 op1 落入 STRH register case 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存写。
+ 
+⸻
+ 
+arm_instgrp_dataproc.014.R.ldrh_r
+构造代码：
+inst = 0xE01120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在普通 extra load/store 分支中分派到 arm_inst_ldrh_r。 用例类别：基于需求的测试 预置条件：设置 R1/R4 返回有效值；设置内存读取成功。 测试步骤： step1、构造 inst=0xE01120B4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra LDRH register 分派。 其它说明：覆盖 op2=0xB 且 op1 落入 LDRH register case 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取；R2 发生写入。
+ 
+⸻
+ 
+arm_instgrp_dataproc.015.R.strh_i
+构造代码：
+inst = 0xE04120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x00005678U;
+vcast_mem_write_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_strh_i。 用例类别：基于需求的测试 预置条件：设置 R1/R2 返回有效值；设置内存写成功。 测试步骤： step1、构造 inst=0xE04120B4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra STRH immediate 分派。 其它说明：覆盖 op2=0xB 且 op1 落入 STRH immediate case 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存写。
+ 
+⸻
+ 
+arm_instgrp_dataproc.016.R.ldrh_i
+构造代码：
+inst = 0xE05120B4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrh_i。 用例类别：基于需求的测试 预置条件：设置 R1 返回有效地址；设置内存读取成功。 测试步骤： step1、构造 inst=0xE05120B4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra LDRH immediate 分派。 其它说明：覆盖 op2=0xB 且 op1 落入 LDRH immediate case，且 Rn!=15 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取；R2 发生写入。
+ 
+⸻
+ 
+arm_instgrp_dataproc.017.R.ldrh_l
+构造代码：
+inst = 0xE05F20B4U;
+
+vcast_mem_read_value_seq[0] = 0x1234U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 LDRH immediate 分组中，当 Rn==15 时分派到 arm_inst_ldrh_l。 用例类别：基于需求的测试 预置条件：设置内存读取成功。 测试步骤： step1、构造 inst=0xE05F20B4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra LDRH literal 分派。 其它说明：覆盖 op2=0xB、LDRH immediate/literal 分组中 Rn==15 的 literal 分派路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取；R2 发生写入。
+ 
+⸻
+ 
+D. 
+op2=0xD
+分支
+arm_instgrp_dataproc.018.R.ldrd_r
+inst = 0xE00120D4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 2
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrd_r。 用例类别：基于需求的测试 预置条件：设置 R1/R4 返回有效值；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE00120D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRD register 分派。 其它说明：覆盖 op2=0xD 且 op1 落入 LDRD register case。 通过准则：函数返回 0；PC 更新为 0x1004；发生两次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.019.R.ldrsb_r
+inst = 0xE01120D4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x80U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+vcast_reg_write_called[2] = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrsb_r。 用例类别：基于需求的测试 预置条件：设置 R1/R4 返回有效值；设置字节读取成功。 测试步骤： step1、构造 inst=0xE01120D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSB register 分派。 其它说明：覆盖 op2=0xD 且 op1 落入 LDRSB register case。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.020.R.ldrd_i
+inst = 0xE04120D4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 2
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrd_i。 用例类别：基于需求的测试 预置条件：设置 R1 返回有效地址；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE04120D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRD immediate 分派。 其它说明：覆盖 op2=0xD 中 Rn!=15 的 LDRD immediate 路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生两次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.021.R.ldrd_l
+inst = 0xE04F20D4U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 2
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 LDRD immediate/literal 分组中，当 Rn==15 时分派到 arm_inst_ldrd_l。 用例类别：基于需求的测试 预置条件：设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE04F20D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRD literal 分派。 其它说明：覆盖 op2=0xD 中 LDRD 分组的 Rn==15 路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生两次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.022.R.ldrsb_i
+inst = 0xE05120D4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_value_seq[0] = 0x80U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrsb_i。 用例类别：基于需求的测试 预置条件：设置 R1 返回有效地址；设置字节读取成功。 测试步骤： step1、构造 inst=0xE05120D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSB immediate 分派。 其它说明：覆盖 op2=0xD 中 LDRSB immediate 路径。 通过准则：返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.023.R.ldrsb_l
+inst = 0xE05F20D4U;
+
+vcast_mem_read_value_seq[0] = 0x80U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 LDRSB immediate/literal 分组中，当 Rn==15 时分派到 arm_inst_ldrsb_l。 用例类别：基于需求的测试 预置条件：设置字节读取成功。 测试步骤： step1、构造 inst=0xE05F20D4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSB literal 分派。 其它说明：覆盖 op2=0xD 中 LDRSB 分组的 Rn==15 路径。 通过准则：返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+E. 
+op2=0xF
+分支
+arm_instgrp_dataproc.024.R.strd_r
+inst = 0xE00120F4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x11111111U;
+vcast_reg_read_value[3] = 0x22222222U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 2
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_strd_r。 用例类别：基于需求的测试 预置条件：设置 R1/R2/R3/R4 返回有效值；设置两次内存写成功。 测试步骤： step1、构造 inst=0xE00120F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：STRD register 分派。 其它说明：覆盖 op2=0xF 中 STRD register 路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生两次内存写。
+ 
+⸻
+ 
+arm_instgrp_dataproc.025.R.ldrsh_r
+inst = 0xE01120F4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+vcast_mem_read_value_seq[0] = 0x8001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrsh_r。 用例类别：基于需求的测试 预置条件：设置 R1/R4 返回有效值；设置半字读取成功。 测试步骤： step1、构造 inst=0xE01120F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSH register 分派。 其它说明：覆盖 op2=0xF 中 LDRSH register 路径。 通过准则：返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.026.R.strd_i
+inst = 0xE04120F4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[2] = 0x11111111U;
+vcast_reg_read_value[3] = 0x22222222U;
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 2
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_strd_i。 用例类别：基于需求的测试 预置条件：设置 R1/R2/R3 返回有效值；设置两次内存写成功。 测试步骤： step1、构造 inst=0xE04120F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：STRD immediate 分派。 其它说明：覆盖 op2=0xF 中 STRD immediate 路径。 通过准则：返回 0；PC 更新为 0x1004；发生两次内存写。
+ 
+⸻
+ 
+arm_instgrp_dataproc.027.R.ldrsh_i
+inst = 0xE05120F4U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_value_seq[0] = 0x8001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrsh_i。 用例类别：基于需求的测试 预置条件：设置 R1 返回有效地址；设置半字读取成功。 测试步骤： step1、构造 inst=0xE05120F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSH immediate 分派。 其它说明：覆盖 op2=0xF 中 LDRSH immediate 路径。 通过准则：返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+arm_instgrp_dataproc.028.R.ldrsh_l
+inst = 0xE05F20F4U;
+
+vcast_mem_read_value_seq[0] = 0x8001U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 1
+注释：
+测试目的：验证 arm_instgrp_dataproc 在 LDRSH immediate/literal 分组中，当 Rn==15 时分派到 arm_inst_ldrsh_l。 用例类别：基于需求的测试 预置条件：设置半字读取成功。 测试步骤： step1、构造 inst=0xE05F20F4。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDRSH literal 分派。 其它说明：覆盖 op2=0xF 中 LDRSH 分组的 Rn==15 路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次内存读取。
+ 
+⸻
+ 
+F. Synchronization primitives
+arm_instgrp_dataproc.029.R.strex
+inst = 0xE1812093U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[3] = 0x12345678U;
+vcast_mem_writeex_rc = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_writeex_call = 1
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_strex。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R3 返回 0x12345678；设置 exclusive 写成功。 测试步骤： step1、构造 inst=0xE1812093。 step2、该指令解码后满足 synchronization primitive 中 STREX 分派条件。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC、exclusive 写调用和 Rd 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：STREX 分派。 其它说明：覆盖 (op1&0x10)&&(op2==0x9) 成立且 op1=0x18 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次 exclusive 写；R2 写入 0。
+ 
+⸻
+ 
+arm_instgrp_dataproc.030.R.ldrex
+inst = 0xE1912093U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_readex_value = 0xA5A5A5A5U;
+vcast_mem_readex_rc = 0;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = 0
+regs.pc = 0x1004
+vcast_mem_readex_call = 1
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xA5A5A5A5
+注释：
+测试目的：验证 arm_instgrp_dataproc 分派到 arm_inst_ldrex。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000；设置 exclusive 读返回 0xA5A5A5A5。 测试步骤： step1、构造 inst=0xE1912093。 step2、该指令解码后满足 synchronization primitive 中 LDREX 分派条件。 step3、调用 arm_instgrp_dataproc。 step4、观察返回值、PC、exclusive 读调用和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_dataproc 等价列表：LDREX 分派。 其它说明：覆盖 (op1&0x10)&&(op2==0x9) 成立且 op1=0x19 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；发生一次 exclusive 读；R2 写入 0xA5A5A5A5。
+ 
+⸻
+ 
+arm_instgrp_dataproc.031.IN.sync_default.NEC
+inst = 0xE1012093U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 synchronization primitive 条件成立但 op1 不属于 STREX/LDREX 时，最终进入不可预测处理。 用例类别：接口测试 预置条件：构造 op1=0x10 且 op2=0x9 的指令。 测试步骤： step1、构造 inst=0xE1012093。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：synchronization primitive default 未支持路径。 其它说明：覆盖 synchronization primitive switch 的 default 路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_dataproc.032.IN.extra_default.NEC
+inst = 0xE0012004U;
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+期望：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证普通 extra load/store 分支中 op2 不属于已处理值时，最终进入不可预测处理。 用例类别：接口测试 预置条件：构造进入普通 extra 分支但 op2=0 的指令。 测试步骤： step1、构造 inst=0xE0012004。 step2、调用 arm_instgrp_dataproc。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_dataproc 等价列表：普通 extra default 未支持路径。 其它说明：覆盖普通 extra switch 的 default 路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+四、本组覆盖点
+本组覆盖：
+arm_inst_movw_i:
+Rd 有效写入
+Rd==15 不可预测
+cond==AL true
+cond!=AL true
+cond!=AL false
+第二个 Rd==15 分支不可达，需要记录源码不可达
+
+arm_instgrp_dataproc:
+op=1 MOVW 分派
+op=1 MOVT TODO
+op=1 MSR/hints TODO
+op=1 default TODO
+
+unprivileged 分支：
+op2=0xB -> LDRHT / STRHT
+op2=0xD -> LDRSBT / false 未分派
+op2=0xF -> LDRSHT / false 未分派
+op2 default
+
+普通 extra 分支：
+STRH_R / LDRH_R / STRH_I / LDRH_I / LDRH_L
+LDRD_R / LDRSB_R / LDRD_I / LDRD_L / LDRSB_I / LDRSB_L
+STRD_R / LDRSH_R / STRD_I / LDRSH_I / LDRSH_L
+extra default
+
+sync primitive：
+STREX
+LDREX
+sync default
+接下来排队的函数主要是：
+arm_inst_stcx
+arm_inst_ldcx_i
+arm_inst_ldcx_l
+arm_inst_mcrrx
+arm_inst_mrrcx
+arm_inst_cdpx
+arm_inst_mcrx
+arm_inst_mrcx
+arm_inst_svc
+arm_instgrp_coproc
+
+arm_instgrp_media
+arm_instgrp_uncond
+arm_instgrp_ldrstr
+emulate_arm_inst
