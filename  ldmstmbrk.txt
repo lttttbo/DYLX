@@ -1,0 +1,827 @@
+先补你提醒的 arm_inst_ldr_l，然后继续下一组 块传输函数：
+arm_inst_ldm
+arm_inst_stm
+arm_instgrp_brblk
+ 
+⸻
+ 
+一、补充遗漏：
+arm_inst_ldr_l
+arm_inst_ldr_l 是 word literal load。它没有 Rt 非法判断，Rt 即使为 15 也不会在本函数中进入不可预测分支。
+使用字段：
+cond   bits[31:28]
+U      bit[23]
+Rt     bits[15:12]
+imm12  bits[11:0]
+地址计算：
+base = arm_align(regs.pc, 4)
+U=1 -> address = base + imm12
+U=0 -> address = base - imm12
+公共模板：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+arm_inst_ldr_l.001.R
+构造代码
+/*
+ * cond=AL
+ * U=1
+ * Rn=15，literal 语义
+ * Rt=2
+ * imm12=0x10
+ */
+inst = 0xE08F2010U;
+
+vcast_mem_read_value_seq[0] = 0x12345678U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldr_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldr_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldr_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 4
+vcast_mem_read_priv_seq[0] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x12345678
+注释
+测试目的：验证 ldr literal 在 PC 相对 add 地址模式下，能够读取 word 并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000；设置内存读取返回 0x12345678。 测试步骤： step1、构造 inst=0xE08F2010。 step2、该指令解码后 cond=AL、U=1、Rt=2、imm12=0x10。 step3、调用 arm_inst_ldr_l。 step4、观察返回值、PC、内存读取地址、读取大小和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldr_l 等价列表：literal add、条件成立、内存读取成功。 其它说明：本用例覆盖 add=true、cond==0xE 条件成立、内存读取成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；读取地址为 0x1010；R2 写入 0x12345678。
+ 
+⸻
+ 
+arm_inst_ldr_l.002.R
+构造代码
+/*
+ * cond=EQ
+ * Z=1
+ * U=0
+ * Rn=15
+ * Rt=2
+ * imm12=0x10
+ */
+inst = 0x000F2010U;
+regs.pstate = 0x40000000U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldr_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldr_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldr_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x0FF0
+vcast_mem_read_size_seq[0] = 4
+vcast_mem_read_priv_seq[0] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x11111111
+注释
+测试目的：验证 ldr literal 在 PC 相对 sub 地址模式下，通过非 AL 条件码判断成功后读取 word 并写入目标寄存器。 用例类别：基于需求的测试 预置条件：设置 PC 为 0x1000；设置 CPSR 的 Z 标志；设置内存读取返回 0x11111111。 测试步骤： step1、构造 inst=0x000F2010。 step2、设置 regs.pstate=0x40000000，使 EQ 条件成立。 step3、调用 arm_inst_ldr_l。 step4、观察返回值、PC、内存读取地址和 Rt 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldr_l 等价列表：literal sub、非 AL 条件成立、内存读取成功。 其它说明：本用例覆盖 add=false，并覆盖 cond!=0xE 且 arm_condition_check 返回 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；读取地址为 0x0FF0；R2 写入 0x11111111。
+ 
+⸻
+ 
+arm_inst_ldr_l.003.R
+构造代码
+/*
+ * cond=EQ
+ * Z=0
+ * U=1
+ * 条件不成立
+ */
+inst = 0x008F2010U;
+regs.pstate = 0U;
+
+<<emulate_arm.arm_inst_ldr_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldr_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldr_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldr literal 条件不成立时，不读取内存、不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 literal word load 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x008F2010。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、调用 arm_inst_ldr_l。 step4、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldr_l 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R2 不发生写入。
+ 
+⸻
+ 
+arm_inst_ldr_l.004.FI
+构造代码
+/*
+ * cond=AL
+ * U=1
+ * Rt=2
+ * imm12=0x10
+ */
+inst = 0xE08F2010U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldr_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldr_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldr_l.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 4
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldr literal 内存读取失败，验证函数返回读取错误码且不推进 PC、不写目标寄存器。 用例类别：故障注入测试 预置条件：构造有效 literal word load 指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst=0xE08F2010。 step2、设置第一次 cpu_vcpu_mem_read 返回 -2。 step3、调用 arm_inst_ldr_l。 step4、观察返回值、PC、内存读取记录和 Rt 写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldr_l 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R2 不发生写入。
+ 
+⸻
+ 
+二、下一组：块传输函数
+本组包括：
+arm_inst_ldm
+arm_inst_stm
+arm_instgrp_brblk
+公共模板继续使用：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+三、
+arm_inst_ldm
+arm_inst_ldm.001.R
+构造代码
+/*
+ * cond=AL
+ * op=0x09
+ * increment after
+ * wback=false
+ * Rn=4
+ * reg_list = R0 | R1
+ */
+inst = 0xE0940003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 2
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_addr_seq[1] = 0x2004
+
+vcast_reg_write_called[0] = 1
+vcast_reg_write_value[0] = 0x11111111
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x22222222
+
+vcast_reg_write_called[4] = 0
+注释
+测试目的：验证 ldm 在 increment-after 且不写回时，能够按寄存器列表连续读取内存并写入对应寄存器。 用例类别：基于需求的测试 预置条件：设置 R4 返回 0x2000；设置两次内存读取均成功。 测试步骤： step1、构造 inst=0xE0940003。 step2、该指令解码后 Rn=4，寄存器列表包含 R0 和 R1。 step3、设置第一次读取返回 0x11111111，第二次读取返回 0x22222222。 step4、调用 arm_inst_ldm。 step5、观察返回值、PC、两次读取地址和 R0/R1 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldm 等价列表：increment-after、不写回、寄存器列表不含 PC。 其它说明：覆盖 is_xx1xxx=true、is_x1xxxx=false、wback=false、普通寄存器读取循环。 通过准则：返回 0；PC 为 0x1004；读取地址为 0x2000 和 0x2004；R0/R1 分别写入预期值；R4 不写回。
+ 
+⸻
+ 
+arm_inst_ldm.002.R
+构造代码
+/*
+ * cond=EQ, Z=1
+ * op=0x13
+ * decrement before
+ * wback=true
+ * Rn=4
+ * reg_list = R0 | R2
+ */
+inst = 0x01340005U;
+regs.pstate = 0x40000000U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x33333333U;
+vcast_mem_read_value_seq[1] = 0x44444444U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 2
+vcast_mem_read_addr_seq[0] = 0x1FF8
+vcast_mem_read_addr_seq[1] = 0x1FFC
+
+vcast_reg_write_called[0] = 1
+vcast_reg_write_value[0] = 0x33333333
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x44444444
+
+vcast_reg_write_called[4] = 1
+vcast_reg_write_value[4] = 0x1FF8
+注释
+测试目的：验证 ldm 在 decrement-before 写回模式下，能够从递减后的地址读取寄存器列表，并将基址寄存器写回。 用例类别：基于需求的测试 预置条件：设置 EQ 条件成立；设置 R4 返回 0x2000；设置两次内存读取均成功。 测试步骤： step1、构造 inst=0x01340005。 step2、设置 regs.pstate=0x40000000，使 EQ 条件成立。 step3、该指令解码后 Rn=4，寄存器列表包含 R0 和 R2，写回有效。 step4、调用 arm_inst_ldm。 step5、观察读取地址、R0/R2 写入值和 R4 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldm 等价列表：decrement-before、写回、非 AL 条件成立。 其它说明：覆盖 is_xx1xxx=false、is_x1xxxx=true、wback=true 且写回 decrement 分支。 通过准则：返回 0；读取地址为 0x1FF8 和 0x1FFC；R4 写回 0x1FF8。
+ 
+⸻
+ 
+arm_inst_ldm.003.R
+构造代码
+/*
+ * cond=AL
+ * op=0x0B
+ * increment after
+ * wback=true
+ * Rn=4
+ * reg_list = R0 | PC
+ */
+inst = 0xE0B48001U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x55555555U;
+vcast_mem_read_value_seq[1] = 0x3000U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x3004
+
+vcast_mem_read_call = 2
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_addr_seq[1] = 0x2004
+
+vcast_reg_write_called[0] = 1
+vcast_reg_write_value[0] = 0x55555555
+
+vcast_reg_write_called[4] = 1
+vcast_reg_write_value[4] = 0x2008
+注释
+测试目的：验证 ldm 寄存器列表包含 PC 时，能够读取 PC 值并在函数末尾继续执行 PC 加 4，同时完成 increment 写回。 用例类别：基于需求的测试 预置条件：设置 R4 返回 0x2000；寄存器列表包含 R0 和 PC；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE0B48001。 step2、该指令解码后寄存器列表包含 R0 和 PC，且写回有效。 step3、设置第一次读取返回 0x55555555，第二次读取返回 0x3000。 step4、调用 arm_inst_ldm。 step5、观察返回值、PC、R0 写入值和 R4 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldm 等价列表：寄存器列表包含 PC、increment 写回。 其它说明：覆盖 reg_list >> 15 为 true，以及 wback 中 increment 分支。 通过准则：返回 0；PC 最终为 0x3004；R0 写入 0x55555555；R4 写回 0x2008。
+ 
+⸻
+ 
+arm_inst_ldm.004.IN.Rn.NEC
+构造代码
+/*
+ * Rn=15
+ * reg_list = R0 | R1
+ */
+inst = 0xE09F0003U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldm 基址寄存器 Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rn=15 且寄存器列表非空的指令。 测试步骤： step1、构造 inst=0xE09F0003。 step2、调用 arm_inst_ldm。 step3、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldm 等价列表：Rn 为 PC。 其它说明：覆盖 (Rn == 15) 的不可预测路径。 通过准则：返回 -1；PC 保持 0x1000；触发 halt；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldm.005.IN.EmptyList.NEC
+构造代码
+/*
+ * reg_list = 0
+ */
+inst = 0xE0940000U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldm 寄存器列表为空时进入不可预测处理。 用例类别：接口测试 预置条件：构造 reg_list=0 的指令。 测试步骤： step1、构造 inst=0xE0940000。 step2、调用 arm_inst_ldm。 step3、观察返回值、PC 和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldm 等价列表：空寄存器列表。 其它说明：覆盖 !reg_list 的不可预测路径。 通过准则：返回 -1；PC 不变；不读取内存。
+ 
+⸻
+ 
+arm_inst_ldm.006.IN.WbackRn.NEC
+构造代码
+/*
+ * wback=true
+ * Rn=4
+ * reg_list 包含 R4
+ */
+inst = 0xE0B40010U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldm 写回模式下寄存器列表包含 Rn 时进入不可预测处理。 用例类别：接口测试 预置条件：构造写回有效且寄存器列表包含 Rn 的指令。 测试步骤： step1、构造 inst=0xE0B40010。 step2、该指令解码后 Rn=4，寄存器列表包含 R4。 step3、调用 arm_inst_ldm。 step4、观察返回值、PC 和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldm 等价列表：写回寄存器包含在加载列表中。 其它说明：覆盖 wback && (reg_list & (1 << Rn)) 的不可预测路径。 通过准则：返回 -1；PC 不变；不读取内存。
+ 
+⸻
+ 
+arm_inst_ldm.007.R
+构造代码
+/*
+ * cond=EQ, Z=0
+ * 条件不成立
+ */
+inst = 0x00940003U;
+regs.pstate = 0U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 0
+vcast_reg_write_called[0] = 0
+vcast_reg_write_called[1] = 0
+vcast_reg_write_called[4] = 0
+注释
+测试目的：验证 ldm 条件不成立时，不读取内存、不写寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldm 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00940003。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、调用 arm_inst_ldm。 step4、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldm 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：返回 0；PC 为 0x1004；不发生内存读取；不发生寄存器写入。
+ 
+⸻
+ 
+arm_inst_ldm.008.FI.loop
+构造代码
+/*
+ * 第一次普通寄存器读取失败
+ */
+inst = 0xE0940003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = -2
+regs.pc = 0x1000
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_reg_write_called[0] = 0
+注释
+测试目的：通过故障注入模拟 ldm 普通寄存器读取阶段第一次内存读取失败，验证函数返回错误码且不推进 PC。 用例类别：故障注入测试 预置条件：构造有效 ldm 指令；设置第一次内存读取返回 -2。 测试步骤： step1、构造 inst=0xE0940003。 step2、设置 R4 返回 0x2000。 step3、设置第一次 cpu_vcpu_mem_read 返回 -2。 step4、调用 arm_inst_ldm。 step5、观察返回值、PC 和寄存器写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldm 等价列表：普通寄存器读取失败。 其它说明：覆盖循环内 cpu_vcpu_mem_read 返回非 0 的路径。 通过准则：返回 -2；PC 保持 0x1000；R0 不写入。
+ 
+⸻
+ 
+arm_inst_ldm.009.FI.pc
+构造代码
+/*
+ * reg_list = R0 | PC
+ * 第二次读取 PC 失败
+ */
+inst = 0xE0B48001U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x77777777U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = -3;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = -3
+regs.pc = 0x1000
+vcast_mem_read_call = 2
+vcast_mem_read_addr_seq[0] = 0x2000
+vcast_mem_read_addr_seq[1] = 0x2004
+vcast_reg_write_called[0] = 1
+vcast_reg_write_value[0] = 0x77777777
+vcast_reg_write_called[4] = 0
+注释
+测试目的：通过故障注入模拟 ldm 读取 PC 阶段内存读取失败，验证函数返回第二次读取错误码且不推进 PC、不执行写回。 用例类别：故障注入测试 预置条件：构造寄存器列表包含 R0 和 PC 的 ldm 指令；设置第一次读取成功，第二次读取失败。 测试步骤： step1、构造 inst=0xE0B48001。 step2、设置 R4 返回 0x2000。 step3、设置第一次读取返回 0x77777777，第二次读取返回 -3。 step4、调用 arm_inst_ldm。 step5、观察返回值、PC、读取地址和写回情况。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldm 等价列表：PC 读取失败。 其它说明：覆盖 reg_list >> 15 分支中的读取失败路径。 通过准则：返回 -3；PC 保持 0x1000；R0 写入第一次读取值；R4 不写回。
+ 
+⸻
+ 
+四、
+arm_inst_stm
+arm_inst_stm.001.R
+构造代码
+/*
+ * cond=AL
+ * op=0x08
+ * increment after
+ * wback=false
+ * Rn=4
+ * reg_list=R0|R1
+ */
+inst = 0xE0840003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x11111111U;
+vcast_reg_read_value[1] = 0x22222222U;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_mem_write_call = 2
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_value_seq[0] = 0x11111111
+vcast_mem_write_addr_seq[1] = 0x2004
+vcast_mem_write_value_seq[1] = 0x22222222
+
+vcast_reg_write_called[4] = 0
+注释
+测试目的：验证 stm 在 increment-after 且不写回时，能够按寄存器列表连续写入内存。 用例类别：基于需求的测试 预置条件：设置 R4 返回 0x2000；设置 R0/R1 返回待写数据；设置两次内存写均成功。 测试步骤： step1、构造 inst=0xE0840003。 step2、该指令解码后 Rn=4，寄存器列表包含 R0 和 R1。 step3、调用 arm_inst_stm。 step4、观察返回值、PC、两次写地址和写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_stm 等价列表：increment-after、不写回、寄存器列表不含 PC。 其它说明：覆盖 is_xx1xxx=true、is_x1xxxx=false、wback=false。 通过准则：返回 0；PC 为 0x1004；写地址为 0x2000 和 0x2004；R4 不写回。
+ 
+⸻
+ 
+arm_inst_stm.002.R
+构造代码
+/*
+ * cond=EQ, Z=1
+ * op=0x12
+ * decrement-before
+ * wback=true
+ * Rn=4
+ * reg_list=R0|R2
+ */
+inst = 0x01240005U;
+regs.pstate = 0x40000000U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x33333333U;
+vcast_reg_read_value[2] = 0x44444444U;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_mem_write_call = 2
+vcast_mem_write_addr_seq[0] = 0x1FF8
+vcast_mem_write_value_seq[0] = 0x33333333
+vcast_mem_write_addr_seq[1] = 0x1FFC
+vcast_mem_write_value_seq[1] = 0x44444444
+
+vcast_reg_write_called[4] = 1
+vcast_reg_write_value[4] = 0x1FF8
+注释
+测试目的：验证 stm 在 decrement-before 写回模式下，能够从递减后的地址开始写寄存器列表，并将 Rn 写回。 用例类别：基于需求的测试 预置条件：设置 EQ 条件成立；设置 R4 返回 0x2000；设置 R0/R2 返回待写数据。 测试步骤： step1、构造 inst=0x01240005。 step2、设置 regs.pstate=0x40000000。 step3、调用 arm_inst_stm。 step4、观察内存写地址、写入值和 R4 写回值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_stm 等价列表：decrement-before、写回、非 AL 条件成立。 其它说明：覆盖 is_xx1xxx=false、is_x1xxxx=true、wback=true 且 decrement 写回路径。 通过准则：返回 0；写地址为 0x1FF8 和 0x1FFC；R4 写回 0x1FF8。
+ 
+⸻
+ 
+arm_inst_stm.003.R
+构造代码
+/*
+ * op=0x0A
+ * increment-after
+ * wback=true
+ * reg_list=R0|PC
+ */
+inst = 0xE0A48001U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x55555555U;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_mem_write_call = 2
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_value_seq[0] = 0x55555555
+vcast_mem_write_addr_seq[1] = 0x2004
+vcast_mem_write_value_seq[1] = 0x1008
+
+vcast_reg_write_called[4] = 1
+vcast_reg_write_value[4] = 0x2008
+注释
+测试目的：验证 stm 寄存器列表包含 PC 时，能够将 PC+8 写入内存，并完成 increment 写回。 用例类别：基于需求的测试 预置条件：设置 R4 返回 0x2000；寄存器列表包含 R0 和 PC；设置两次内存写均成功。 测试步骤： step1、构造 inst=0xE0A48001。 step2、该指令解码后寄存器列表包含 R0 和 PC，且写回有效。 step3、调用 arm_inst_stm。 step4、观察写地址、写入值、R4 写回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_stm 等价列表：寄存器列表包含 PC、increment 写回。 其它说明：覆盖 reg_list >> 15 为 true，以及 wback increment 分支。 通过准则：返回 0；第二次写入值为 0x1008；R4 写回 0x2008；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_stm.004.IN.Rn.NEC
+inst = 0xE08F0003U;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 stm 基址寄存器 Rn 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rn=15 且寄存器列表非空的指令。 测试步骤： step1、构造 inst=0xE08F0003。 step2、调用 arm_inst_stm。 step3、观察返回值、PC 和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_stm 等价列表：Rn 为 PC。 其它说明：覆盖 Rn==15。 通过准则：返回 -1；PC 不变；不写内存。
+ 
+⸻
+ 
+arm_inst_stm.005.IN.EmptyList.NEC
+inst = 0xE0840000U;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+vcast_mem_write_call = 0
+注释：
+测试目的：验证 stm 寄存器列表为空时进入不可预测处理。 用例类别：接口测试 预置条件：构造 reg_list=0 的 stm 指令。 测试步骤： step1、构造 inst=0xE0840000。 step2、调用 arm_inst_stm。 step3、观察返回值、PC 和内存写次数。 用例来源：无效等价类 追溯ID：arm_inst_stm 等价列表：空寄存器列表。 其它说明：覆盖 !reg_list 路径。 通过准则：返回 -1；PC 不变；不写内存。
+ 
+⸻
+ 
+arm_inst_stm.006.R
+inst = 0x00840003U;
+regs.pstate = 0U;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 0
+vcast_reg_write_called[4] = 0
+注释：
+测试目的：验证 stm 条件不成立时，不写内存、不写回 Rn，但仍推进 PC。 用例类别：基于需求的测试 预置条件：设置 EQ 条件但不设置 Z 标志。 测试步骤： step1、构造 inst=0x00840003。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_stm。 step4、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_stm 等价列表：条件不通过。 其它说明：覆盖条件不成立路径。 通过准则：返回 0；PC 为 0x1004；不写内存。
+ 
+⸻
+ 
+arm_inst_stm.007.FI.loop
+inst = 0xE0840003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x11111111U;
+
+vcast_mem_write_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值：
+return = -2
+regs.pc = 0x1000
+vcast_mem_write_call = 1
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_reg_write_called[4] = 0
+注释：
+测试目的：通过故障注入模拟 stm 普通寄存器写入阶段第一次内存写失败，验证函数返回错误码且不推进 PC。 用例类别：故障注入测试 预置条件：设置第一次内存写返回 -2。 测试步骤： step1、构造 inst=0xE0840003。 step2、设置 R4 返回 0x2000，R0 返回 0x11111111。 step3、调用 arm_inst_stm。 step4、观察返回值、PC 和写回次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_stm 等价列表：普通寄存器写失败。 其它说明：覆盖循环内 cpu_vcpu_mem_write 返回非 0。 通过准则：返回 -2；PC 不推进；R4 不写回。
+ 
+⸻
+ 
+arm_inst_stm.008.FI.pc
+inst = 0xE0A48001U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x77777777U;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = -3;
+
+<<emulate_arm.arm_inst_stm.inst>> = inst;
+<<emulate_arm.arm_inst_stm.regs>> = &regs;
+<<emulate_arm.arm_inst_stm.vcpu>> = &vcpu;
+期望值：
+return = -3
+regs.pc = 0x1000
+vcast_mem_write_call = 2
+vcast_mem_write_addr_seq[0] = 0x2000
+vcast_mem_write_addr_seq[1] = 0x2004
+vcast_reg_write_called[4] = 0
+注释：
+测试目的：通过故障注入模拟 stm 写 PC 阶段内存写失败，验证函数返回第二次写错误码且不推进 PC、不执行写回。 用例类别：故障注入测试 预置条件：构造寄存器列表包含 R0 和 PC 的 stm 指令；设置第一次写成功，第二次写失败。 测试步骤： step1、构造 inst=0xE0A48001。 step2、设置 R4 返回 0x2000，R0 返回 0x77777777。 step3、设置第一次内存写成功，第二次内存写返回 -3。 step4、调用 arm_inst_stm。 step5、观察返回值、PC、写地址和 R4 写回情况。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_stm 等价列表：PC 写入失败。 其它说明：覆盖 reg_list >> 15 分支中的写失败路径。 通过准则：返回 -3；PC 保持 0x1000；R4 不写回。
+ 
+⸻
+ 
+五、
+arm_instgrp_brblk
+arm_instgrp_brblk.001.R
+/*
+ * op=0x08
+ * store multiple normal path -> arm_inst_stm
+ */
+inst = 0xE0840003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+vcast_reg_read_value[0] = 0x11111111U;
+vcast_reg_read_value[1] = 0x22222222U;
+
+vcast_mem_write_rc_seq[0] = 0;
+vcast_mem_write_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_brblk.inst>> = inst;
+<<emulate_arm.arm_instgrp_brblk.regs>> = &regs;
+<<emulate_arm.arm_instgrp_brblk.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_write_call = 2
+注释：
+测试目的：验证 arm_instgrp_brblk 对普通 store multiple 指令能够分派到 arm_inst_stm 并执行成功。 用例类别：基于需求的测试 预置条件：构造普通 STM 指令；设置内存写成功。 测试步骤： step1、构造 inst=0xE0840003。 step2、调用 arm_instgrp_brblk。 step3、观察返回值、PC 和内存写次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_brblk 等价列表：store multiple 正常分派。 其它说明：覆盖 !is_1xxxxx 且 !is_xxxxx1 的普通 STM 分派路径。 通过准则：返回 0；PC 为 0x1004；发生两次内存写。
+ 
+⸻
+ 
+arm_instgrp_brblk.002.R
+/*
+ * op=0x09
+ * load multiple normal path -> arm_inst_ldm
+ */
+inst = 0xE0940003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_instgrp_brblk.inst>> = inst;
+<<emulate_arm.arm_instgrp_brblk.regs>> = &regs;
+<<emulate_arm.arm_instgrp_brblk.vcpu>> = &vcpu;
+期望值：
+return = 0
+regs.pc = 0x1004
+vcast_mem_read_call = 2
+注释：
+测试目的：验证 arm_instgrp_brblk 对普通 load multiple 指令能够分派到 arm_inst_ldm 并执行成功。 用例类别：基于需求的测试 预置条件：构造普通 LDM 指令；设置内存读取成功。 测试步骤： step1、构造 inst=0xE0940003。 step2、调用 arm_instgrp_brblk。 step3、观察返回值、PC 和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_brblk 等价列表：load multiple 正常分派。 其它说明：覆盖 !is_1xxxxx 且 is_xxxxx1 的普通 LDM 分派路径。 通过准则：返回 0；PC 为 0x1004；发生两次内存读取。
+ 
+⸻
+ 
+arm_instgrp_brblk.003.IN.PushTodo.NEC
+/*
+ * op=0x12
+ * Rn=13
+ * reg_list 至少两个寄存器
+ * PUSH TODO 路径，最终 unpredictable
+ */
+inst = 0xE12D0003U;
+
+<<emulate_arm.arm_instgrp_brblk.inst>> = inst;
+<<emulate_arm.arm_instgrp_brblk.regs>> = &regs;
+<<emulate_arm.arm_instgrp_brblk.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_brblk 识别到 PUSH TODO 路径时，当前实现最终进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 op=0x12、Rn=13 且寄存器列表长度大于等于 2 的指令。 测试步骤： step1、构造 inst=0xE12D0003。 step2、调用 arm_instgrp_brblk。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_brblk 等价列表：PUSH TODO 未实现路径。 其它说明：覆盖 store 分支中 PUSH 特殊判断为 true 后落入不可预测处理的路径。 通过准则：返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_brblk.004.IN.PopTodo.NEC
+/*
+ * op=0x0B
+ * Rn=13
+ * reg_list 至少两个寄存器
+ * POP TODO 路径，最终 unpredictable
+ */
+inst = 0xE0BD0003U;
+
+<<emulate_arm.arm_instgrp_brblk.inst>> = inst;
+<<emulate_arm.arm_instgrp_brblk.regs>> = &regs;
+<<emulate_arm.arm_instgrp_brblk.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_brblk 识别到 POP TODO 路径时，当前实现最终进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 op=0x0B、Rn=13 且寄存器列表长度大于等于 2 的指令。 测试步骤： step1、构造 inst=0xE0BD0003。 step2、调用 arm_instgrp_brblk。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_brblk 等价列表：POP TODO 未实现路径。 其它说明：覆盖 load 分支中 POP 特殊判断为 true 后落入不可预测处理的路径。 通过准则：返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+arm_instgrp_brblk.005.IN.BranchTodo.NEC
+/*
+ * op bit[5] = 1
+ * branch / branch with link TODO
+ */
+inst = 0xE2000000U;
+
+<<emulate_arm.arm_instgrp_brblk.inst>> = inst;
+<<emulate_arm.arm_instgrp_brblk.regs>> = &regs;
+<<emulate_arm.arm_instgrp_brblk.vcpu>> = &vcpu;
+期望值：
+return = -1
+regs.pc = 0x1000
+vcast_cpu_halt_called = 1
+注释：
+测试目的：验证 arm_instgrp_brblk 遇到 branch 或 branch with link 类未实现路径时，进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造 op 的 bit5 为 1 的 branch/block 分组指令。 测试步骤： step1、构造 inst=0xE2000000。 step2、调用 arm_instgrp_brblk。 step3、观察返回值、PC 和 halt 调用次数。 用例来源：无效等价类 追溯ID：arm_instgrp_brblk 等价列表：branch TODO 未实现路径。 其它说明：覆盖 is_1xxxxx 为 true 的未实现路径。 通过准则：返回 -1；PC 保持 0x1000；触发 halt。
+ 
+⸻
+ 
+六、本组覆盖点
+本组覆盖：
+arm_inst_ldr_l:
+U=1 add
+U=0 sub
+condition true by AL
+condition true by arm_condition_check
+condition false
+mem_read success
+mem_read failure
+
+arm_inst_ldm:
+Rn==15
+reg_list==0
+wback && list contains Rn
+condition true / false
+increment path
+decrement path
+wback increment
+wback decrement
+reg_list contains PC
+loop mem_read failure
+PC mem_read failure
+
+arm_inst_stm:
+Rn==15
+reg_list==0
+condition true / false
+increment path
+decrement path
+wback increment
+wback decrement
+reg_list contains PC
+loop mem_write failure
+PC mem_write failure
+
+arm_instgrp_brblk:
+normal STM dispatch
+normal LDM dispatch
+PUSH TODO path
+POP TODO path
+branch TODO path
+下一组建议继续：
+arm_inst_movw_i
+arm_instgrp_dataproc
+也就是数据处理分组和 MOVW immediate。
