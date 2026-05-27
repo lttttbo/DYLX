@@ -1,0 +1,808 @@
+本批先给这两个：
+arm_inst_ldrb_l
+arm_inst_ldcx_l
+其中 arm_inst_ldrb_l 比较简单；arm_inst_ldcx_l 需要 coprocessor 回调，所以先给一份最小 user code 配置。
+ 
+⸻
+ 
+一、
+arm_inst_ldrb_l
+公共模板
+每条用例 Value User Code 先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+arm_inst_ldrb_l 字段：
+cond   bits[31:28]
+U      bit[23]
+Rt     bits[15:12]
+imm12  bits[11:0]
+ 
+⸻
+ 
+arm_inst_ldrb_l.001.R
+构造代码
+/*
+ * cond = AL
+ * U = 1
+ * Rn = 15，literal 语义
+ * Rt = 2
+ * imm12 = 0x10
+ */
+inst = 0xE08F2010U;
+
+vcast_mem_read_value_seq[0] = 0xABU;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrb_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldrb_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrb_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 1
+vcast_mem_read_priv_seq[0] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xAB
+注释
+测试目的：验证 ldrb literal 在 PC 相对 add 地址模式下，能够读取 1 字节并写入目标寄存器。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000；设置内存读取返回 0xAB。 测试步骤： step1、构造 inst=0xE08F2010。 step2、该指令解码后 cond=AL、U=1、Rt=2、imm12=0x10。 step3、设置第一次 cpu_vcpu_mem_read 返回 0xAB。 step4、调用 arm_inst_ldrb_l。 step5、观察返回值、PC、内存读取地址、读取大小和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrb_l 等价列表：literal add、条件成立、读取成功。 其它说明：本用例覆盖 add=true、cond==0xE 条件成立、内存读取成功路径。 通过准则：函数返回 0；PC 更新为 0x1004；读取地址为 0x1010；读取大小为 1；R2 写入 0xAB。
+ 
+⸻
+ 
+arm_inst_ldrb_l.002.R
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ * U = 0
+ * Rn = 15
+ * Rt = 2
+ * imm12 = 0x10
+ */
+inst = 0x000F2010U;
+regs.pstate = 0x40000000U;
+
+vcast_mem_read_value_seq[0] = 0x7FU;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldrb_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldrb_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrb_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x0FF0
+vcast_mem_read_size_seq[0] = 1
+vcast_mem_read_priv_seq[0] = 0
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x7F
+注释
+测试目的：验证 ldrb literal 在 PC 相对 sub 地址模式下，通过非 AL 条件码判断成功后读取字节并写入目标寄存器。 用例类别：基于需求的测试 预置条件：设置 PC 为 0x1000；设置 CPSR 的 Z 标志；设置内存读取返回 0x7F。 测试步骤： step1、构造 inst=0x000F2010。 step2、设置 regs.pstate=0x40000000，使 EQ 条件成立。 step3、设置第一次 cpu_vcpu_mem_read 返回 0x7F。 step4、调用 arm_inst_ldrb_l。 step5、观察返回值、PC、内存读取地址和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrb_l 等价列表：literal sub、非 AL 条件成立、读取成功。 其它说明：本用例覆盖 add=false，并覆盖 cond!=0xE 且 arm_condition_check 返回 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；读取地址为 0x0FF0；R2 写入 0x7F。
+ 
+⸻
+ 
+arm_inst_ldrb_l.003.IN.Rt.NEC
+构造代码
+/*
+ * cond = AL
+ * U = 1
+ * Rt = 15
+ */
+inst = 0xE08FF010U;
+
+<<emulate_arm.arm_inst_ldrb_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldrb_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrb_l.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+vcast_reg_write_called[15] = 0
+注释
+测试目的：验证 ldrb literal 目标寄存器 Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt=15 的 byte literal load 指令；对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造 inst=0xE08FF010。 step2、该指令解码后 Rt=15。 step3、调用 arm_inst_ldrb_l。 step4、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldrb_l 等价列表：Rt 为 PC。 其它说明：本用例覆盖 if (Rt == 15) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldrb_l.004.R
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ * 条件不成立
+ */
+inst = 0x008F2010U;
+regs.pstate = 0U;
+
+<<emulate_arm.arm_inst_ldrb_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldrb_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrb_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_mem_read_call = 0
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 ldrb literal 条件不成立时，不读取内存、不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 byte literal load 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x008F2010。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、调用 arm_inst_ldrb_l。 step4、观察返回值、PC、内存读取次数和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldrb_l 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不发生内存读取；R2 不发生写入。
+ 
+⸻
+ 
+arm_inst_ldrb_l.005.FI
+构造代码
+/*
+ * cond = AL
+ * U = 1
+ * Rt = 2
+ * imm12 = 0x10
+ */
+inst = 0xE08F2010U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldrb_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldrb_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrb_l.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 1
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：通过故障注入模拟 ldrb literal 内存读取失败，验证函数返回读取错误码且不推进 PC、不写目标寄存器。 用例类别：故障注入测试 预置条件：构造有效 byte literal load 指令；设置内存读取 stub 返回 -2。 测试步骤： step1、构造 inst=0xE08F2010。 step2、设置第一次 cpu_vcpu_mem_read 返回 -2。 step3、调用 arm_inst_ldrb_l。 step4、观察返回值、PC、内存读取记录和 Rt 写入次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldrb_l 等价列表：内存读取失败。 其它说明：本用例覆盖 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；R2 不发生写入。
+ 
+⸻
+ 
+二、
+arm_inst_ldcx_l
+需要的最小 User Code
+arm_inst_ldcx_l 会通过：
+cp = cpu_vcpu_coproc_get(coproc);
+拿到 struct cpu_vcpu_coproc *，然后访问：
+cp->ldcstc_accept
+cp->ldcstc_done
+cp->ldcstc_write
+因此需要一个明确的全局 vcast_cp。
+1. Unit Prefix User Code
+放在 Unit Prefix User Code，不要放 User Global，因为 struct cpu_vcpu_coproc 在 User Global 位置可能还是不完整类型。
+static struct cpu_vcpu_coproc vcast_cp;
+
+static unsigned int vcast_cp_accept_ret;
+static unsigned int vcast_cp_done_after;
+
+static unsigned int vcast_cp_accept_call;
+static unsigned int vcast_cp_done_call;
+static unsigned int vcast_cp_write_call;
+
+static unsigned int vcast_cp_last_D;
+static unsigned int vcast_cp_last_CRd;
+static unsigned int vcast_cp_last_uopt;
+static unsigned int vcast_cp_last_imm8;
+
+static unsigned int vcast_cp_write_i_seq[4];
+static unsigned int vcast_cp_write_data_seq[4];
+
+static bool vcast_ldcstc_accept(struct vmm_vcpu *vcpu,
+                                arch_regs_t *regs,
+                                u32 D,
+                                u32 CRd,
+                                bool uopt,
+                                u32 imm8)
+{
+    vcast_cp_accept_call++;
+    vcast_cp_last_D = D;
+    vcast_cp_last_CRd = CRd;
+    vcast_cp_last_uopt = uopt ? 1U : 0U;
+    vcast_cp_last_imm8 = imm8;
+    return vcast_cp_accept_ret ? TRUE : FALSE;
+}
+
+static bool vcast_ldcstc_done(struct vmm_vcpu *vcpu,
+                              arch_regs_t *regs,
+                              u32 i,
+                              u32 D,
+                              u32 CRd,
+                              bool uopt,
+                              u32 imm8)
+{
+    vcast_cp_done_call++;
+    return (i >= vcast_cp_done_after) ? TRUE : FALSE;
+}
+
+static void vcast_ldcstc_write(struct vmm_vcpu *vcpu,
+                               arch_regs_t *regs,
+                               u32 i,
+                               u32 D,
+                               u32 CRd,
+                               bool uopt,
+                               u32 imm8,
+                               u32 data)
+{
+    if (vcast_cp_write_call < 4U) {
+        vcast_cp_write_i_seq[vcast_cp_write_call] = i;
+        vcast_cp_write_data_seq[vcast_cp_write_call] = data;
+    }
+    vcast_cp_write_call++;
+}
+2. 
+cpu_vcpu_coproc_get
+Stub
+在 cpu_vcpu_coproc_get 的 Stub User Code 中直接返回：
+return &vcast_cp;
+不要额外写 getter 函数。
+3. 每条 
+ldcx_l
+用例 Test Case Init 建议补充
+memset(&vcast_cp, 0, sizeof(vcast_cp));
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+vcast_cp_accept_call = 0U;
+vcast_cp_done_call = 0U;
+vcast_cp_write_call = 0U;
+
+vcast_cp_last_D = 0U;
+vcast_cp_last_CRd = 0U;
+vcast_cp_last_uopt = 0U;
+vcast_cp_last_imm8 = 0U;
+
+vcast_cp_write_i_seq[0] = 0U;
+vcast_cp_write_i_seq[1] = 0U;
+vcast_cp_write_i_seq[2] = 0U;
+vcast_cp_write_i_seq[3] = 0U;
+
+vcast_cp_write_data_seq[0] = 0U;
+vcast_cp_write_data_seq[1] = 0U;
+vcast_cp_write_data_seq[2] = 0U;
+vcast_cp_write_data_seq[3] = 0U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+ 
+⸻
+ 
+三、
+arm_inst_ldcx_l
+字段：
+cond   bits[31:28]
+P      bit[24]
+U      bit[23]
+D      bit[22]
+W      bit[21]
+CRd    bits[15:12]
+coproc bits[11:8]
+imm8   bits[7:0]
+地址计算：
+base = arm_align(regs.pc, 4)
+
+imm32 = imm8 << 2
+
+P=1 -> address = offset_addr
+P=0 -> address = base
+
+U=1 -> offset_addr = base + imm32
+U=0 -> offset_addr = base - imm32
+ 
+⸻
+ 
+arm_inst_ldcx_l.001.R
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+/*
+ * cond = AL
+ * P = 1
+ * U = 1
+ * W = 0
+ * CRd = 2
+ * coproc = 1
+ * imm8 = 4
+ * imm32 = 0x10
+ */
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 2U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_cp_accept_call = 1
+vcast_cp_done_call = 3
+vcast_cp_write_call = 2
+
+vcast_cp_last_CRd = 2
+vcast_cp_last_imm8 = 4
+vcast_cp_last_uopt = 0
+
+vcast_mem_read_call = 2
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 4
+vcast_mem_read_priv_seq[0] = 0
+
+vcast_mem_read_addr_seq[1] = 0x1014
+vcast_mem_read_size_seq[1] = 4
+vcast_mem_read_priv_seq[1] = 0
+
+vcast_cp_write_i_seq[0] = 0
+vcast_cp_write_data_seq[0] = 0x11111111
+
+vcast_cp_write_i_seq[1] = 1
+vcast_cp_write_data_seq[1] = 0x22222222
+注释
+测试目的：验证 ldc literal 在 pre-index add 模式下，coprocessor 接受访问后，能够循环读取内存并通过 ldcstc_write 写入 coprocessor。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 coprocessor 回调均有效；设置 accept 返回 true；设置 done 在第 2 次后结束；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE1802104。 step2、该指令解码后 P=1、U=1、W=0、CRd=2、coproc=1、imm8=4。 step3、设置 vcast_cp_accept_ret=1，vcast_cp_done_after=2。 step4、设置第一次内存读取返回 0x11111111，第二次返回 0x22222222。 step5、调用 arm_inst_ldcx_l。 step6、观察返回值、PC、内存读取地址、coprocessor write 次数和写入数据。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：P=1、U=1、条件成立、accept 成功、循环两次、读取成功。 其它说明：本用例覆盖 index=true、add=true、while 循环 true 和 false 出口、内存读取成功、ldcstc_write 调用路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x1010 和 0x1014；coprocessor write 被调用 2 次，数据分别为 0x11111111 和 0x22222222。
+ 
+⸻
+ 
+arm_inst_ldcx_l.002.R
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+/*
+ * cond = AL
+ * P = 0
+ * U = 0
+ * W = 0
+ * CRd = 2
+ * coproc = 1
+ * imm8 = 4
+ */
+inst = 0xE0002104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+vcast_mem_read_value_seq[0] = 0x33333333U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_cp_accept_call = 1
+vcast_cp_done_call = 2
+vcast_cp_write_call = 1
+vcast_cp_last_uopt = 0
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1000
+vcast_mem_read_size_seq[0] = 4
+
+vcast_cp_write_i_seq[0] = 0
+vcast_cp_write_data_seq[0] = 0x33333333
+注释
+测试目的：验证 ldc literal 在 post-index sub 模式下，内存访问地址使用原始 PC 对齐地址，并完成一次读取与 coprocessor 写入。 用例类别：基于需求的测试 预置条件：设置 coprocessor 回调均有效；设置 accept 返回 true；设置 done 在第 1 次后结束；设置内存读取成功。 测试步骤： step1、构造 inst=0xE0002104。 step2、该指令解码后 P=0、U=0、W=0、CRd=2、imm8=4。 step3、设置 vcast_cp_done_after=1。 step4、设置第一次内存读取返回 0x33333333。 step5、调用 arm_inst_ldcx_l。 step6、观察返回值、PC、内存读取地址和 coprocessor write 数据。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：P=0、U=0、accept 成功、读取成功。 其它说明：本用例覆盖 index=false、add=false 和一次循环执行路径。 通过准则：函数返回 0；PC 更新为 0x1004；内存读取地址为 0x1000；coprocessor write 数据为 0x33333333。
+ 
+⸻
+ 
+arm_inst_ldcx_l.003.R.uopt
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+/*
+ * cond = AL
+ * P = 0
+ * U = 1
+ * W = 0
+ * uopt = true
+ */
+inst = 0xE0802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 0U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_cp_accept_call = 1
+vcast_cp_done_call = 1
+vcast_cp_write_call = 0
+vcast_cp_last_uopt = 1
+
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldc literal 在 P=0,W=0,U=1 时，uopt 被计算为 true，并在 done 立即结束时不发生内存读取。 用例类别：基于需求的测试 预置条件：设置 coprocessor 回调均有效；设置 accept 返回 true；设置 done 立即返回 true。 测试步骤： step1、构造 inst=0xE0802104。 step2、该指令解码后 P=0、U=1、W=0。 step3、设置 vcast_cp_done_after=0。 step4、调用 arm_inst_ldcx_l。 step5、观察返回值、PC、accept 记录到的 uopt 值和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：uopt 为 true、done 立即结束。 其它说明：本用例专门覆盖 uopt=((P==0)&&(W==0)&&(U==1)) 为 true 的路径，以及 while 条件第一次即为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；vcast_cp_last_uopt=1；不发生内存读取；不发生 coprocessor write。
+ 
+⸻
+ 
+arm_inst_ldcx_l.004.IN.W.NEC
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+/*
+ * W = 1
+ */
+inst = 0xE1A02104U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = -1
+
+regs.pc = 0x1000
+
+vcast_cpu_halt_called = 1
+vcast_mem_read_call = 0
+vcast_cp_accept_call = 0
+vcast_cp_write_call = 0
+注释
+测试目的：验证 ldc literal 中 W 位为 1 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 W=1 的 ldc literal 指令；对 cpu_vcpu_halt 打桩并记录调用次数。 测试步骤： step1、构造 inst=0xE1A02104。 step2、该指令解码后 W=1。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、halt 调用次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：W 位非法。 其它说明：本用例覆盖 if (W == 1) 的不可预测路径。 通过准则：函数返回 -1；PC 保持 0x1000；触发 halt；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.005.IN.cp_accept_null.NEC
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = 0;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1000
+
+vcast_irq_assert_called = 1
+vcast_mem_read_call = 0
+vcast_cp_accept_call = 0
+vcast_cp_write_call = 0
+注释
+测试目的：验证 ldc literal 在 coprocessor 的 ldcstc_accept 回调为空时，断言未定义指令并返回成功码。 用例类别：接口测试 预置条件：构造有效 ldc literal 指令；设置 cp->ldcstc_accept=NULL，其余相关回调有效。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp.ldcstc_accept=0。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、未定义指令断言次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：coprocessor accept 回调缺失。 其它说明：本用例覆盖 (cp->ldcstc_accept == NULL) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000；触发一次 undefined irq；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.006.IN.cp_done_null.NEC
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = 0;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1000
+
+vcast_irq_assert_called = 1
+vcast_mem_read_call = 0
+vcast_cp_accept_call = 0
+vcast_cp_write_call = 0
+注释
+测试目的：验证 ldc literal 在 coprocessor 的 ldcstc_done 回调为空时，断言未定义指令并返回成功码。 用例类别：接口测试 预置条件：构造有效 ldc literal 指令；设置 cp->ldcstc_done=NULL，其它相关回调有效。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp.ldcstc_done=0。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、未定义指令断言次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：coprocessor done 回调缺失。 其它说明：本用例覆盖 (cp->ldcstc_done == NULL) 为 true 的路径，并避免被 accept 为空短路。 通过准则：函数返回 0；PC 保持 0x1000；触发一次 undefined irq；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.007.IN.cp_write_null.NEC
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = 0;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1000
+
+vcast_irq_assert_called = 1
+vcast_mem_read_call = 0
+vcast_cp_accept_call = 0
+vcast_cp_done_call = 0
+注释
+测试目的：验证 ldc literal 在 coprocessor 的 ldcstc_write 回调为空时，断言未定义指令并返回成功码。 用例类别：接口测试 预置条件：构造有效 ldc literal 指令；设置 cp->ldcstc_write=NULL，其它相关回调有效。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp.ldcstc_write=0。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、未定义指令断言次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：coprocessor write 回调缺失。 其它说明：本用例覆盖 (cp->ldcstc_write == NULL) 为 true 的路径，并避免被前两个 NULL 条件短路。 通过准则：函数返回 0；PC 保持 0x1000；触发一次 undefined irq；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.008.IN.accept_false.NEC
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 0U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1000
+
+vcast_cp_accept_call = 1
+vcast_irq_assert_called = 1
+vcast_mem_read_call = 0
+vcast_cp_write_call = 0
+注释
+测试目的：验证 coprocessor 回调存在但 ldcstc_accept 返回 false 时，函数断言未定义指令并返回成功码。 用例类别：接口测试 预置条件：构造有效 ldc literal 指令；设置所有 coprocessor 回调有效；设置 accept 返回 false。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_accept_ret=0。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、accept 调用次数、undefined irq 次数和内存读取次数。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：coprocessor 拒绝 LDC/STC 访问。 其它说明：本用例覆盖 if (!cp->ldcstc_accept(...)) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000；accept 被调用 1 次；触发 undefined irq；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.009.R.condition_false
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+
+/*
+ * cond = EQ
+ * Z = 0
+ */
+regs.pstate = 0U;
+
+/*
+ * P = 1
+ * U = 1
+ */
+inst = 0x01802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+
+regs.pc = 0x1004
+
+vcast_cp_accept_call = 0
+vcast_cp_done_call = 0
+vcast_cp_write_call = 0
+vcast_mem_read_call = 0
+注释
+测试目的：验证 ldc literal 条件不成立时，不调用 coprocessor accept，不读取内存，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 ldc literal 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x01802104。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值、PC、coprocessor 回调次数和内存读取次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：条件不通过。 其它说明：本用例覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；不调用 accept/done/write；不发生内存读取。
+ 
+⸻
+ 
+arm_inst_ldcx_l.010.FI.mem_read
+构造代码
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0xE1802104U;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = -2
+
+regs.pc = 0x1000
+
+vcast_cp_accept_call = 1
+vcast_cp_done_call = 1
+vcast_cp_write_call = 0
+
+vcast_mem_read_call = 1
+vcast_mem_read_addr_seq[0] = 0x1010
+vcast_mem_read_size_seq[0] = 4
+vcast_mem_read_priv_seq[0] = 0
+注释
+测试目的：通过故障注入模拟 ldc literal 内存读取失败，验证函数返回读取错误码且不推进 PC、不调用 coprocessor write。 用例类别：故障注入测试 预置条件：构造有效 ldc literal 指令；设置 coprocessor accept 返回 true；设置 done 允许进入一次循环；设置内存读取返回 -2。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_accept_ret=1，vcast_cp_done_after=1。 step3、设置第一次 cpu_vcpu_mem_read 返回 -2。 step4、调用 arm_inst_ldcx_l。 step5、观察返回值、PC、内存读取地址、done 调用次数和 write 调用次数。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：内存读取失败。 其它说明：本用例覆盖 while 循环体内 cpu_vcpu_mem_read 返回非 0 时直接返回错误码的路径。 通过准则：函数返回 -2；PC 保持 0x1000；发生一次内存读取；coprocessor write 不发生。
+ 
+⸻
+ 
+四、本批覆盖点
+本批覆盖：
+arm_inst_ldrb_l:
+Rt==15
+U=1 add
+U=0 sub
+condition true by AL
+condition true by arm_condition_check
+condition false
+mem_read success
+mem_read failure
+
+arm_inst_ldcx_l:
+W==1
+callback accept NULL
+callback done NULL
+callback write NULL
+condition false
+accept false
+accept true
+uopt false
+uopt true
+index true
+index false
+add true
+add false
+while 进入循环
+while 直接结束
+mem_read success
+mem_read failure
+ldcstc_write 调用
+PC 正常推进
+错误路径 PC 不推进
+下一批建议继续：
+arm_inst_mcrrx
+arm_inst_mrrcx
+arm_inst_cdpx
+arm_inst_mcrx
+arm_inst_mrcx
+arm_inst_svc
+这几个都属于 coprocessor transfer/data-processing/SVC，能共用同一个 vcast_cp 思路。
