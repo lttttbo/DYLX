@@ -1,0 +1,266 @@
+对，这里是 arm_instgrp_uncond 的 preload case label 没有逐个覆盖。
+虽然这些 case 最终都走同一段代码：
+arm_pc(regs) += 4;
+return 0;
+但 VectorCAST 对 switch case 标签会单独统计。所以只用：
+op1 = 0x45
+只能覆盖第一个 preload case，后面这些 case label 仍然会红：
+0x4D
+0x51
+0x59
+0x55
+0x5D
+0x65
+0x6D
+0x71
+0x79
+最少补充方案就是：每个未覆盖 case label 各加 1 条用例。每条都只验证：
+return = 0
+regs.pc = 0x1004
+ 
+⸻
+ 
+公共构造模板
+每条用例 Value User Code 使用：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+入参：
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+ 
+⸻
+ 
+1. 已有用例确认：
+op1=0x45
+你之前这条已经覆盖第一个 case：
+inst = 0xF4500000U;
+期望：
+return = 0
+regs.pc = 0x1004
+ 
+⸻
+ 
+2. 补充用例：
+op1=0x4D
+用例名
+arm_instgrp_uncond.004.R.preload_4d
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x4D
+ */
+inst = 0xF4D00000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x4D 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF4D00000。 step2、该指令解码后 op1=0x4D。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x4D。 其它说明：本用例专门覆盖 switch 中 case 0x4D 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+3. 补充用例：
+op1=0x51
+用例名
+arm_instgrp_uncond.005.R.preload_51
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x51
+ */
+inst = 0xF5100000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x51 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF5100000。 step2、该指令解码后 op1=0x51。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x51。 其它说明：本用例专门覆盖 switch 中 case 0x51 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+4. 补充用例：
+op1=0x59
+用例名
+arm_instgrp_uncond.006.R.preload_59
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x59
+ */
+inst = 0xF5900000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x59 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF5900000。 step2、该指令解码后 op1=0x59。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x59。 其它说明：本用例专门覆盖 switch 中 case 0x59 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+5. 补充用例：
+op1=0x55
+用例名
+arm_instgrp_uncond.007.R.preload_55
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x55
+ */
+inst = 0xF5500000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x55 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF5500000。 step2、该指令解码后 op1=0x55。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x55。 其它说明：本用例专门覆盖 switch 中 case 0x55 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+6. 补充用例：
+op1=0x5D
+用例名
+arm_instgrp_uncond.008.R.preload_5d
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x5D
+ */
+inst = 0xF5D00000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x5D 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF5D00000。 step2、该指令解码后 op1=0x5D。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x5D。 其它说明：本用例专门覆盖 switch 中 case 0x5D 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+7. 补充用例：
+op1=0x65
+用例名
+arm_instgrp_uncond.009.R.preload_65
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x65
+ */
+inst = 0xF6500000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x65 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF6500000。 step2、该指令解码后 op1=0x65。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x65。 其它说明：本用例专门覆盖 switch 中 case 0x65 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+8. 补充用例：
+op1=0x6D
+用例名
+arm_instgrp_uncond.010.R.preload_6d
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x6D
+ */
+inst = 0xF6D00000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x6D 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF6D00000。 step2、该指令解码后 op1=0x6D。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x6D。 其它说明：本用例专门覆盖 switch 中 case 0x6D 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+9. 补充用例：
+op1=0x71
+用例名
+arm_instgrp_uncond.011.R.preload_71
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x71
+ */
+inst = 0xF7100000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x71 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF7100000。 step2、该指令解码后 op1=0x71。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x71。 其它说明：本用例专门覆盖 switch 中 case 0x71 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+10. 补充用例：
+op1=0x79
+用例名
+arm_instgrp_uncond.012.R.preload_79
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x79
+ */
+inst = 0xF7900000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 op1=0x79 的 preload case 被当作 NOP 处理。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF7900000。 step2、该指令解码后 op1=0x79。 step3、调用 arm_instgrp_uncond。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP case 0x79。 其它说明：本用例专门覆盖 switch 中 case 0x79 标签。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+覆盖关系
+保留原来的：
+0xF4500000 -> op1=0x45
+新增：
+0xF4D00000 -> op1=0x4D
+0xF5100000 -> op1=0x51
+0xF5900000 -> op1=0x59
+0xF5500000 -> op1=0x55
+0xF5D00000 -> op1=0x5D
+0xF6500000 -> op1=0x65
+0xF6D00000 -> op1=0x6D
+0xF7100000 -> op1=0x71
+0xF7900000 -> op1=0x79
+再加你原来的：
+0xF0000000 -> op1=0x00，switch default
+0xF8000000 -> op1=0x80，跳过 switch
+这样 arm_instgrp_uncond 这段 case label 覆盖就能补齐。
