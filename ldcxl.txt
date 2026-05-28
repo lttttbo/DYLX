@@ -1,0 +1,440 @@
+可以复用，但 stcx 精简版 usercode 不能原封不动用于 ldcx_l，因为：
+arm_inst_stcx 需要 cp->ldcstc_read
+arm_inst_ldcx_l 需要 cp->ldcstc_write
+所以最小修改是：保留你现在的 vcast_cp_mask / vcast_cp_accept_ret / vcast_cp_done_after 控制变量，再补一个 空实现的 ldcstc_write 回调，并让 vcast_cp_mask 的 bit2 同时控制：
+stcx 用的 ldcstc_read
+ldcx_l 用的 ldcstc_write
+这样同一套 usercode 可以同时覆盖 stcx 和 ldcx_l。
+ 
+⸻
+ 
+1. 修改后的精简 User Code
+1.1 User Global / Data
+如果你已经有这些变量，不要重复定义。缺哪个补哪个。
+unsigned int vcast_cp_mask;
+unsigned int vcast_cp_accept_ret;
+unsigned int vcast_cp_done_after;
+unsigned int vcast_cp_read_value_seq[8];
+vcast_cp_mask 含义保持不变：
+bit0 = 1：ldcstc_accept 存在
+bit1 = 1：ldcstc_done 存在
+bit2 = 1：ldcstc_read / ldcstc_write 存在
+
+vcast_cp_mask = 7：accept、done、read/write 全部存在
+vcast_cp_mask = 6：accept 为 NULL
+vcast_cp_mask = 5：done 为 NULL
+vcast_cp_mask = 3：read/write 为 NULL
+ 
+⸻
+ 
+1.2 Unit Prefix User Code
+如果你已经放过 stcx 的精简版，只需要确认里面有下面这个 vcast_ldcstc_write，以及 vcast_get_cp() 里设置了 ldcstc_write。
+#include <vmm_types.h>
+#include <arch_regs.h>
+#include <cpu_vcpu_coproc.h>
+
+extern unsigned int vcast_cp_mask;
+extern unsigned int vcast_cp_accept_ret;
+extern unsigned int vcast_cp_done_after;
+extern unsigned int vcast_cp_read_value_seq[8];
+
+static struct cpu_vcpu_coproc vcast_cp_obj;
+
+static bool vcast_ldcstc_accept(struct vmm_vcpu *vcpu,
+                                arch_regs_t *regs,
+                                u32 D,
+                                u32 CRd,
+                                bool uopt,
+                                u32 imm8)
+{
+    return vcast_cp_accept_ret ? TRUE : FALSE;
+}
+
+static bool vcast_ldcstc_done(struct vmm_vcpu *vcpu,
+                              arch_regs_t *regs,
+                              u32 i,
+                              u32 D,
+                              u32 CRd,
+                              bool uopt,
+                              u32 imm8)
+{
+    return (i >= vcast_cp_done_after) ? TRUE : FALSE;
+}
+
+static u32 vcast_ldcstc_read(struct vmm_vcpu *vcpu,
+                             arch_regs_t *regs,
+                             u32 i,
+                             u32 D,
+                             u32 CRd,
+                             bool uopt,
+                             u32 imm8)
+{
+    return vcast_cp_read_value_seq[i & 7U];
+}
+
+static void vcast_ldcstc_write(struct vmm_vcpu *vcpu,
+                               arch_regs_t *regs,
+                               u32 i,
+                               u32 D,
+                               u32 CRd,
+                               bool uopt,
+                               u32 imm8,
+                               u32 data)
+{
+    /* 空实现即可。ldcx_l 只需要该回调存在来覆盖路径。 */
+}
+
+struct cpu_vcpu_coproc *vcast_get_cp(void)
+{
+    vcast_cp_obj.ldcstc_accept =
+        (vcast_cp_mask & 1U) ? vcast_ldcstc_accept : 0;
+
+    vcast_cp_obj.ldcstc_done =
+        (vcast_cp_mask & 2U) ? vcast_ldcstc_done : 0;
+
+    vcast_cp_obj.ldcstc_read =
+        (vcast_cp_mask & 4U) ? vcast_ldcstc_read : 0;
+
+    vcast_cp_obj.ldcstc_write =
+        (vcast_cp_mask & 4U) ? vcast_ldcstc_write : 0;
+
+    return &vcast_cp_obj;
+}
+ 
+⸻
+ 
+1.3 
+cpu_vcpu_coproc_get
+Stub
+你说去掉 struct 那一句后编译通过，那就保持下面这种写法：
+extern struct cpu_vcpu_coproc *vcast_get_cp(void);
+
+return vcast_get_cp();
+ 
+⸻
+ 
+1.4 Test Case Init
+不要在 Test Case Init 里写任何 struct 定义，也不要 memset(&vcast_cp_obj, ...)。这里只写简单变量赋值：
+vcast_cp_mask = 7U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+vcast_cp_read_value_seq[0] = 0U;
+vcast_cp_read_value_seq[1] = 0U;
+vcast_cp_read_value_seq[2] = 0U;
+vcast_cp_read_value_seq[3] = 0U;
+vcast_cp_read_value_seq[4] = 0U;
+vcast_cp_read_value_seq[5] = 0U;
+vcast_cp_read_value_seq[6] = 0U;
+vcast_cp_read_value_seq[7] = 0U;
+ 
+⸻
+ 
+2. 
+arm_inst_ldcx_l
+精简覆盖用例
+公共模板：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+arm_inst_ldcx_l.001.R.normal_pre_add_loop2
+覆盖目标：
+W != 1
+callback 全部存在
+condition true by AL
+accept true
+P=1
+U=1
+index=true
+add=true
+uopt=false
+while 进入循环
+mem_read success
+ldcstc_write 存在
+PC 正常推进
+构造代码
+/*
+ * cond = AL
+ * P = 1
+ * U = 1
+ * W = 0
+ * CRd = 2
+ * coproc = 1
+ * imm8 = 4
+ * imm32 = 0x10
+ */
+inst = 0xE1802104U;
+
+vcast_cp_mask = 7U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 2U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 ldcx_l 在 pre-index add 模式下，coprocessor 接受访问后，能够循环读取内存并通过 ldcstc_write 完成处理，最终推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 coprocessor accept、done、write 回调均存在；设置 accept 返回 true；设置 done 在 i>=2 时结束；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_mask=7。 step3、设置 vcast_cp_accept_ret=1。 step4、设置 vcast_cp_done_after=2。 step5、设置两次 cpu_vcpu_mem_read 返回 0。 step6、调用 arm_inst_ldcx_l。 step7、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：pre-index add、accept 成功、循环读取成功。 其它说明：覆盖 index=true、add=true、uopt=false、while 循环进入和退出、内存读取成功、正常 PC 推进路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_ldcx_l.002.FI.post_sub_mem_read
+覆盖目标：
+P=0
+U=0
+index=false
+add=false
+mem_read failure
+错误路径 PC 不推进
+构造代码
+/*
+ * cond = AL
+ * P = 0
+ * U = 0
+ * W = 0
+ * CRd = 2
+ * coproc = 1
+ * imm8 = 4
+ */
+inst = 0xE0002104U;
+
+vcast_cp_mask = 7U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+vcast_mem_read_rc_seq[0] = -2;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = -2
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入模拟 ldcx_l 内存读取失败，同时覆盖 post-index sub 地址计算路径。 用例类别：故障注入测试 预置条件：构造有效 LDC literal 指令；设置 coprocessor accept、done、write 回调均存在；设置 accept 返回 true；设置 done 允许进入一次循环；设置第一次内存读取返回 -2。 测试步骤： step1、构造 inst=0xE0002104。 step2、设置 vcast_cp_mask=7。 step3、设置 vcast_cp_accept_ret=1。 step4、设置 vcast_cp_done_after=1。 step5、设置第一次 cpu_vcpu_mem_read 返回 -2。 step6、调用 arm_inst_ldcx_l。 step7、观察返回值和 PC。 用例来源：故障注入、无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：post-index sub、内存读取失败。 其它说明：覆盖 index=false、add=false、cpu_vcpu_mem_read 返回非 0 的错误路径。 通过准则：函数返回 -2；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.003.IN.W.NEC
+覆盖目标：
+W == 1
+构造代码
+/*
+ * cond = AL
+ * P = 0
+ * U = 1
+ * W = 1
+ * CRd = 2
+ * coproc = 1
+ * imm8 = 4
+ */
+inst = 0xE0A02104U;
+
+vcast_cp_mask = 7U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 ldcx_l 中 W 位为 1 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 W=1 的 LDC literal 指令。 测试步骤： step1、构造 inst=0xE0A02104。 step2、该指令解码后 W=1。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：W 位非法。 其它说明：覆盖 if (W == 1) 的不可预测路径，同时覆盖 uopt 表达式中 W==0 为 false 的情况。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.004.IN.accept_null.NEC
+覆盖目标：
+cp->ldcstc_accept == NULL
+构造代码
+/*
+ * cond = AL
+ * P = 1
+ * U = 1
+ * W = 0
+ */
+inst = 0xE1802104U;
+
+/*
+ * done + write 存在
+ * accept 为 NULL
+ */
+vcast_cp_mask = 6U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 ldcx_l 在 coprocessor 的 ldcstc_accept 回调为空时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 LDC literal 指令；设置 done 和 write 回调存在，accept 回调为空。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_mask=6。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：accept 回调缺失。 其它说明：覆盖 NULL 回调判断中 cp->ldcstc_accept == NULL 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.005.IN.done_null.NEC
+覆盖目标：
+cp->ldcstc_accept != NULL
+cp->ldcstc_done == NULL
+构造代码
+inst = 0xE1802104U;
+
+/*
+ * accept + write 存在
+ * done 为 NULL
+ */
+vcast_cp_mask = 5U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 ldcx_l 在 coprocessor 的 ldcstc_done 回调为空时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 LDC literal 指令；设置 accept 和 write 回调存在，done 回调为空。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_mask=5。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：done 回调缺失。 其它说明：覆盖 NULL 回调判断中第二个条件为 true 的路径，并避免被 accept 为空短路。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.006.IN.write_null.NEC
+覆盖目标：
+cp->ldcstc_accept != NULL
+cp->ldcstc_done != NULL
+cp->ldcstc_write == NULL
+构造代码
+inst = 0xE1802104U;
+
+/*
+ * accept + done 存在
+ * write 为 NULL
+ */
+vcast_cp_mask = 3U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 ldcx_l 在 coprocessor 的 ldcstc_write 回调为空时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 LDC literal 指令；设置 accept 和 done 回调存在，write 回调为空。 测试步骤： step1、构造 inst=0xE1802104。 step2、设置 vcast_cp_mask=3。 step3、调用 arm_inst_ldcx_l。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：write 回调缺失。 其它说明：覆盖 NULL 回调判断中第三个条件为 true 的路径，并避免被 accept 或 done 为空短路。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.007.IN.accept_false.NEC
+覆盖目标：
+condition true by arm_condition_check
+uopt=true
+accept 返回 false
+构造代码
+/*
+ * cond = EQ
+ * P = 0
+ * U = 1
+ * W = 0
+ * uopt = true
+ */
+inst = 0x00802104U;
+
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 7U;
+vcast_cp_accept_ret = 0U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 ldcx_l 在非 AL 条件成立后，如果 coprocessor accept 返回 false，则断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 且 P=0,U=1,W=0 的 LDC literal 指令；设置 Z 标志；设置 accept 返回 false。 测试步骤： step1、构造 inst=0x00802104。 step2、设置 regs.pstate=0x40000000，使 EQ 条件成立。 step3、设置 vcast_cp_mask=7。 step4、设置 vcast_cp_accept_ret=0。 step5、调用 arm_inst_ldcx_l。 step6、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_ldcx_l 等价列表：非 AL 条件成立、uopt true、accept 拒绝访问。 其它说明：覆盖 cond!=0xE 且 arm_condition_check 返回 true 的路径，覆盖 uopt=true，覆盖 !cp->ldcstc_accept(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldcx_l.008.R.condition_false
+覆盖目标：
+condition false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ * P = 1
+ * U = 1
+ * W = 0
+ */
+inst = 0x01802104U;
+
+regs.pstate = 0U;
+
+vcast_cp_mask = 7U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+<<emulate_arm.arm_inst_ldcx_l.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_l.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_l.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 ldcx_l 条件不成立时，不执行 coprocessor accept 和内存读取逻辑，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 LDC literal 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x01802104。 step2、设置 regs.pstate=0，使 EQ 条件不成立。 step3、设置 vcast_cp_mask=7。 step4、调用 arm_inst_ldcx_l。 step5、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_ldcx_l 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+3. 这版最小覆盖关系
+以上 8 条覆盖：
+W==1 true / false
+callback accept NULL
+callback done NULL
+callback write NULL
+三个 callback 均存在
+
+condition true by AL
+condition true by arm_condition_check
+condition false
+
+accept true
+accept false
+
+P=1 / P=0
+U=1 / U=0
+W=1 / W=0
+
+index true / false
+add true / false
+uopt true / false
+
+while 进入循环
+while 退出循环
+
+mem_read success
+mem_read failure
+
+正常 PC 推进
+错误路径 PC 不推进
+如果 VectorCAST 对 uopt=((P==0)&&(W==0)&&(U==1)) 做更细的条件覆盖，这组也覆盖了：
+P==0 为 false：ldcx_l.001
+W==0 为 false：ldcx_l.003
+U==1 为 false：ldcx_l.002
+整体 true：ldcx_l.007
+所以这套可以和你现在的 stcx 精简 usercode 共用，只需要确保 Unit Prefix 里增加了 ldcstc_write 空实现，并在 vcast_get_cp() 里把 ldcstc_write 挂上。
