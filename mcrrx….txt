@@ -1,0 +1,934 @@
+继续。下面这一批优先给你列出的 coprocessor transfer / coprocessor data processing / SVC 相关函数：
+arm_inst_mcrrx
+arm_inst_mrrcx
+arm_inst_cdpx
+arm_inst_mcrx
+arm_inst_mrcx
+arm_inst_svc
+arm_instgrp_media
+arm_instgrp_uncond
+本批仍然按“精简 usercode，不验证某个 helper 是否被调用，只用返回值和 PC 推进情况保证路径”的思路设计。
+ 
+⸻
+ 
+一、coprocessor 函数共用的精简 User Code
+如果你已经有前面 stcx / ldcx_l 的精简 coprocessor usercode，需要把它替换成下面的扩展版，不要追加重复定义。
+1. User Global / Data
+已存在的变量不要重复定义，缺哪个补哪个：
+unsigned int vcast_cp_mask;
+unsigned int vcast_cp_accept_ret;
+unsigned int vcast_cp_done_after;
+unsigned int vcast_cp_read_value_seq[8];
+
+unsigned int vcast_cp_op_ret;
+vcast_cp_mask 扩展含义：
+bit0 = 1：ldcstc_accept 存在
+bit1 = 1：ldcstc_done 存在
+bit2 = 1：ldcstc_read / ldcstc_write 存在
+
+bit3 = 1：write2 存在
+bit4 = 1：read2 存在
+bit5 = 1：data_process 存在
+bit6 = 1：write 存在
+bit7 = 1：read 存在
+常用值：
+vcast_cp_mask = 255U：所有回调都存在
+vcast_cp_mask = 0U：所有回调都为空
+vcast_cp_op_ret 用于控制：
+write2 / read2 / data_process / write / read
+这些回调返回 true 还是 false。
+ 
+⸻
+ 
+2. Unit Prefix User Code
+用下面这段替换原来的 vcast_get_cp 和 coprocessor 回调，不要重复定义同名函数。
+#include <vmm_types.h>
+#include <arch_regs.h>
+#include <cpu_vcpu_coproc.h>
+
+extern unsigned int vcast_cp_mask;
+extern unsigned int vcast_cp_accept_ret;
+extern unsigned int vcast_cp_done_after;
+extern unsigned int vcast_cp_read_value_seq[8];
+extern unsigned int vcast_cp_op_ret;
+
+static struct cpu_vcpu_coproc vcast_cp_obj;
+
+static bool vcast_ldcstc_accept(struct vmm_vcpu *vcpu,
+                                arch_regs_t *regs,
+                                u32 D,
+                                u32 CRd,
+                                bool uopt,
+                                u32 imm8)
+{
+    return vcast_cp_accept_ret ? TRUE : FALSE;
+}
+
+static bool vcast_ldcstc_done(struct vmm_vcpu *vcpu,
+                              arch_regs_t *regs,
+                              u32 i,
+                              u32 D,
+                              u32 CRd,
+                              bool uopt,
+                              u32 imm8)
+{
+    return (i >= vcast_cp_done_after) ? TRUE : FALSE;
+}
+
+static u32 vcast_ldcstc_read(struct vmm_vcpu *vcpu,
+                             arch_regs_t *regs,
+                             u32 i,
+                             u32 D,
+                             u32 CRd,
+                             bool uopt,
+                             u32 imm8)
+{
+    return vcast_cp_read_value_seq[i & 7U];
+}
+
+static void vcast_ldcstc_write(struct vmm_vcpu *vcpu,
+                               arch_regs_t *regs,
+                               u32 i,
+                               u32 D,
+                               u32 CRd,
+                               bool uopt,
+                               u32 imm8,
+                               u32 data)
+{
+    /* 空实现即可。 */
+}
+
+static bool vcast_cp_write2(struct vmm_vcpu *vcpu,
+                            arch_regs_t *regs,
+                            u32 opc1,
+                            u32 CRm,
+                            u32 data,
+                            u32 data2)
+{
+    return vcast_cp_op_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_read2(struct vmm_vcpu *vcpu,
+                           arch_regs_t *regs,
+                           u32 opc1,
+                           u32 CRm,
+                           u32 *data,
+                           u32 *data2)
+{
+    if (data) {
+        *data = vcast_cp_read_value_seq[0];
+    }
+
+    if (data2) {
+        *data2 = vcast_cp_read_value_seq[1];
+    }
+
+    return vcast_cp_op_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_data_process(struct vmm_vcpu *vcpu,
+                                  arch_regs_t *regs,
+                                  u32 opc1,
+                                  u32 opc2,
+                                  u32 CRd,
+                                  u32 CRn,
+                                  u32 CRm)
+{
+    return vcast_cp_op_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_write(struct vmm_vcpu *vcpu,
+                           arch_regs_t *regs,
+                           u32 opc1,
+                           u32 opc2,
+                           u32 CRn,
+                           u32 CRm,
+                           u32 data)
+{
+    return vcast_cp_op_ret ? TRUE : FALSE;
+}
+
+static bool vcast_cp_read(struct vmm_vcpu *vcpu,
+                          arch_regs_t *regs,
+                          u32 opc1,
+                          u32 opc2,
+                          u32 CRn,
+                          u32 CRm,
+                          u32 *data)
+{
+    if (data) {
+        *data = vcast_cp_read_value_seq[0];
+    }
+
+    return vcast_cp_op_ret ? TRUE : FALSE;
+}
+
+struct cpu_vcpu_coproc *vcast_get_cp(void)
+{
+    vcast_cp_obj.ldcstc_accept =
+        (vcast_cp_mask & 1U) ? vcast_ldcstc_accept : 0;
+
+    vcast_cp_obj.ldcstc_done =
+        (vcast_cp_mask & 2U) ? vcast_ldcstc_done : 0;
+
+    vcast_cp_obj.ldcstc_read =
+        (vcast_cp_mask & 4U) ? vcast_ldcstc_read : 0;
+
+    vcast_cp_obj.ldcstc_write =
+        (vcast_cp_mask & 4U) ? vcast_ldcstc_write : 0;
+
+    vcast_cp_obj.write2 =
+        (vcast_cp_mask & 8U) ? vcast_cp_write2 : 0;
+
+    vcast_cp_obj.read2 =
+        (vcast_cp_mask & 16U) ? vcast_cp_read2 : 0;
+
+    vcast_cp_obj.data_process =
+        (vcast_cp_mask & 32U) ? vcast_cp_data_process : 0;
+
+    vcast_cp_obj.write =
+        (vcast_cp_mask & 64U) ? vcast_cp_write : 0;
+
+    vcast_cp_obj.read =
+        (vcast_cp_mask & 128U) ? vcast_cp_read : 0;
+
+    return &vcast_cp_obj;
+}
+3. 
+cpu_vcpu_coproc_get
+Stub
+保持：
+extern struct cpu_vcpu_coproc *vcast_get_cp(void);
+
+return vcast_get_cp();
+4. Test Case Init
+只初始化简单变量：
+vcast_cp_mask = 255U;
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+vcast_cp_op_ret = 1U;
+
+vcast_cp_read_value_seq[0] = 0U;
+vcast_cp_read_value_seq[1] = 0U;
+vcast_cp_read_value_seq[2] = 0U;
+vcast_cp_read_value_seq[3] = 0U;
+vcast_cp_read_value_seq[4] = 0U;
+vcast_cp_read_value_seq[5] = 0U;
+vcast_cp_read_value_seq[6] = 0U;
+vcast_cp_read_value_seq[7] = 0U;
+ 
+⸻
+ 
+二、公共用例模板
+每条用例 Value User Code 先写：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+三、
+arm_inst_mcrrx
+arm_inst_mcrrx.001.R.normal
+构造代码
+/*
+ * cond = AL
+ * Rt2 = 3
+ * Rt  = 2
+ * coproc = 1
+ * opc1 = 4
+ * CRm = 5
+ */
+inst = 0xE0032145U;
+
+vcast_cp_mask = 8U;
+vcast_cp_op_ret = 1U;
+
+vcast_reg_read_value[2] = 0x11111111U;
+vcast_reg_read_value[3] = 0x22222222U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 mcrr 在寄存器字段有效、write2 回调存在且返回 true 时，正常推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 write2 回调存在；设置 write2 返回 true；设置 R2 和 R3 为待传输数据。 测试步骤： step1、构造 inst=0xE0032145。 step2、设置 vcast_cp_mask=8，使 write2 回调存在。 step3、设置 vcast_cp_op_ret=1。 step4、设置 R2 返回 0x11111111，R3 返回 0x22222222。 step5、调用 arm_inst_mcrrx。 step6、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mcrrx 等价列表：正常 MCRR 写双寄存器。 其它说明：覆盖 Rt/Rt2 有效、write2 != NULL、条件成立、write2 返回 true 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_mcrrx.002.IN.Rt.NEC
+构造代码
+/*
+ * Rt = 15
+ */
+inst = 0xE003F145U;
+
+vcast_cp_mask = 8U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 mcrr 中 Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt=15 的 MCRR 指令。 测试步骤： step1、构造 inst=0xE003F145。 step2、调用 arm_inst_mcrrx。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrrx 等价列表：Rt 为 PC。 其它说明：覆盖 (Rt == 15) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrrx.003.IN.Rt2.NEC
+构造代码
+/*
+ * Rt2 = 15
+ * Rt = 2
+ */
+inst = 0xE00F2145U;
+
+vcast_cp_mask = 8U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 mcrr 中 Rt2 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt2=15 且 Rt=2 的 MCRR 指令。 测试步骤： step1、构造 inst=0xE00F2145。 step2、调用 arm_inst_mcrrx。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrrx 等价列表：Rt2 为 PC。 其它说明：覆盖 (Rt2 == 15) 为 true 的路径，并避免被 Rt 非法短路。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrrx.004.IN.write2_null.NEC
+构造代码
+inst = 0xE0032145U;
+
+/*
+ * write2 不存在
+ */
+vcast_cp_mask = 0U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mcrr 在 write2 回调缺失时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造寄存器字段有效的 MCRR 指令；设置 write2 回调为空。 测试步骤： step1、构造 inst=0xE0032145。 step2、设置 vcast_cp_mask=0。 step3、调用 arm_inst_mcrrx。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrrx 等价列表：write2 回调缺失。 其它说明：覆盖 cp->write2 == NULL 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrrx.005.IN.write2_false.NEC
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ * write2 存在但返回 false
+ */
+inst = 0x00032145U;
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 8U;
+vcast_cp_op_ret = 0U;
+
+vcast_reg_read_value[2] = 0x11111111U;
+vcast_reg_read_value[3] = 0x22222222U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mcrr 在非 AL 条件成立后，如果 write2 返回 false，则断言 undefined 并返回，不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 的 MCRR 指令；设置 Z 标志；设置 write2 存在但返回 false。 测试步骤： step1、构造 inst=0x00032145。 step2、设置 regs.pstate=0x40000000。 step3、设置 vcast_cp_mask=8，vcast_cp_op_ret=0。 step4、调用 arm_inst_mcrrx。 step5、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrrx 等价列表：非 AL 条件成立、write2 拒绝。 其它说明：覆盖 cond!=0xE 且条件成立路径，以及 !cp->write2(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrrx.006.R.condition_false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ */
+inst = 0x00032145U;
+regs.pstate = 0U;
+
+vcast_cp_mask = 8U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_mcrrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 mcrr 条件不成立时，不执行 write2，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 MCRR 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00032145。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_mcrrx。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mcrrx 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+四、
+arm_inst_mrrcx
+arm_inst_mrrcx.001.R.normal
+构造代码
+/*
+ * cond = AL
+ * Rt2 = 3
+ * Rt  = 2
+ */
+inst = 0xE0032145U;
+
+vcast_cp_mask = 16U;
+vcast_cp_op_ret = 1U;
+
+vcast_cp_read_value_seq[0] = 0x11111111U;
+vcast_cp_read_value_seq[1] = 0x22222222U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x11111111
+
+vcast_reg_write_called[3] = 1
+vcast_reg_write_value[3] = 0x22222222
+注释
+测试目的：验证 mrrc 在寄存器字段有效、read2 回调存在且返回 true 时，能够将两个返回值写入 Rt 和 Rt2 并推进 PC。 用例类别：基于需求的测试 预置条件：设置 read2 回调存在并返回 true；设置回调输出数据。 测试步骤： step1、构造 inst=0xE0032145。 step2、设置 vcast_cp_mask=16，vcast_cp_op_ret=1。 step3、设置 vcast_cp_read_value_seq[0]=0x11111111，vcast_cp_read_value_seq[1]=0x22222222。 step4、调用 arm_inst_mrrcx。 step5、观察返回值、PC、R2 和 R3 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mrrcx 等价列表：正常 MRRC 读双寄存器。 其它说明：覆盖 read2 != NULL、条件成立、read2 返回 true、写 Rt/Rt2 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2/R3 写入预期值。
+ 
+⸻
+ 
+arm_inst_mrrcx.002.IN.Rt.NEC
+构造代码
+inst = 0xE003F145U;
+
+vcast_cp_mask = 16U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 mrrc 中 Rt 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt=15 的 MRRC 指令。 测试步骤： step1、构造 inst=0xE003F145。 step2、调用 arm_inst_mrrcx。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mrrcx 等价列表：Rt 为 PC。 其它说明：覆盖 (Rt == 15) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mrrcx.003.IN.Rt2.NEC
+构造代码
+inst = 0xE00F2145U;
+
+vcast_cp_mask = 16U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 mrrc 中 Rt2 为 PC 时进入不可预测处理。 用例类别：接口测试 预置条件：构造 Rt2=15 且 Rt=2 的 MRRC 指令。 测试步骤： step1、构造 inst=0xE00F2145。 step2、调用 arm_inst_mrrcx。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mrrcx 等价列表：Rt2 为 PC。 其它说明：覆盖 (Rt2 == 15) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mrrcx.004.IN.read2_null.NEC
+构造代码
+inst = 0xE0032145U;
+
+/*
+ * read2 不存在
+ */
+vcast_cp_mask = 0U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mrrc 在 read2 回调缺失时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造寄存器字段有效的 MRRC 指令；设置 read2 回调为空。 测试步骤： step1、构造 inst=0xE0032145。 step2、设置 vcast_cp_mask=0。 step3、调用 arm_inst_mrrcx。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mrrcx 等价列表：read2 回调缺失。 其它说明：覆盖 cp->read2 == NULL 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mrrcx.005.IN.read2_false.NEC
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ * read2 存在但返回 false
+ */
+inst = 0x00032145U;
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 16U;
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+
+vcast_reg_write_called[2] = 0
+vcast_reg_write_called[3] = 0
+注释
+测试目的：验证 mrrc 在非 AL 条件成立后，如果 read2 返回 false，则断言 undefined 并返回，不写目标寄存器、不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 的 MRRC 指令；设置 Z 标志；设置 read2 存在但返回 false。 测试步骤： step1、构造 inst=0x00032145。 step2、设置 regs.pstate=0x40000000。 step3、设置 vcast_cp_mask=16，vcast_cp_op_ret=0。 step4、调用 arm_inst_mrrcx。 step5、观察返回值、PC 和寄存器写入次数。 用例来源：无效等价类 追溯ID：arm_inst_mrrcx 等价列表：非 AL 条件成立、read2 拒绝。 其它说明：覆盖 cond!=0xE 且条件成立路径，以及 !cp->read2(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000；R2/R3 不写入。
+ 
+⸻
+ 
+arm_inst_mrrcx.006.R.condition_false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ */
+inst = 0x00032145U;
+regs.pstate = 0U;
+
+vcast_cp_mask = 16U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_mrrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 0
+vcast_reg_write_called[3] = 0
+注释
+测试目的：验证 mrrc 条件不成立时，不执行 read2、不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 MRRC 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00032145。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_mrrcx。 step4、观察返回值、PC 和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mrrcx 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2/R3 不写入。
+ 
+⸻
+ 
+五、
+arm_inst_cdpx
+arm_inst_cdpx.001.R.normal
+构造代码
+/*
+ * cond = AL
+ * opc1 = 4
+ * CRn = 1
+ * CRd = 2
+ * coproc = 1
+ * opc2 = 3
+ * CRm = 5
+ */
+inst = 0xE0412165U;
+
+vcast_cp_mask = 32U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_cdpx.inst>> = inst;
+<<emulate_arm.arm_inst_cdpx.regs>> = &regs;
+<<emulate_arm.arm_inst_cdpx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 cdp 在 data_process 回调存在且返回 true 时，正常推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 CDP 指令；设置 data_process 回调存在并返回 true。 测试步骤： step1、构造 inst=0xE0412165。 step2、设置 vcast_cp_mask=32。 step3、设置 vcast_cp_op_ret=1。 step4、调用 arm_inst_cdpx。 step5、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_cdpx 等价列表：正常 coprocessor data process。 其它说明：覆盖 data_process != NULL、条件成立、回调返回 true 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_cdpx.002.IN.data_process_null.NEC
+构造代码
+inst = 0xE0412165U;
+
+/*
+ * data_process 不存在
+ */
+vcast_cp_mask = 0U;
+
+<<emulate_arm.arm_inst_cdpx.inst>> = inst;
+<<emulate_arm.arm_inst_cdpx.regs>> = &regs;
+<<emulate_arm.arm_inst_cdpx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 cdp 在 data_process 回调缺失时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 CDP 指令；设置 data_process 回调为空。 测试步骤： step1、构造 inst=0xE0412165。 step2、设置 vcast_cp_mask=0。 step3、调用 arm_inst_cdpx。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_cdpx 等价列表：data_process 回调缺失。 其它说明：覆盖 cp->data_process == NULL 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_cdpx.003.IN.data_process_false.NEC
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ */
+inst = 0x00412165U;
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 32U;
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.arm_inst_cdpx.inst>> = inst;
+<<emulate_arm.arm_inst_cdpx.regs>> = &regs;
+<<emulate_arm.arm_inst_cdpx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 cdp 在非 AL 条件成立后，如果 data_process 返回 false，则断言 undefined 并返回，不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 的 CDP 指令；设置 Z 标志；设置 data_process 存在但返回 false。 测试步骤： step1、构造 inst=0x00412165。 step2、设置 regs.pstate=0x40000000。 step3、设置 vcast_cp_mask=32，vcast_cp_op_ret=0。 step4、调用 arm_inst_cdpx。 step5、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_cdpx 等价列表：非 AL 条件成立、data_process 拒绝。 其它说明：覆盖 cond!=0xE 且条件成立路径，以及 !cp->data_process(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_cdpx.004.R.condition_false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ */
+inst = 0x00412165U;
+regs.pstate = 0U;
+
+vcast_cp_mask = 32U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_cdpx.inst>> = inst;
+<<emulate_arm.arm_inst_cdpx.regs>> = &regs;
+<<emulate_arm.arm_inst_cdpx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 cdp 条件不成立时，不执行 data_process，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 CDP 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00412165。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_cdpx。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_cdpx 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+六、
+arm_inst_mcrx
+arm_inst_mcrx.001.R.normal
+构造代码
+/*
+ * cond = AL
+ * opc1 = 3
+ * CRn = 1
+ * Rt = 2
+ * coproc = 1
+ * opc2 = 4
+ * CRm = 5
+ */
+inst = 0xE0612185U;
+
+vcast_cp_mask = 64U;
+vcast_cp_op_ret = 1U;
+
+vcast_reg_read_value[2] = 0x12345678U;
+
+<<emulate_arm.arm_inst_mcrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 mcr 在 write 回调存在且返回 true 时，正常推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 MCR 指令；设置 write 回调存在并返回 true；设置 Rt 返回待写数据。 测试步骤： step1、构造 inst=0xE0612185。 step2、设置 vcast_cp_mask=64，vcast_cp_op_ret=1。 step3、设置 R2 返回 0x12345678。 step4、调用 arm_inst_mcrx。 step5、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mcrx 等价列表：正常 MCR 写单寄存器。 其它说明：覆盖 write != NULL、条件成立、write 返回 true 的正常路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_mcrx.002.IN.write_null.NEC
+构造代码
+inst = 0xE0612185U;
+
+vcast_cp_mask = 0U;
+
+<<emulate_arm.arm_inst_mcrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mcr 在 write 回调缺失时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 MCR 指令；设置 write 回调为空。 测试步骤： step1、构造 inst=0xE0612185。 step2、设置 vcast_cp_mask=0。 step3、调用 arm_inst_mcrx。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrx 等价列表：write 回调缺失。 其它说明：覆盖 cp->write == NULL 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrx.003.IN.write_false.NEC
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ */
+inst = 0x00612185U;
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 64U;
+vcast_cp_op_ret = 0U;
+
+vcast_reg_read_value[2] = 0x12345678U;
+
+<<emulate_arm.arm_inst_mcrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mcr 在非 AL 条件成立后，如果 write 返回 false，则断言 undefined 并返回，不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 的 MCR 指令；设置 Z 标志；设置 write 存在但返回 false。 测试步骤： step1、构造 inst=0x00612185。 step2、设置 regs.pstate=0x40000000。 step3、设置 vcast_cp_mask=64，vcast_cp_op_ret=0。 step4、调用 arm_inst_mcrx。 step5、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mcrx 等价列表：非 AL 条件成立、write 拒绝。 其它说明：覆盖 cond!=0xE 且条件成立路径，以及 !cp->write(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mcrx.004.R.condition_false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ */
+inst = 0x00612185U;
+regs.pstate = 0U;
+
+vcast_cp_mask = 64U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_mcrx.inst>> = inst;
+<<emulate_arm.arm_inst_mcrx.regs>> = &regs;
+<<emulate_arm.arm_inst_mcrx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 mcr 条件不成立时，不执行 write，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 MCR 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00612185。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_mcrx。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mcrx 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+七、
+arm_inst_mrcx
+arm_inst_mrcx.001.R.normal_Rt2
+构造代码
+/*
+ * cond = AL
+ * Rt = 2
+ */
+inst = 0xE0612185U;
+
+vcast_cp_mask = 128U;
+vcast_cp_op_ret = 1U;
+vcast_cp_read_value_seq[0] = 0xA5A5A5A5U;
+
+<<emulate_arm.arm_inst_mrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xA5A5A5A5
+注释
+测试目的：验证 mrc 在 read 回调存在且返回 true 时，能够将读取数据写入 Rt 并推进 PC。 用例类别：基于需求的测试 预置条件：构造有效 MRC 指令；设置 read 回调存在并返回 true；设置 read 输出值。 测试步骤： step1、构造 inst=0xE0612185。 step2、设置 vcast_cp_mask=128，vcast_cp_op_ret=1。 step3、设置 vcast_cp_read_value_seq[0]=0xA5A5A5A5。 step4、调用 arm_inst_mrcx。 step5、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mrcx 等价列表：正常 MRC 读单寄存器。 其它说明：覆盖 read != NULL、条件成立、read 返回 true、Rt < 15 写寄存器路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0xA5A5A5A5。
+ 
+⸻
+ 
+arm_inst_mrcx.002.R.Rt15
+构造代码
+/*
+ * Rt = 15
+ */
+inst = 0xE061F185U;
+
+vcast_cp_mask = 128U;
+vcast_cp_op_ret = 1U;
+vcast_cp_read_value_seq[0] = 0x55555555U;
+
+<<emulate_arm.arm_inst_mrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[15] = 0
+注释
+测试目的：验证 mrc 在 Rt 为 15 时，即使 read 成功，也不通过 cpu_vcpu_reg_write 写 R15，并正常推进 PC。 用例类别：基于需求的测试 预置条件：构造 Rt=15 的 MRC 指令；设置 read 回调存在并返回 true。 测试步骤： step1、构造 inst=0xE061F185。 step2、设置 vcast_cp_mask=128，vcast_cp_op_ret=1。 step3、调用 arm_inst_mrcx。 step4、观察返回值、PC 和 R15 写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mrcx 等价列表：Rt 为 PC，read 成功。 其它说明：覆盖 if (Rt < 15) 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R15 不发生 cpu_vcpu_reg_write。
+ 
+⸻
+ 
+arm_inst_mrcx.003.IN.read_null.NEC
+构造代码
+inst = 0xE0612185U;
+
+vcast_cp_mask = 0U;
+
+<<emulate_arm.arm_inst_mrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+注释
+测试目的：验证 mrc 在 read 回调缺失时，断言 undefined 并直接返回，不推进 PC。 用例类别：接口测试 预置条件：构造有效 MRC 指令；设置 read 回调为空。 测试步骤： step1、构造 inst=0xE0612185。 step2、设置 vcast_cp_mask=0。 step3、调用 arm_inst_mrcx。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_inst_mrcx 等价列表：read 回调缺失。 其它说明：覆盖 cp->read == NULL 的路径。 通过准则：函数返回 0；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_mrcx.004.IN.read_false.NEC
+构造代码
+/*
+ * cond = EQ
+ * Z = 1
+ */
+inst = 0x00612185U;
+regs.pstate = 0x40000000U;
+
+vcast_cp_mask = 128U;
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.arm_inst_mrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1000
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 mrc 在非 AL 条件成立后，如果 read 返回 false，则断言 undefined 并返回，不写目标寄存器、不推进 PC。 用例类别：接口测试 预置条件：构造 cond=EQ 的 MRC 指令；设置 Z 标志；设置 read 回调存在但返回 false。 测试步骤： step1、构造 inst=0x00612185。 step2、设置 regs.pstate=0x40000000。 step3、设置 vcast_cp_mask=128，vcast_cp_op_ret=0。 step4、调用 arm_inst_mrcx。 step5、观察返回值、PC 和 R2 写入次数。 用例来源：无效等价类 追溯ID：arm_inst_mrcx 等价列表：非 AL 条件成立、read 拒绝。 其它说明：覆盖 cond!=0xE 且条件成立路径，以及 !cp->read(...) 为 true 的路径。 通过准则：函数返回 0；PC 保持 0x1000；R2 不写入。
+ 
+⸻
+ 
+arm_inst_mrcx.005.R.condition_false
+构造代码
+/*
+ * cond = EQ
+ * Z = 0
+ */
+inst = 0x00612185U;
+regs.pstate = 0U;
+
+vcast_cp_mask = 128U;
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.arm_inst_mrcx.inst>> = inst;
+<<emulate_arm.arm_inst_mrcx.regs>> = &regs;
+<<emulate_arm.arm_inst_mrcx.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 0
+注释
+测试目的：验证 mrc 条件不成立时，不执行 read、不写目标寄存器，但仍推进 PC。 用例类别：基于需求的测试 预置条件：构造字段有效的 MRC 指令；设置条件码为 EQ；CPSR 不设置 Z 标志。 测试步骤： step1、构造 inst=0x00612185。 step2、设置 regs.pstate=0。 step3、调用 arm_inst_mrcx。 step4、观察返回值、PC 和寄存器写入次数。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_mrcx 等价列表：条件不通过。 其它说明：覆盖 arm_condition_passed 为 false 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 不写入。
+ 
+⸻
+ 
+八、
+arm_inst_svc
+arm_inst_svc.001.R
+构造代码
+inst = 0xE0000000U;
+
+<<emulate_arm.arm_inst_svc.inst>> = inst;
+<<emulate_arm.arm_inst_svc.regs>> = &regs;
+<<emulate_arm.arm_inst_svc.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 svc 当前实现仅推进 PC 并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造任意 inst=0xE0000000。 step2、调用 arm_inst_svc。 step3、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_inst_svc 等价列表：SVC 空实现路径。 其它说明：该函数不解析 inst，当前实现只执行 arm_pc(regs)+=4。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+九、
+arm_instgrp_media
+arm_instgrp_media.001.IN.NEC
+构造代码
+inst = 0xE0000000U;
+
+<<emulate_arm.arm_instgrp_media.inst>> = inst;
+<<emulate_arm.arm_instgrp_media.regs>> = &regs;
+<<emulate_arm.arm_instgrp_media.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 arm_instgrp_media 当前未实现，调用后进入不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象；设置 PC 为 0x1000。 测试步骤： step1、构造任意 inst=0xE0000000。 step2、调用 arm_instgrp_media。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_instgrp_media 等价列表：media 分组未实现路径。 其它说明：该函数无分支，固定调用 arm_unpredictable 并返回失败。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+十、
+arm_instgrp_uncond
+arm_instgrp_uncond.001.R.preload_nop
+构造代码
+/*
+ * cond = 0xF
+ * op1 = 0x45
+ * preload NOP
+ */
+inst = 0xF4500000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 unconditional 分组中 preload 指令被当作 NOP 处理，并推进 PC。 用例类别：基于需求的测试 预置条件：构造 op1=0x45 的 unconditional 指令；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF4500000。 step2、调用 arm_instgrp_uncond。 step3、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：arm_instgrp_uncond 等价列表：preload NOP。 其它说明：覆盖 !(op1 & 0x80) 为 true，且 switch 命中 preload case 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_instgrp_uncond.002.IN.default_low.NEC
+构造代码
+/*
+ * op1 = 0x00
+ * !(op1 & 0x80) 为 true
+ * 但 switch 不命中 preload
+ */
+inst = 0xF0000000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 unconditional 分组中 op1 高位为 0 但不属于 preload case 时，进入不可预测处理。 用例类别：接口测试 预置条件：构造 op1=0x00 的 unconditional 指令。 测试步骤： step1、构造 inst=0xF0000000。 step2、调用 arm_instgrp_uncond。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_instgrp_uncond 等价列表：low op1 default 未支持路径。 其它说明：覆盖 !(op1 & 0x80) 为 true，但 switch default 后落入不可预测处理的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+arm_instgrp_uncond.003.IN.high.NEC
+构造代码
+/*
+ * op1 = 0x80
+ * !(op1 & 0x80) 为 false
+ */
+inst = 0xF8000000U;
+
+<<emulate_arm.arm_instgrp_uncond.inst>> = inst;
+<<emulate_arm.arm_instgrp_uncond.regs>> = &regs;
+<<emulate_arm.arm_instgrp_uncond.vcpu>> = &vcpu;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 unconditional 分组中 op1 高位为 1 时，跳过 preload switch 并进入不可预测处理。 用例类别：接口测试 预置条件：构造 op1=0x80 的 unconditional 指令。 测试步骤： step1、构造 inst=0xF8000000。 step2、调用 arm_instgrp_uncond。 step3、观察返回值和 PC。 用例来源：无效等价类 追溯ID：arm_instgrp_uncond 等价列表：high op1 未支持路径。 其它说明：覆盖 !(op1 & 0x80) 为 false 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+本批结束后的剩余重点
+还剩主要分派函数：
+arm_instgrp_coproc
+arm_instgrp_ldrstr
+emulate_arm_inst
+这三个是大分派函数，下一批建议优先做：
+arm_instgrp_coproc
+因为它可以直接复用本批的 coprocessor usercode。
