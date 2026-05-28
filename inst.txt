@@ -1,0 +1,650 @@
+下面先给两部分：
+1. emulate_arm_inst 的完整用例构造和注释
+2. 我新增的辅助函数的独立用例构造和注释
+辅助函数这部分按“简单覆盖即可”的原则，不再验证某个函数是否被调用，只验证返回值或输出变量；空实现函数只做入口覆盖。
+ 
+⸻
+ 
+一、
+emulate_arm_inst
+公共模板：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+inst = 0U;
+ 
+⸻
+ 
+emulate_arm_inst.001.IN.vcpu_null
+构造代码
+inst = 0xE3012234U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = 0;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 emulate_arm_inst 在 vcpu 为空时直接返回失败。 用例类别：接口测试 预置条件：设置 vcpu 入参为空指针。 测试步骤： step1、构造任意有效指令值 inst=0xE3012234。 step2、将 vcpu 入参设置为 0。 step3、调用 emulate_arm_inst。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：emulate_arm_inst 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+emulate_arm_inst.002.IN.vcpu_not_normal
+构造代码
+vcpu.is_normal = 0U;
+
+inst = 0xE3012234U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 emulate_arm_inst 在 VCPU 不是 normal VCPU 时直接返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 对象，但设置 vcpu.is_normal=0。 测试步骤： step1、构造任意有效指令值 inst=0xE3012234。 step2、设置 vcpu.is_normal=0。 step3、调用 emulate_arm_inst。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：emulate_arm_inst 等价列表：非 normal VCPU。 其它说明：覆盖 if (!vcpu->is_normal) 为 true 的路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+emulate_arm_inst.003.R.dataproc_movw
+构造代码
+/*
+ * cond != 0xF
+ * op1 & 0x6 = 0
+ * 分派到 arm_instgrp_dataproc
+ * 内部走 MOVW immediate
+ */
+inst = 0xE3012234U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x1234
+注释
+测试目的：验证 emulate_arm_inst 在普通条件指令且 op1&0x6=0 时，能够分派到数据处理分组。 用例类别：基于需求的测试 预置条件：构造 normal VCPU；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xE3012234。 step2、该指令由顶层分派识别为 data-processing 分组。 step3、调用 emulate_arm_inst。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：data-processing 分派。 其它说明：覆盖 case 0x0 分派路径，并通过 MOVW 子路径返回成功。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0x1234。
+ 
+⸻
+ 
+emulate_arm_inst.004.R.ldrstr_op1_even
+构造代码
+/*
+ * op1 & 0x6 = 0x2
+ * (op1 & 0x1) == 0
+ * 分派到 arm_instgrp_ldrstr
+ * 内部走 LDR immediate
+ */
+inst = 0xE5912010U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_mem_read_value_seq[0] = 0x12345678U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0x12345678
+注释
+测试目的：验证 emulate_arm_inst 在 op1&0x6=0x2 且 op1&1=0 时，分派到 load/store 分组。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000；设置内存读取返回 0x12345678。 测试步骤： step1、构造 inst=0xE5912010。 step2、该指令顶层分派到 arm_instgrp_ldrstr。 step3、调用 emulate_arm_inst。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：load/store 分派第一种条件。 其它说明：覆盖 ((op1 & 0x1) == 0) 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0x12345678。
+ 
+⸻
+ 
+emulate_arm_inst.005.R.ldrstr_op1_odd_op0
+构造代码
+/*
+ * op1 & 0x6 = 0x2
+ * (op1 & 0x1) == 1
+ * op == 0
+ * 分派到 arm_instgrp_ldrstr
+ * 内部走 LDR register
+ */
+inst = 0xE7912004U;
+
+vcast_reg_read_value[1] = 0x2000U;
+vcast_reg_read_value[4] = 0x10U;
+
+vcast_mem_read_value_seq[0] = 0xA5A5A5A5U;
+vcast_mem_read_rc_seq[0] = 0;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[2] = 1
+vcast_reg_write_value[2] = 0xA5A5A5A5
+注释
+测试目的：验证 emulate_arm_inst 在 op1&1=1 且 op=0 时，仍然分派到 load/store 分组。 用例类别：基于需求的测试 预置条件：设置 R1 返回 0x2000，R4 返回 0x10；设置内存读取成功。 测试步骤： step1、构造 inst=0xE7912004。 step2、该指令满足 ((op1&1)==1)&&op==0。 step3、调用 emulate_arm_inst。 step4、观察返回值、PC 和 R2 写入值。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：load/store 分派第二种条件。 其它说明：覆盖 ((op1&1)==1 && op==0) 为 true 的路径。 通过准则：函数返回 0；PC 更新为 0x1004；R2 写入 0xA5A5A5A5。
+ 
+⸻
+ 
+emulate_arm_inst.006.IN.media
+构造代码
+/*
+ * op1 & 0x6 = 0x2
+ * (op1 & 0x1) == 1
+ * op == 1
+ * 分派到 arm_instgrp_media
+ */
+inst = 0xE6000010U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = -1
+regs.pc = 0x1000
+注释
+测试目的：验证 emulate_arm_inst 在 load/store 分组条件不满足时，能够分派到 media 分组，并由当前未实现路径返回失败。 用例类别：接口测试 预置条件：构造 normal VCPU；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xE6000010。 step2、该指令满足 op1&1=1 且 op=1。 step3、调用 emulate_arm_inst。 step4、观察返回值和 PC。 用例来源：无效等价类 追溯ID：emulate_arm_inst 等价列表：media 分组分派。 其它说明：覆盖 case 0x2 中 media 分派路径。 通过准则：函数返回 -1；PC 保持 0x1000。
+ 
+⸻
+ 
+emulate_arm_inst.007.R.brblk
+构造代码
+/*
+ * op1 & 0x6 = 0x4
+ * 分派到 arm_instgrp_brblk
+ * 内部走 LDM
+ */
+inst = 0xE8940003U;
+
+vcast_reg_read_value[4] = 0x2000U;
+
+vcast_mem_read_value_seq[0] = 0x11111111U;
+vcast_mem_read_value_seq[1] = 0x22222222U;
+vcast_mem_read_rc_seq[0] = 0;
+vcast_mem_read_rc_seq[1] = 0;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_reg_write_called[0] = 1
+vcast_reg_write_value[0] = 0x11111111
+
+vcast_reg_write_called[1] = 1
+vcast_reg_write_value[1] = 0x22222222
+注释
+测试目的：验证 emulate_arm_inst 在 op1&0x6=0x4 时分派到 branch/block transfer 分组。 用例类别：基于需求的测试 预置条件：设置 R4 返回 0x2000；设置两次内存读取成功。 测试步骤： step1、构造 inst=0xE8940003。 step2、该指令顶层分派到 arm_instgrp_brblk。 step3、调用 emulate_arm_inst。 step4、观察返回值、PC 和 R0/R1 写入值。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：branch/block transfer 分派。 其它说明：覆盖 case 0x4 分派路径。 通过准则：函数返回 0；PC 更新为 0x1004；R0/R1 写入预期值。
+ 
+⸻
+ 
+emulate_arm_inst.008.R.coproc_svc
+构造代码
+/*
+ * op1 & 0x6 = 0x6
+ * 分派到 arm_instgrp_coproc
+ * 内部走 SVC case
+ */
+inst = 0xEF000000U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 emulate_arm_inst 在 op1&0x6=0x6 时分派到 coprocessor/SVC 分组。 用例类别：基于需求的测试 预置条件：构造 normal VCPU；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xEF000000。 step2、该指令顶层分派到 arm_instgrp_coproc，并由内部 SVC 路径推进 PC。 step3、调用 emulate_arm_inst。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：coprocessor/SVC 分派。 其它说明：覆盖 case 0x6 分派路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+emulate_arm_inst.009.R.uncond
+构造代码
+/*
+ * cond = 0xF
+ * 分派到 arm_instgrp_uncond
+ * op1 = 0x45 preload NOP
+ */
+inst = 0xF4500000U;
+
+<<emulate_arm.emulate_arm_inst.vcpu>> = &vcpu;
+<<emulate_arm.emulate_arm_inst.regs>> = &regs;
+<<emulate_arm.emulate_arm_inst.inst>> = inst;
+期望值
+return = 0
+regs.pc = 0x1004
+注释
+测试目的：验证 emulate_arm_inst 在 cond=0xF 时分派到 unconditional 分组。 用例类别：基于需求的测试 预置条件：构造 normal VCPU；设置 PC 为 0x1000。 测试步骤： step1、构造 inst=0xF4500000。 step2、该指令条件码为 0xF。 step3、调用 emulate_arm_inst。 step4、观察返回值和 PC。 用例来源：需求分析、有效等价类 追溯ID：emulate_arm_inst 等价列表：unconditional 分派。 其它说明：覆盖 cond==0xF 的路径。 通过准则：函数返回 0；PC 更新为 0x1004。
+ 
+⸻
+ 
+emulate_arm_inst
+不可达说明
+switch (op1 & 0x6) {
+case 0x0:
+case 0x2:
+case 0x4:
+case 0x6:
+default:
+    break;
+}
+这里 op1 & 0x6 的结果只能是：
+0x0, 0x2, 0x4, 0x6
+所以 default 分支是不可达代码。如果 VectorCAST 显示该 default 或 switch 之后的最终 arm_unpredictable 未覆盖，应作为源码不可达分支记录。
+ 
+⸻
+ 
+二、新增辅助函数用例
+下面这些是我们为了 coprocessor 路径构造新增的 usercode 辅助函数：
+vcast_ldcstc_accept
+vcast_ldcstc_done
+vcast_ldcstc_read
+vcast_ldcstc_write
+vcast_cp_write2
+vcast_cp_read2
+vcast_cp_data_process
+vcast_cp_write
+vcast_cp_read
+vcast_get_cp
+这些函数不是原业务逻辑，只需简单覆盖分支。公共模板如下：
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.is_normal = 1U;
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+ 
+⸻
+ 
+1. 
+vcast_ldcstc_accept
+vcast_ldcstc_accept.001.R.true
+构造代码
+vcast_cp_accept_ret = 1U;
+
+<<emulate_arm.vcast_ldcstc_accept.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_accept.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_accept.D>> = 1U;
+<<emulate_arm.vcast_ldcstc_accept.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_accept.uopt>> = 0;
+<<emulate_arm.vcast_ldcstc_accept.imm8>> = 4U;
+期望值
+return = 1
+注释
+测试目的：验证 vcast_ldcstc_accept 在控制变量为 1 时返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_accept_ret=1。 测试步骤： step1、设置 vcast_cp_accept_ret=1。 step2、传入任意有效参数。 step3、调用 vcast_ldcstc_accept。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_accept 等价列表：accept 返回 true。 其它说明：覆盖三目表达式 true 路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+vcast_ldcstc_accept.002.R.false
+构造代码
+vcast_cp_accept_ret = 0U;
+
+<<emulate_arm.vcast_ldcstc_accept.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_accept.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_accept.D>> = 1U;
+<<emulate_arm.vcast_ldcstc_accept.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_accept.uopt>> = 1;
+<<emulate_arm.vcast_ldcstc_accept.imm8>> = 4U;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_ldcstc_accept 在控制变量为 0 时返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_accept_ret=0。 测试步骤： step1、设置 vcast_cp_accept_ret=0。 step2、传入任意有效参数。 step3、调用 vcast_ldcstc_accept。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_accept 等价列表：accept 返回 false。 其它说明：覆盖三目表达式 false 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+2. 
+vcast_ldcstc_done
+vcast_ldcstc_done.001.R.false
+构造代码
+vcast_cp_done_after = 2U;
+
+<<emulate_arm.vcast_ldcstc_done.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_done.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_done.i>> = 1U;
+<<emulate_arm.vcast_ldcstc_done.D>> = 0U;
+<<emulate_arm.vcast_ldcstc_done.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_done.uopt>> = 0;
+<<emulate_arm.vcast_ldcstc_done.imm8>> = 4U;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_ldcstc_done 在 i < vcast_cp_done_after 时返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_done_after=2。 测试步骤： step1、设置 vcast_cp_done_after=2。 step2、设置入参 i=1。 step3、调用 vcast_ldcstc_done。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_done 等价列表：循环未结束。 其它说明：覆盖比较表达式 false 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vcast_ldcstc_done.002.R.true
+构造代码
+vcast_cp_done_after = 2U;
+
+<<emulate_arm.vcast_ldcstc_done.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_done.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_done.i>> = 2U;
+<<emulate_arm.vcast_ldcstc_done.D>> = 0U;
+<<emulate_arm.vcast_ldcstc_done.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_done.uopt>> = 1;
+<<emulate_arm.vcast_ldcstc_done.imm8>> = 4U;
+期望值
+return = 1
+注释
+测试目的：验证 vcast_ldcstc_done 在 i >= vcast_cp_done_after 时返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_done_after=2。 测试步骤： step1、设置 vcast_cp_done_after=2。 step2、设置入参 i=2。 step3、调用 vcast_ldcstc_done。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_done 等价列表：循环结束。 其它说明：覆盖比较表达式 true 路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+3. 
+vcast_ldcstc_read
+vcast_ldcstc_read.001.R
+构造代码
+vcast_cp_read_value_seq[1] = 0x12345678U;
+
+/*
+ * i=9，i & 7 = 1
+ */
+<<emulate_arm.vcast_ldcstc_read.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_read.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_read.i>> = 9U;
+<<emulate_arm.vcast_ldcstc_read.D>> = 0U;
+<<emulate_arm.vcast_ldcstc_read.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_read.uopt>> = 0;
+<<emulate_arm.vcast_ldcstc_read.imm8>> = 4U;
+期望值
+return = 0x12345678
+注释
+测试目的：验证 vcast_ldcstc_read 按 i&7 从序列数组中取值并返回。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_read_value_seq[1]=0x12345678。 测试步骤： step1、设置 vcast_cp_read_value_seq[1]。 step2、设置入参 i=9。 step3、调用 vcast_ldcstc_read。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_read 等价列表：数组索引读取。 其它说明：9&7=1，用于确认索引掩码生效。 通过准则：函数返回 0x12345678。
+ 
+⸻
+ 
+4. 
+vcast_ldcstc_write
+vcast_ldcstc_write.001.R
+构造代码
+<<emulate_arm.vcast_ldcstc_write.vcpu>> = &vcpu;
+<<emulate_arm.vcast_ldcstc_write.regs>> = &regs;
+<<emulate_arm.vcast_ldcstc_write.i>> = 0U;
+<<emulate_arm.vcast_ldcstc_write.D>> = 0U;
+<<emulate_arm.vcast_ldcstc_write.CRd>> = 2U;
+<<emulate_arm.vcast_ldcstc_write.uopt>> = 0;
+<<emulate_arm.vcast_ldcstc_write.imm8>> = 4U;
+<<emulate_arm.vcast_ldcstc_write.data>> = 0x12345678U;
+期望值
+无返回值
+注释
+测试目的：覆盖 vcast_ldcstc_write 空实现函数入口。 用例类别：辅助函数覆盖测试 预置条件：构造有效参数。 测试步骤： step1、设置所有入参为有效值。 step2、调用 vcast_ldcstc_write。 step3、确认函数正常返回。 用例来源：辅助构造函数覆盖 追溯ID：vcast_ldcstc_write 等价列表：空实现入口覆盖。 其它说明：该函数仅用于让 ldcx_l 的 write 回调存在，不承载业务逻辑。 通过准则：函数无异常返回。
+ 
+⸻
+ 
+5. 
+vcast_cp_write2
+vcast_cp_write2.001.R.true
+构造代码
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.vcast_cp_write2.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_write2.regs>> = &regs;
+<<emulate_arm.vcast_cp_write2.opc1>> = 1U;
+<<emulate_arm.vcast_cp_write2.CRm>> = 2U;
+<<emulate_arm.vcast_cp_write2.data>> = 0x11111111U;
+<<emulate_arm.vcast_cp_write2.data2>> = 0x22222222U;
+期望值
+return = 1
+注释
+测试目的：验证 vcast_cp_write2 在控制变量为 1 时返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=1。 测试步骤： step1、设置 vcast_cp_op_ret=1。 step2、传入有效参数。 step3、调用 vcast_cp_write2。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_write2 等价列表：write2 返回 true。 其它说明：覆盖三目表达式 true 路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+vcast_cp_write2.002.R.false
+构造代码
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.vcast_cp_write2.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_write2.regs>> = &regs;
+<<emulate_arm.vcast_cp_write2.opc1>> = 1U;
+<<emulate_arm.vcast_cp_write2.CRm>> = 2U;
+<<emulate_arm.vcast_cp_write2.data>> = 0x11111111U;
+<<emulate_arm.vcast_cp_write2.data2>> = 0x22222222U;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_cp_write2 在控制变量为 0 时返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=0。 测试步骤： step1、设置 vcast_cp_op_ret=0。 step2、传入有效参数。 step3、调用 vcast_cp_write2。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_write2 等价列表：write2 返回 false。 其它说明：覆盖三目表达式 false 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+6. 
+vcast_cp_read2
+vcast_cp_read2.001.R.nonnull_true
+构造代码
+static unsigned int data;
+static unsigned int data2;
+
+data = 0U;
+data2 = 0U;
+
+vcast_cp_op_ret = 1U;
+vcast_cp_read_value_seq[0] = 0x11111111U;
+vcast_cp_read_value_seq[1] = 0x22222222U;
+
+<<emulate_arm.vcast_cp_read2.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_read2.regs>> = &regs;
+<<emulate_arm.vcast_cp_read2.opc1>> = 1U;
+<<emulate_arm.vcast_cp_read2.CRm>> = 2U;
+<<emulate_arm.vcast_cp_read2.data>> = &data;
+<<emulate_arm.vcast_cp_read2.data2>> = &data2;
+期望值
+return = 1
+data = 0x11111111
+data2 = 0x22222222
+注释
+测试目的：验证 vcast_cp_read2 在 data 和 data2 指针非空时写出两个返回值，并按控制变量返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置两个输出值和 vcast_cp_op_ret=1。 测试步骤： step1、定义本地变量 data 和 data2。 step2、设置 vcast_cp_read_value_seq[0] 和 [1]。 step3、传入 &data 和 &data2。 step4、调用 vcast_cp_read2。 step5、观察返回值和两个输出变量。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_read2 等价列表：输出指针非空、返回 true。 其它说明：覆盖 if (data) 和 if (data2) 为 true 的路径。 通过准则：函数返回 1；data=0x11111111；data2=0x22222222。
+ 
+⸻
+ 
+vcast_cp_read2.002.R.null_false
+构造代码
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.vcast_cp_read2.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_read2.regs>> = &regs;
+<<emulate_arm.vcast_cp_read2.opc1>> = 1U;
+<<emulate_arm.vcast_cp_read2.CRm>> = 2U;
+<<emulate_arm.vcast_cp_read2.data>> = 0;
+<<emulate_arm.vcast_cp_read2.data2>> = 0;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_cp_read2 在 data 和 data2 指针为空时不写输出，并按控制变量返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=0。 测试步骤： step1、设置 vcast_cp_op_ret=0。 step2、将 data 和 data2 入参均设置为空指针。 step3、调用 vcast_cp_read2。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_read2 等价列表：输出指针为空、返回 false。 其它说明：覆盖 if (data) 和 if (data2) 为 false 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+7. 
+vcast_cp_data_process
+vcast_cp_data_process.001.R.true
+构造代码
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.vcast_cp_data_process.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_data_process.regs>> = &regs;
+<<emulate_arm.vcast_cp_data_process.opc1>> = 1U;
+<<emulate_arm.vcast_cp_data_process.opc2>> = 2U;
+<<emulate_arm.vcast_cp_data_process.CRd>> = 3U;
+<<emulate_arm.vcast_cp_data_process.CRn>> = 4U;
+<<emulate_arm.vcast_cp_data_process.CRm>> = 5U;
+期望值
+return = 1
+注释
+测试目的：验证 vcast_cp_data_process 在控制变量为 1 时返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=1。 测试步骤： step1、设置 vcast_cp_op_ret=1。 step2、传入有效参数。 step3、调用 vcast_cp_data_process。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_data_process 等价列表：data_process 返回 true。 其它说明：覆盖三目表达式 true 路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+vcast_cp_data_process.002.R.false
+构造代码
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.vcast_cp_data_process.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_data_process.regs>> = &regs;
+<<emulate_arm.vcast_cp_data_process.opc1>> = 1U;
+<<emulate_arm.vcast_cp_data_process.opc2>> = 2U;
+<<emulate_arm.vcast_cp_data_process.CRd>> = 3U;
+<<emulate_arm.vcast_cp_data_process.CRn>> = 4U;
+<<emulate_arm.vcast_cp_data_process.CRm>> = 5U;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_cp_data_process 在控制变量为 0 时返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=0。 测试步骤： step1、设置 vcast_cp_op_ret=0。 step2、传入有效参数。 step3、调用 vcast_cp_data_process。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_data_process 等价列表：data_process 返回 false。 其它说明：覆盖三目表达式 false 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+8. 
+vcast_cp_write
+vcast_cp_write.001.R.true
+构造代码
+vcast_cp_op_ret = 1U;
+
+<<emulate_arm.vcast_cp_write.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_write.regs>> = &regs;
+<<emulate_arm.vcast_cp_write.opc1>> = 1U;
+<<emulate_arm.vcast_cp_write.opc2>> = 2U;
+<<emulate_arm.vcast_cp_write.CRn>> = 3U;
+<<emulate_arm.vcast_cp_write.CRm>> = 4U;
+<<emulate_arm.vcast_cp_write.data>> = 0x12345678U;
+期望值
+return = 1
+注释
+测试目的：验证 vcast_cp_write 在控制变量为 1 时返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=1。 测试步骤： step1、设置 vcast_cp_op_ret=1。 step2、传入有效参数。 step3、调用 vcast_cp_write。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_write 等价列表：write 返回 true。 其它说明：覆盖三目表达式 true 路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+vcast_cp_write.002.R.false
+构造代码
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.vcast_cp_write.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_write.regs>> = &regs;
+<<emulate_arm.vcast_cp_write.opc1>> = 1U;
+<<emulate_arm.vcast_cp_write.opc2>> = 2U;
+<<emulate_arm.vcast_cp_write.CRn>> = 3U;
+<<emulate_arm.vcast_cp_write.CRm>> = 4U;
+<<emulate_arm.vcast_cp_write.data>> = 0x12345678U;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_cp_write 在控制变量为 0 时返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=0。 测试步骤： step1、设置 vcast_cp_op_ret=0。 step2、传入有效参数。 step3、调用 vcast_cp_write。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_write 等价列表：write 返回 false。 其它说明：覆盖三目表达式 false 路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+9. 
+vcast_cp_read
+vcast_cp_read.001.R.nonnull_true
+构造代码
+static unsigned int data;
+
+data = 0U;
+
+vcast_cp_op_ret = 1U;
+vcast_cp_read_value_seq[0] = 0x12345678U;
+
+<<emulate_arm.vcast_cp_read.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_read.regs>> = &regs;
+<<emulate_arm.vcast_cp_read.opc1>> = 1U;
+<<emulate_arm.vcast_cp_read.opc2>> = 2U;
+<<emulate_arm.vcast_cp_read.CRn>> = 3U;
+<<emulate_arm.vcast_cp_read.CRm>> = 4U;
+<<emulate_arm.vcast_cp_read.data>> = &data;
+期望值
+return = 1
+data = 0x12345678
+注释
+测试目的：验证 vcast_cp_read 在输出指针非空时写出数据，并按控制变量返回 TRUE。 用例类别：辅助函数覆盖测试 预置条件：定义本地输出变量；设置 read 输出值；设置 vcast_cp_op_ret=1。 测试步骤： step1、定义并清零 data。 step2、设置 vcast_cp_read_value_seq[0]=0x12345678。 step3、设置 vcast_cp_op_ret=1。 step4、传入 &data。 step5、调用 vcast_cp_read。 step6、观察返回值和 data。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_read 等价列表：输出指针非空、返回 true。 其它说明：覆盖 if (data) 为 true 的路径。 通过准则：函数返回 1；data=0x12345678。
+ 
+⸻
+ 
+vcast_cp_read.002.R.null_false
+构造代码
+vcast_cp_op_ret = 0U;
+
+<<emulate_arm.vcast_cp_read.vcpu>> = &vcpu;
+<<emulate_arm.vcast_cp_read.regs>> = &regs;
+<<emulate_arm.vcast_cp_read.opc1>> = 1U;
+<<emulate_arm.vcast_cp_read.opc2>> = 2U;
+<<emulate_arm.vcast_cp_read.CRn>> = 3U;
+<<emulate_arm.vcast_cp_read.CRm>> = 4U;
+<<emulate_arm.vcast_cp_read.data>> = 0;
+期望值
+return = 0
+注释
+测试目的：验证 vcast_cp_read 在输出指针为空时不写输出，并按控制变量返回 FALSE。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_op_ret=0。 测试步骤： step1、设置 vcast_cp_op_ret=0。 step2、将 data 入参设置为空指针。 step3、调用 vcast_cp_read。 step4、观察返回值。 用例来源：辅助构造函数覆盖 追溯ID：vcast_cp_read 等价列表：输出指针为空、返回 false。 其它说明：覆盖 if (data) 为 false 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+10. 
+vcast_get_cp
+vcast_get_cp.001.R.all_present
+构造代码
+vcast_cp_mask = 255U;
+
+<<emulate_arm.vcast_get_cp>> = 调用函数本身;
+如果 VectorCAST 需要参数列表，该函数无参数。
+期望值
+return != 0
+注释
+测试目的：验证 vcast_get_cp 在 mask 全置位时，能够返回非空 coprocessor 对象指针，并执行所有回调指针存在路径。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_mask=255。 测试步骤： step1、设置 vcast_cp_mask=255。 step2、调用 vcast_get_cp。 step3、观察返回指针。 用例来源：辅助构造函数覆盖 追溯ID：vcast_get_cp 等价列表：所有回调存在。 其它说明：覆盖 vcast_cp_mask & bit 为 true 的路径。 通过准则：返回指针非空。
+ 
+⸻
+ 
+vcast_get_cp.002.R.all_null
+构造代码
+vcast_cp_mask = 0U;
+
+<<emulate_arm.vcast_get_cp>> = 调用函数本身;
+期望值
+return != 0
+注释
+测试目的：验证 vcast_get_cp 在 mask 全清零时，仍返回非空 coprocessor 对象指针，并执行所有回调指针置空路径。 用例类别：辅助函数覆盖测试 预置条件：设置 vcast_cp_mask=0。 测试步骤： step1、设置 vcast_cp_mask=0。 step2、调用 vcast_get_cp。 step3、观察返回指针。 用例来源：辅助构造函数覆盖 追溯ID：vcast_get_cp 等价列表：所有回调为空。 其它说明：覆盖 vcast_cp_mask & bit 为 false 的路径。 通过准则：返回指针非空。
+ 
+⸻
+ 
+三、本批覆盖关系
+emulate_arm_inst 覆盖：
+vcpu == NULL
+vcpu->is_normal == false
+cond != 0xF
+cond == 0xF
+case 0x0 dataproc
+case 0x2 ldrstr first condition
+case 0x2 ldrstr second condition
+case 0x2 media
+case 0x4 brblk
+case 0x6 coproc
+不可达：
+switch (op1 & 0x6) 的 default 不可达
+switch 后最终 arm_unpredictable 理论不可达
+辅助函数覆盖：
+accept true / false
+done true / false
+read 数组取值
+write 空实现入口
+write2 true / false
+read2 指针非空 / 指针为空
+data_process true / false
+write true / false
+read 指针非空 / 指针为空
+vcast_get_cp mask 全 true / 全 false
+接下来剩余主要是：
+arm_instgrp_coproc
+arm_instgrp_ldrstr
+这两个是最后的大分派函数。
