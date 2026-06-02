@@ -1,0 +1,966 @@
+下面是按 64 位 cpu_emulate_psci.h 重新整理后的 emulate_psci.c / psci.c 单元测试构造方案。入参映射统一使用你提醒的单元名：
+<<emulate_psci.xxx.yyy>>
+不再使用：
+<<psci.xxx.yyy>>
+ 
+⸻
+ 
+一、User Code 修改方案
+1. Test Case Header User Code
+改写目的： 让 Test Case Init / Value User Code 中可以使用 memset，避免隐式声明告警或编译失败。
+#include <string.h>
+ 
+⸻
+ 
+2. User Global / Data
+改写目的： 仅保存外部 manager stub 所需的简单控制变量。 不在这里定义 struct vmm_vcpu、struct vmm_guest、struct arm_priv 等完整结构体对象，避免不完整类型或作用域问题。
+void *vcast_psci_vcpus[4];
+unsigned int vcast_psci_vcpu_count;
+
+unsigned int vcast_psci_state[4];
+
+int vcast_psci_vcpu_reset_rc;
+int vcast_psci_vcpu_kick_rc;
+int vcast_psci_guest_shutdown_rc;
+int vcast_psci_guest_reboot_rc;
+int vcast_psci_guest_suspend_rc;
+ 
+⸻
+ 
+3. Unit Prefix User Code
+改写目的： 统一封装 64 位 PSCI helper 需要访问的字段。当前正确的 helper 使用：
+arm_priv(vcpu)->sysregs.mpidr_el1
+regs->pstate
+arm_priv(vcpu)->sysregs.sctlr_el1
+所以这里统一定义宏，后续用例构造更清晰。
+#define VCAST_SET_MPIDR(_priv, _val) \
+    ((_priv).sysregs.mpidr_el1 = (u64)(_val))
+
+#define VCAST_SET_MODE32(_regs) \
+    ((_regs).pstate |= (u64)PSR_MODE32)
+
+#define VCAST_SET_BE32(_regs) \
+    ((_regs).pstate |= ((u64)PSR_MODE32 | (u64)CPSR_BE_ENABLED))
+
+#define VCAST_GET_THUMB(_regs) \
+    ((_regs).pstate & (u64)CPSR_THUMB_ENABLED)
+
+#define VCAST_GET_BE32(_regs) \
+    ((_regs).pstate & (u64)CPSR_BE_ENABLED)
+
+#define VCAST_GET_BE64(_priv) \
+    ((_priv).sysregs.sctlr_el1 & (u64)SCTLR_EE_MASK)
+说明：
+VCAST_SET_MPIDR：用于真实执行 emulate_psci_get_mpidr。
+VCAST_SET_MODE32：用于真实执行 emulate_psci_is_32bit。
+VCAST_SET_BE32：用于真实执行 emulate_psci_is_be 的 32-bit 分支，并避免执行 mrs(sctlr_el1)。
+VCAST_GET_THUMB：用于检查 target VCPU 是否被设置 Thumb。
+VCAST_GET_BE32：用于检查 target 32-bit VCPU 是否被设置 BE。
+VCAST_GET_BE64：用于检查 target 64-bit VCPU 是否通过 sctlr_el1 设置 BE。
+ 
+⸻
+ 
+4. Stub：
+vmm_manager_guest_next_vcpu
+改写目的： 保留源码真实宏：
+vmm_manager_for_each_guest_vcpu
+不再重定义这个宏。只 stub 其调用的外部 manager 遍历函数，使遍历顺序可控，避免真实链表、锁和全局 manager 状态。
+unsigned int i;
+
+if (!guest) {
+    return (struct vmm_vcpu *)0;
+}
+
+if (!current_vcpu) {
+    if (vcast_psci_vcpu_count == 0U) {
+        return (struct vmm_vcpu *)0;
+    }
+
+    return (struct vmm_vcpu *)vcast_psci_vcpus[0];
+}
+
+for (i = 0U; i < vcast_psci_vcpu_count; i++) {
+    if (current_vcpu == (struct vmm_vcpu *)vcast_psci_vcpus[i]) {
+        if ((i + 1U) < vcast_psci_vcpu_count) {
+            return (struct vmm_vcpu *)vcast_psci_vcpus[i + 1U];
+        }
+
+        return (struct vmm_vcpu *)0;
+    }
+}
+
+return (struct vmm_vcpu *)0;
+ 
+⸻
+ 
+5. Stub：
+vmm_manager_vcpu_get_state
+改写目的： 隔离真实 manager 状态，通过数组为不同 VCPU 提供可控状态。
+unsigned int i;
+
+for (i = 0U; i < vcast_psci_vcpu_count; i++) {
+    if (vcpu == (struct vmm_vcpu *)vcast_psci_vcpus[i]) {
+        return vcast_psci_state[i];
+    }
+}
+
+return VMM_VCPU_STATE_UNKNOWN;
+ 
+⸻
+ 
+6. 其它外部副作用函数 stub
+这些函数属于 manager、副作用、等待中断、打印边界，保留 stub 是合理的。
+vmm_manager_vcpu_reset
+改写目的： 隔离真实 reset 副作用，通过返回值控制成功 / 失败分支。
+return vcast_psci_vcpu_reset_rc;
+vmm_manager_vcpu_kick
+改写目的： 隔离真实调度唤醒副作用，通过返回值控制成功 / 失败分支。
+return vcast_psci_vcpu_kick_rc;
+vmm_manager_guest_shutdown_request
+改写目的： 隔离真实 guest shutdown 副作用。
+return vcast_psci_guest_shutdown_rc;
+vmm_manager_guest_reboot_request
+改写目的： 隔离真实 guest reboot 副作用。
+return vcast_psci_guest_reboot_rc;
+vmm_manager_guest_suspend_request
+改写目的： 隔离真实 guest suspend 副作用。
+return vcast_psci_guest_suspend_rc;
+vmm_vcpu_irq_wait_timeout
+改写目的： 避免单元测试中真实等待中断。
+return;
+vmm_printf
+改写目的： 避免打印依赖和格式化副作用，使错误分支可运行。
+return 0;
+ 
+⸻
+ 
+二、默认 Test Case Init
+每条用例默认初始化：
+vcast_psci_vcpu_count = 0U;
+
+vcast_psci_vcpus[0] = 0;
+vcast_psci_vcpus[1] = 0;
+vcast_psci_vcpus[2] = 0;
+vcast_psci_vcpus[3] = 0;
+
+vcast_psci_state[0] = 0U;
+vcast_psci_state[1] = 0U;
+vcast_psci_state[2] = 0U;
+vcast_psci_state[3] = 0U;
+
+vcast_psci_vcpu_reset_rc = 0;
+vcast_psci_vcpu_kick_rc = 0;
+vcast_psci_guest_shutdown_rc = 0;
+vcast_psci_guest_reboot_rc = 0;
+vcast_psci_guest_suspend_rc = 0;
+ 
+⸻
+ 
+三、公共对象构造模板
+每条需要 VCPU / guest / regs 的用例，在 Value User Code 中先写：
+static struct vmm_vcpu src;
+static struct vmm_vcpu tgt;
+static struct vmm_vcpu other;
+static struct vmm_guest guest;
+static struct arm_guest_priv guest_priv;
+static struct arm_priv src_priv;
+static struct arm_priv tgt_priv;
+static struct arm_priv other_priv;
+static arch_regs_t regs;
+
+memset(&src, 0, sizeof(src));
+memset(&tgt, 0, sizeof(tgt));
+memset(&other, 0, sizeof(other));
+memset(&guest, 0, sizeof(guest));
+memset(&guest_priv, 0, sizeof(guest_priv));
+memset(&src_priv, 0, sizeof(src_priv));
+memset(&tgt_priv, 0, sizeof(tgt_priv));
+memset(&other_priv, 0, sizeof(other_priv));
+memset(&regs, 0, sizeof(regs));
+
+src.guest = &guest;
+tgt.guest = &guest;
+other.guest = &guest;
+
+guest.arch_priv = &guest_priv;
+guest.name[0] = 'g';
+guest.name[1] = 0;
+
+src.arch_priv = &src_priv;
+tgt.arch_priv = &tgt_priv;
+other.arch_priv = &other_priv;
+
+regs.pc = 0x1000U;
+regs.pstate = 0U;
+
+regs.gpr[0] = 0UL;
+regs.gpr[1] = 0UL;
+regs.gpr[2] = 0UL;
+regs.gpr[3] = 0UL;
+ 
+⸻
+ 
+四、
+psci_affinity_mask
+psci_affinity_mask.001.R.level0
+构造代码
+<<emulate_psci.psci_affinity_mask.affinity_level>> = 0UL;
+期望值
+return = 0xFF00FFFFFF
+注释
+测试目的：验证 affinity level 为 0 时返回完整 MPIDR hardware id mask。 用例类别：边界值测试 预置条件：无。 测试步骤： step1、设置 affinity_level=0。 step2、调用 psci_affinity_mask。 step3、观察返回值。 用例来源：边界值测试 追溯ID：psci_affinity_mask 等价列表：有效 affinity level 下界。 其它说明：按你当前 VectorCAST 实测结果，level 0 返回 0xFF00FFFFFF。 通过准则：返回值等于 0xFF00FFFFFF。
+ 
+⸻
+ 
+psci_affinity_mask.002.R.level4
+构造代码
+<<emulate_psci.psci_affinity_mask.affinity_level>> = 4UL;
+期望值
+return = 0
+注释
+测试目的：验证 affinity level 大于 3 时返回 0。 用例类别：边界值测试 预置条件：无。 测试步骤： step1、设置 affinity_level=4。 step2、调用 psci_affinity_mask。 step3、观察返回值。 用例来源：无效等价类 追溯ID：psci_affinity_mask 等价列表：非法 affinity level。 其它说明：覆盖 affinity_level <= 3 为 false。 通过准则：返回值等于 0。
+ 
+⸻
+ 
+五、
+psci_vcpu_suspend
+psci_vcpu_suspend.001.R
+构造代码
+<<emulate_psci.psci_vcpu_suspend.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_suspend.regs>> = &regs;
+期望值
+return = 0
+注释
+测试目的：验证 PSCI suspend 当前按照 WFI 行为模拟，并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象。 测试步骤： step1、设置有效 vcpu 和 regs。 step2、调用 psci_vcpu_suspend。 step3、观察返回值。 用例来源：需求分析 追溯ID：psci_vcpu_suspend 等价列表：正常 suspend。 其它说明：函数内部等待中断已 stub，返回值固定为 PSCI_RET_SUCCESS。 通过准则：函数返回 0。
+ 
+⸻
+ 
+六、
+psci_vcpu_off
+psci_vcpu_off.001.R.reset_ok
+构造代码
+vcast_psci_vcpu_reset_rc = 0;
+
+<<emulate_psci.psci_vcpu_off.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_off.regs>> = &regs;
+期望值
+return = 0
+注释
+测试目的：验证 VCPU reset 成功时，CPU_OFF 返回 PSCI success。 用例类别：基于需求的测试 预置条件：设置 vmm_manager_vcpu_reset stub 返回 0。 测试步骤： step1、设置 vcast_psci_vcpu_reset_rc=0。 step2、调用 psci_vcpu_off。 step3、观察返回值。 用例来源：需求分析 追溯ID：psci_vcpu_off 等价列表：reset 成功。 其它说明：覆盖 if (vmm_manager_vcpu_reset(vcpu)) 为 false。 通过准则：函数返回 0。
+ 
+⸻
+ 
+psci_vcpu_off.002.FI.reset_fail
+构造代码
+vcast_psci_vcpu_reset_rc = -1;
+
+<<emulate_psci.psci_vcpu_off.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_off.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFA
+注释
+测试目的：验证 VCPU reset 失败时，CPU_OFF 返回 PSCI internal failure。 用例类别：故障注入测试 预置条件：设置 vmm_manager_vcpu_reset stub 返回非 0。 测试步骤： step1、设置 vcast_psci_vcpu_reset_rc=-1。 step2、调用 psci_vcpu_off。 step3、观察返回值。 用例来源：故障注入 追溯ID：psci_vcpu_off 等价列表：reset 失败。 其它说明：函数返回类型为 unsigned long，PSCI_RET_INTERNAL_FAILURE=-6 显示为 0xFFFFFFFFFFFFFFFA。 通过准则：函数返回 0xFFFFFFFFFFFFFFFA。
+ 
+⸻
+ 
+七、
+psci_vcpu_on
+psci_vcpu_on.001.R.success_thumb_be32
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[0] = VMM_VCPU_STATE_RUNNING;
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+/*
+ * source 处于 32-bit + BE：
+ * 覆盖 is_32bit true、is_be true；
+ * 同时避免 emulate_psci_is_be 执行 mrs(sctlr_el1)。
+ */
+regs.pstate = ((u64)PSR_MODE32 | (u64)CPSR_BE_ENABLED);
+
+/*
+ * target 处于 32-bit：
+ * 覆盖 set_be 的 target pstate 分支。
+ */
+tgt.regs.pstate = (u64)PSR_MODE32;
+
+/*
+ * 高 32 bit 非 0，用于覆盖 32-bit cpu_id mask。
+ * mask 后仍为 0x1，与 target mpidr 匹配。
+ */
+regs.gpr[1] = 0xFFFF000000000001UL;
+
+/*
+ * odd target_pc，覆盖 Thumb entry。
+ */
+regs.gpr[2] = 0x8001UL;
+regs.gpr[3] = 0x55AAUL;
+
+vcast_psci_vcpu_kick_rc = 0;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0
+tgt.regs.pc = 0x8000
+tgt.regs.gpr[0] = 0x55AA
+可选期望：
+VCAST_GET_THUMB(tgt.regs) != 0
+VCAST_GET_BE32(tgt.regs) != 0
+注释
+测试目的：验证 CPU_ON 在找到目标 VCPU、目标处于 RESET、source 为 32-bit BE、目标为 32-bit、Thumb entry 且 kick 成功时返回成功。 用例类别：基于需求的测试 预置条件：构造 source 和 target 两个 VCPU；target mpidr 与 cpu_id 低 32 位匹配；target 状态为 RESET。 测试步骤： step1、配置 source 和 target 的 guest、arch private、mpidr。 step2、配置 VCPU 遍历数组包含 source 和 target。 step3、设置 target 状态为 RESET。 step4、设置 source regs 为 PSR_MODE32 | CPSR_BE_ENABLED。 step5、设置 target regs 为 PSR_MODE32。 step6、设置 regs.gpr[1]=0xFFFF000000000001。 step7、设置 regs.gpr[2]=0x8001。 step8、设置 regs.gpr[3]=0x55AA。 step9、设置 vmm_manager_vcpu_kick 返回成功。 step10、调用 psci_vcpu_on。 step11、观察返回值、target PC 和 target r0。 用例来源：需求分析 追溯ID：psci_vcpu_on 等价列表：CPU_ON 成功路径、32-bit mask、Thumb entry、BE32 继承。 其它说明：覆盖 emulate_psci_is_32bit 为 true、cpu_id mask、target 匹配、target RESET、Thumb 设置、BE32 设置、kick 成功。 通过准则：函数返回 0；target PC 为 0x8000；target r0 为 0x55AA。
+ 
+⸻
+ 
+psci_vcpu_on.002.IN.not_found_64bit_cpuid
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+
+vcast_psci_vcpu_count = 1U;
+vcast_psci_vcpus[0] = &src;
+
+/*
+ * source 不设置 PSR_MODE32：
+ * 覆盖 is_32bit false。
+ * 由于之后找不到 target，会提前返回，不会执行 is_be 的 mrs 路径。
+ */
+regs.pstate = 0U;
+regs.gpr[1] = 0xFFFF000000000001UL;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFE
+注释
+测试目的：验证 CPU_ON 在 source 非 32-bit 且找不到匹配目标 CPU 时返回 invalid params。 用例类别：接口测试 预置条件：遍历数组只包含 source，且 source mpidr 不匹配完整 64-bit cpu_id。 测试步骤： step1、配置遍历数组只包含 source。 step2、设置 source mpidr 为 0x0。 step3、设置 source regs 不含 PSR_MODE32。 step4、设置 regs.gpr[1]=0xFFFF000000000001。 step5、调用 psci_vcpu_on。 step6、观察返回值。 用例来源：无效等价类 追溯ID：psci_vcpu_on 等价列表：目标 CPU 不存在、source 非 32-bit。 其它说明：覆盖 emulate_psci_is_32bit 为 false，以及 !vcpu 为 true。 通过准则：函数返回 0xFFFFFFFFFFFFFFFE。
+ 
+⸻
+ 
+psci_vcpu_on.003.IN.target_is_source
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+
+vcast_psci_vcpu_count = 1U;
+vcast_psci_vcpus[0] = &src;
+
+regs.pstate = (u64)PSR_MODE32;
+regs.gpr[1] = 0x0UL;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFE
+注释
+测试目的：验证 CPU_ON 请求启动 source 自身时返回 invalid params。 用例类别：接口测试 预置条件：source 的 mpidr 与 cpu_id 匹配。 测试步骤： step1、配置遍历数组只包含 source。 step2、设置 source mpidr 为 0x0。 step3、设置 source regs 为 32-bit。 step4、设置 regs.gpr[1]=0x0。 step5、调用 psci_vcpu_on。 step6、观察返回值。 用例来源：无效等价类 追溯ID：psci_vcpu_on 等价列表：目标为调用者自身。 其它说明：覆盖 vcpu == source_vcpu 为 true 的路径。 通过准则：函数返回 0xFFFFFFFFFFFFFFFE。
+ 
+⸻
+ 
+psci_vcpu_on.004.IN.already_on_v02
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RUNNING;
+
+regs.pstate = (u64)PSR_MODE32;
+regs.gpr[1] = 0x1UL;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFC
+注释
+测试目的：验证 PSCI v0.2 下目标 VCPU 非 RESET 时返回 already on。 用例类别：接口测试 预置条件：目标 VCPU 存在但状态不是 RESET；PSCI version 为 2。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 与 cpu_id 匹配。 step3、设置 target 状态为 RUNNING。 step4、设置 guest_priv.psci_version=2。 step5、调用 psci_vcpu_on。 step6、观察返回值。 用例来源：无效等价类 追溯ID：psci_vcpu_on 等价列表：目标已启动，PSCI v0.2。 其它说明：覆盖状态非 RESET 且 version 不等于 1 的路径。 通过准则：函数返回 0xFFFFFFFFFFFFFFFC。
+ 
+⸻
+ 
+psci_vcpu_on.005.IN.already_on_v01
+构造代码
+guest_priv.psci_version = 1U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RUNNING;
+
+regs.pstate = (u64)PSR_MODE32;
+regs.gpr[1] = 0x1UL;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFE
+注释
+测试目的：验证 PSCI v0.1 下目标 VCPU 非 RESET 时返回 invalid params。 用例类别：接口测试 预置条件：目标 VCPU 存在但状态不是 RESET；PSCI version 为 1。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 与 cpu_id 匹配。 step3、设置 target 状态为 RUNNING。 step4、设置 guest_priv.psci_version=1。 step5、调用 psci_vcpu_on。 step6、观察返回值。 用例来源：无效等价类 追溯ID：psci_vcpu_on 等价列表：目标已启动，PSCI v0.1。 其它说明：覆盖状态非 RESET 且 version 等于 1 的路径。 通过准则：函数返回 0xFFFFFFFFFFFFFFFE。
+ 
+⸻
+ 
+psci_vcpu_on.006.FI.kick_fail_no_be
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+/*
+ * source 32-bit，但非 BE：
+ * 覆盖 emulate_psci_is_be 的 32-bit false 分支。
+ */
+regs.pstate = (u64)PSR_MODE32;
+
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0x8000UL;
+regs.gpr[3] = 0x1234UL;
+
+vcast_psci_vcpu_kick_rc = -1;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFA
+注释
+测试目的：通过故障注入验证 CPU_ON 在 target kick 失败时返回 internal failure，并覆盖 BE 判断为 false 的路径。 用例类别：故障注入测试 预置条件：目标 VCPU 存在且处于 RESET；source 为 32-bit 非 BE；kick 返回失败。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 与 cpu_id 匹配。 step3、设置 target 状态为 RESET。 step4、设置 source regs 为 PSR_MODE32。 step5、设置 target PC 为 0x8000。 step6、设置 context id 为 0x1234。 step7、设置 vcast_psci_vcpu_kick_rc=-1。 step8、调用 psci_vcpu_on。 step9、观察返回值。 用例来源：故障注入 追溯ID：psci_vcpu_on 等价列表：kick 失败、BE false。 其它说明：覆盖 emulate_psci_is_be 在 32-bit 模式下返回 false，以及 vmm_manager_vcpu_kick 失败路径。 通过准则：函数返回 0xFFFFFFFFFFFFFFFA。
+ 
+⸻
+ 
+psci_vcpu_on.007.R.success_be64_target
+构造代码
+guest_priv.psci_version = 2U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+/*
+ * source 32-bit + BE，避免 is_be 走 mrs。
+ */
+regs.pstate = ((u64)PSR_MODE32 | (u64)CPSR_BE_ENABLED);
+
+/*
+ * target 非 32-bit：
+ * 覆盖 emulate_psci_set_be 的 sctlr_el1 分支。
+ */
+tgt.regs.pstate = 0U;
+tgt_priv.sysregs.sctlr_el1 = 0U;
+
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0x8000UL;
+regs.gpr[3] = 0x1234UL;
+
+vcast_psci_vcpu_kick_rc = 0;
+
+<<emulate_psci.psci_vcpu_on.source_vcpu>> = &src;
+<<emulate_psci.psci_vcpu_on.regs>> = &regs;
+期望值
+return = 0
+tgt.regs.pc = 0x8000
+tgt.regs.gpr[0] = 0x1234
+可选期望：
+VCAST_GET_BE64(tgt_priv) != 0
+注释
+测试目的：验证 CPU_ON 在 source 为 32-bit BE、target 为非 32-bit 时，能够通过 emulate_psci_set_be 设置 target 的 sctlr_el1 EE 位。 用例类别：基于需求的测试 预置条件：source regs 设置为 32-bit BE；target regs 不设置 PSR_MODE32；target VCPU 处于 RESET。 测试步骤： step1、配置 source 和 target 的 guest、arch private、mpidr。 step2、配置 VCPU 遍历数组包含 source 和 target。 step3、设置 source regs 为 PSR_MODE32 | CPSR_BE_ENABLED。 step4、设置 target regs 非 32-bit。 step5、设置 CPU_ON 参数和 kick 成功。 step6、调用 psci_vcpu_on。 step7、观察返回值、target PC、target r0 和 target sctlr_el1。 用例来源：需求分析 追溯ID：psci_vcpu_on 等价列表：CPU_ON 成功路径，target 64-bit BE 设置。 其它说明：覆盖 emulate_psci_set_be 中 regs->pstate & PSR_MODE32 为 false 的路径。 通过准则：函数返回 0；target PC 为 0x8000；target r0 为 0x1234。
+ 
+⸻
+ 
+八、
+psci_vcpu_affinity_info
+psci_vcpu_affinity_info.001.IN.level_invalid
+构造代码
+regs.gpr[1] = 0x0UL;
+regs.gpr[2] = 4UL;
+
+<<emulate_psci.psci_vcpu_affinity_info.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_affinity_info.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFE
+注释
+测试目的：验证 affinity level 非法时返回 invalid params。 用例类别：边界值测试 预置条件：设置 lowest affinity level 为 4。 测试步骤： step1、设置 regs.gpr[1]=0。 step2、设置 regs.gpr[2]=4。 step3、调用 psci_vcpu_affinity_info。 step4、观察返回值。 用例来源：无效等价类 追溯ID：psci_vcpu_affinity_info 等价列表：非法 affinity level。 其它说明：函数返回类型为 unsigned long，PSCI_RET_INVALID_PARAMS=-2 显示为 0xFFFFFFFFFFFFFFFE。 通过准则：函数返回 0xFFFFFFFFFFFFFFFE。
+ 
+⸻
+ 
+psci_vcpu_affinity_info.002.R.on
+构造代码
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[0] = VMM_VCPU_STATE_RESET;
+vcast_psci_state[1] = VMM_VCPU_STATE_RUNNING;
+
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0UL;
+
+<<emulate_psci.psci_vcpu_affinity_info.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_affinity_info.regs>> = &regs;
+期望值
+return = 0
+注释
+测试目的：验证存在匹配 affinity 且状态 interruptible 的 VCPU 时返回 ON。 用例类别：基于需求的测试 预置条件：构造 target VCPU，mpidr 与 target affinity 匹配，状态为 RUNNING。 测试步骤： step1、配置遍历数组包含 source 和 target。 step2、设置 target mpidr 为 0x1。 step3、设置 target 状态为 VMM_VCPU_STATE_RUNNING。 step4、设置 regs.gpr[1]=0x1。 step5、设置 regs.gpr[2]=0。 step6、调用 psci_vcpu_affinity_info。 step7、观察返回值。 用例来源：需求分析 追溯ID：psci_vcpu_affinity_info 等价列表：affinity level ON。 其它说明：覆盖 mpidr 匹配且状态包含 VMM_VCPU_STATE_INTERRUPTIBLE 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+psci_vcpu_affinity_info.003.R.off_state_not_interruptible
+构造代码
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0UL;
+
+<<emulate_psci.psci_vcpu_affinity_info.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_affinity_info.regs>> = &regs;
+期望值
+return = 1
+注释
+测试目的：验证匹配 affinity 的 VCPU 状态不 interruptible 时返回 OFF。 用例类别：基于需求的测试 预置条件：target mpidr 匹配，但 target 状态为 RESET。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 为 0x1。 step3、设置 target 状态为 RESET。 step4、设置 target affinity 为 0x1。 step5、调用 psci_vcpu_affinity_info。 step6、观察返回值。 用例来源：需求分析 追溯ID：psci_vcpu_affinity_info 等价列表：匹配但 OFF。 其它说明：覆盖 mpidr 匹配为 true，但 interruptible 条件为 false 的路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+psci_vcpu_affinity_info.004.R.off_no_match
+构造代码
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x2UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RUNNING;
+
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0UL;
+
+<<emulate_psci.psci_vcpu_affinity_info.vcpu>> = &src;
+<<emulate_psci.psci_vcpu_affinity_info.regs>> = &regs;
+期望值
+return = 1
+注释
+测试目的：验证没有 VCPU 匹配 target affinity 时返回 OFF。 用例类别：基于需求的测试 预置条件：target 状态为 RUNNING，但 target mpidr 与 target affinity 不匹配。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 为 0x2。 step3、设置 target 状态为 RUNNING。 step4、设置 target affinity 为 0x1。 step5、调用 psci_vcpu_affinity_info。 step6、观察返回值。 用例来源：需求分析 追溯ID：psci_vcpu_affinity_info 等价列表：affinity 不匹配。 其它说明：覆盖 mpidr 匹配条件为 false 的路径。 通过准则：函数返回 1。
+ 
+⸻
+ 
+九、
+psci_system_off
+psci_system_off.001.R.ok
+构造代码
+vcast_psci_guest_shutdown_rc = 0;
+
+<<emulate_psci.psci_system_off.vcpu>> = &src;
+<<emulate_psci.psci_system_off.regs>> = &regs;
+期望值
+无返回值
+注释
+测试目的：验证 SYSTEM_OFF 请求成功时函数正常返回。 用例类别：基于需求的测试 预置条件：设置 vmm_manager_guest_shutdown_request 返回 0。 测试步骤： step1、设置 vcast_psci_guest_shutdown_rc=0。 step2、调用 psci_system_off。 step3、确认函数正常返回。 用例来源：需求分析 追溯ID：psci_system_off 等价列表：shutdown 请求成功。 其它说明：覆盖 if (rc) 为 false。 通过准则：函数无异常返回。
+ 
+⸻
+ 
+psci_system_off.002.FI.fail
+构造代码
+vcast_psci_guest_shutdown_rc = -1;
+
+<<emulate_psci.psci_system_off.vcpu>> = &src;
+<<emulate_psci.psci_system_off.regs>> = &regs;
+期望值
+无返回值
+注释
+测试目的：验证 SYSTEM_OFF 请求失败时进入错误打印分支。 用例类别：故障注入测试 预置条件：设置 vmm_manager_guest_shutdown_request 返回非 0，并保证 vcpu->guest 有效。 测试步骤： step1、设置 vcast_psci_guest_shutdown_rc=-1。 step2、调用 psci_system_off。 step3、确认函数正常返回。 用例来源：故障注入 追溯ID：psci_system_off 等价列表：shutdown 请求失败。 其它说明：覆盖 if (rc) 为 true。 通过准则：函数无异常返回。
+ 
+⸻
+ 
+十、
+psci_system_reset
+psci_system_reset.001.R.ok
+构造代码
+vcast_psci_guest_reboot_rc = 0;
+
+<<emulate_psci.psci_system_reset.vcpu>> = &src;
+<<emulate_psci.psci_system_reset.regs>> = &regs;
+期望值
+无返回值
+注释
+测试目的：验证 SYSTEM_RESET 请求成功时函数正常返回。 用例类别：基于需求的测试 预置条件：设置 vmm_manager_guest_reboot_request 返回 0。 测试步骤： step1、设置 vcast_psci_guest_reboot_rc=0。 step2、调用 psci_system_reset。 step3、确认函数正常返回。 用例来源：需求分析 追溯ID：psci_system_reset 等价列表：reboot 请求成功。 其它说明：覆盖 if (rc) 为 false。 通过准则：函数无异常返回。
+ 
+⸻
+ 
+psci_system_reset.002.FI.fail
+构造代码
+vcast_psci_guest_reboot_rc = -1;
+
+<<emulate_psci.psci_system_reset.vcpu>> = &src;
+<<emulate_psci.psci_system_reset.regs>> = &regs;
+期望值
+无返回值
+注释
+测试目的：验证 SYSTEM_RESET 请求失败时进入错误打印分支。 用例类别：故障注入测试 预置条件：设置 vmm_manager_guest_reboot_request 返回非 0，并保证 vcpu->guest 有效。 测试步骤： step1、设置 vcast_psci_guest_reboot_rc=-1。 step2、调用 psci_system_reset。 step3、确认函数正常返回。 用例来源：故障注入 追溯ID：psci_system_reset 等价列表：reboot 请求失败。 其它说明：覆盖 if (rc) 为 true。 通过准则：函数无异常返回。
+ 
+⸻
+ 
+十一、
+do_psci_1_0_features
+每条用例只需要设置入参：
+<<emulate_psci.do_psci_1_0_features.psci_func_id>> = 当前值;
+用例列表
+用例	psci_func_id	期望 return
+001	0x84000000	0
+002	0x84000001	0
+003	0xC4000001	0
+004	0x84000002	0
+005	0x84000003	0
+006	0xC4000003	0
+007	0x84000004	0
+008	0xC4000004	0
+009	0x84000006	0
+010	0x84000008	0
+011	0x84000009	0
+012	0x8400000A	0
+013	0x8400000E	0
+014	0xC400000E	0
+015	0x80000000	0xFFFFFFFFFFFFFFFF
+016	0xDEADBEEF	0xFFFFFFFFFFFFFFFF
+注释模板
+测试目的：验证 do_psci_1_0_features 对当前 function id 返回正确 feature 查询结果。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置 psci_func_id 为当前用例指定值。 step2、调用 do_psci_1_0_features。 step3、观察返回值。 用例来源：switch case 覆盖 追溯ID：do_psci_1_0_features 等价列表：PSCI feature 支持项或不支持项。 其它说明：支持项返回 0；ARM_SMCCC_VERSION_FID 和 default 返回 PSCI_RET_NOT_SUPPORTED，由于返回类型为 unsigned long，显示为 0xFFFFFFFFFFFFFFFF。 通过准则：返回值等于当前用例期望值。
+ 
+⸻
+ 
+十二、
+psci_system_suspend
+psci_system_suspend.001.IN.denied
+构造代码
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[0] = VMM_VCPU_STATE_RUNNING;
+vcast_psci_state[1] = VMM_VCPU_STATE_RUNNING;
+
+regs.gpr[1] = 0x9000UL;
+regs.gpr[2] = 0xABCDUL;
+
+<<emulate_psci.psci_system_suspend.vcpu>> = &src;
+<<emulate_psci.psci_system_suspend.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFD
+注释
+测试目的：验证 system suspend 时，如果存在非当前 VCPU 且状态不是 RESET，则返回 DENIED。 用例类别：接口测试 预置条件：遍历数组包含当前 VCPU 和另一个 RUNNING VCPU。 测试步骤： step1、配置 source 和 target。 step2、设置 target 状态为 RUNNING。 step3、设置 regs.gpr[1]=0x9000。 step4、设置 regs.gpr[2]=0xABCD。 step5、调用 psci_system_suspend。 step6、观察返回值。 用例来源：无效等价类 追溯ID：psci_system_suspend 等价列表：其他 VCPU 未关机。 其它说明：覆盖 tmp == vcpu 的 continue 路径，以及其他 VCPU 非 RESET 返回 DENIED 路径。 通过准则：函数返回 0xFFFFFFFFFFFFFFFD。
+ 
+⸻
+ 
+psci_system_suspend.002.R.all_reset_no_error
+构造代码
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[0] = VMM_VCPU_STATE_RUNNING;
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+regs.gpr[1] = 0x9000UL;
+regs.gpr[2] = 0xABCDUL;
+
+vcast_psci_guest_suspend_rc = 0;
+vcast_psci_vcpu_reset_rc = 0;
+
+<<emulate_psci.psci_system_suspend.vcpu>> = &src;
+<<emulate_psci.psci_system_suspend.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFA
+src.resume_pc = 0x9000
+src.resume_id = 0xABCD
+注释
+测试目的：验证 system suspend 在所有其他 VCPU 均为 RESET 时，记录 resume 信息，并执行 guest suspend 和 boot cpu reset 流程。 用例类别：基于需求的测试 预置条件：遍历数组中除当前 VCPU 外的 VCPU 状态均为 RESET；suspend 和 reset 请求均成功。 测试步骤： step1、配置 source 和 target。 step2、设置 target 状态为 RESET。 step3、设置 regs.gpr[1]=0x9000。 step4、设置 regs.gpr[2]=0xABCD。 step5、设置 guest suspend 返回 0。 step6、设置 vcpu reset 返回 0。 step7、调用 psci_system_suspend。 step8、观察返回值、resume_pc 和 resume_id。 用例来源：需求分析 追溯ID：psci_system_suspend 等价列表：system suspend 主流程。 其它说明：该函数当前实现最终固定返回 internal failure。 通过准则：函数返回 0xFFFFFFFFFFFFFFFA；resume_pc=0x9000；resume_id=0xABCD。
+ 
+⸻
+ 
+psci_system_suspend.003.FI.request_and_reset_fail
+构造代码
+vcast_psci_vcpu_count = 1U;
+vcast_psci_vcpus[0] = &src;
+
+vcast_psci_state[0] = VMM_VCPU_STATE_RUNNING;
+
+regs.gpr[1] = 0x9000UL;
+regs.gpr[2] = 0xABCDUL;
+
+vcast_psci_guest_suspend_rc = -1;
+vcast_psci_vcpu_reset_rc = -1;
+
+<<emulate_psci.psci_system_suspend.vcpu>> = &src;
+<<emulate_psci.psci_system_suspend.regs>> = &regs;
+期望值
+return = 0xFFFFFFFFFFFFFFFA
+注释
+测试目的：验证 system suspend 在 guest suspend 请求失败和 boot cpu reset 失败时进入两个错误打印分支，并最终返回 internal failure。 用例类别：故障注入测试 预置条件：遍历数组只包含当前 VCPU；设置 guest suspend 和 vcpu reset 均返回非 0。 测试步骤： step1、配置遍历数组只包含 source。 step2、设置 regs.gpr[1]=0x9000。 step3、设置 regs.gpr[2]=0xABCD。 step4、设置 guest suspend 返回失败。 step5、设置 vcpu reset 返回失败。 step6、调用 psci_system_suspend。 step7、观察返回值。 用例来源：故障注入 追溯ID：psci_system_suspend 等价列表：suspend request 失败、reset 失败。 其它说明：覆盖两个 if (rc) 错误分支。 通过准则：函数返回 0xFFFFFFFFFFFFFFFA。
+ 
+⸻
+ 
+十三、
+emulate_psci_0_1_call
+emulate_psci_0_1_call.001.R.cpu_off
+构造代码
+regs.gpr[0] = 0x95C1BA5FUL;
+
+vcast_psci_vcpu_reset_rc = 0;
+
+<<emulate_psci.emulate_psci_0_1_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_1_call.regs>> = &regs;
+期望值
+return = 0
+regs.gpr[0] = 0
+注释
+测试目的：验证 PSCI v0.1 CPU_OFF 分支返回成功并写回 r0。 用例类别：接口测试 预置条件：设置 r0 为 0x95C1BA5F；设置 reset 成功。 测试步骤： step1、设置 regs.gpr[0]=0x95C1BA5F。 step2、设置 vcast_psci_vcpu_reset_rc=0。 step3、调用 emulate_psci_0_1_call。 step4、观察返回值和 regs.gpr[0]。 用例来源：switch case 覆盖 追溯ID：emulate_psci_0_1_call 等价列表：PSCI v0.1 CPU_OFF。 其它说明：覆盖 CPU_OFF case。 通过准则：函数返回 0；regs.gpr[0]=0。
+ 
+⸻
+ 
+emulate_psci_0_1_call.002.R.cpu_on
+构造代码
+guest_priv.psci_version = 1U;
+
+VCAST_SET_MPIDR(src_priv, 0x0UL);
+VCAST_SET_MPIDR(tgt_priv, 0x1UL);
+
+vcast_psci_vcpu_count = 2U;
+vcast_psci_vcpus[0] = &src;
+vcast_psci_vcpus[1] = &tgt;
+
+vcast_psci_state[1] = VMM_VCPU_STATE_RESET;
+
+regs.pstate = (u64)PSR_MODE32;
+
+regs.gpr[0] = 0x95C1BA60UL;
+regs.gpr[1] = 0x1UL;
+regs.gpr[2] = 0x8000UL;
+regs.gpr[3] = 0x1234UL;
+
+vcast_psci_vcpu_kick_rc = 0;
+
+<<emulate_psci.emulate_psci_0_1_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_1_call.regs>> = &regs;
+期望值
+return = 0
+regs.gpr[0] = 0
+注释
+测试目的：验证 PSCI v0.1 CPU_ON 分支调用 CPU_ON 逻辑并写回成功返回值。 用例类别：接口测试 预置条件：目标 VCPU 存在且处于 RESET；kick 成功。 测试步骤： step1、配置 source 和 target。 step2、设置 target mpidr 与 cpu_id 匹配。 step3、设置 target 状态为 RESET。 step4、设置 regs.gpr[0]=0x95C1BA60。 step5、设置 CPU_ON 参数。 step6、调用 emulate_psci_0_1_call。 step7、观察返回值和 regs.gpr[0]。 用例来源：switch case 覆盖 追溯ID：emulate_psci_0_1_call 等价列表：PSCI v0.1 CPU_ON。 其它说明：覆盖 CPU_ON case。 通过准则：函数返回 0；regs.gpr[0]=0。
+ 
+⸻
+ 
+emulate_psci_0_1_call.003.R.cpu_suspend
+构造代码
+regs.gpr[0] = 0x95C1BA5EUL;
+
+<<emulate_psci.emulate_psci_0_1_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_1_call.regs>> = &regs;
+期望值
+return = 0
+regs.gpr[0] = 0xFFFFFFFFFFFFFFFF
+注释
+测试目的：验证 PSCI v0.1 CPU_SUSPEND 当前返回 NOT_SUPPORTED。 用例类别：接口测试 预置条件：设置 r0 为 CPU_SUSPEND function id。 测试步骤： step1、设置 regs.gpr[0]=0x95C1BA5E。 step2、调用 emulate_psci_0_1_call。 step3、观察返回值和 regs.gpr[0]。 用例来源：switch case 覆盖 追溯ID：emulate_psci_0_1_call 等价列表：PSCI v0.1 CPU_SUSPEND。 其它说明：PSCI_RET_NOT_SUPPORTED=-1，通过 64-bit 写寄存器后表现为 0xFFFFFFFFFFFFFFFF。 通过准则：函数返回 0；regs.gpr[0]=0xFFFFFFFFFFFFFFFF。
+ 
+⸻
+ 
+emulate_psci_0_1_call.004.R.migrate
+构造代码
+regs.gpr[0] = 0x95C1BA61UL;
+
+<<emulate_psci.emulate_psci_0_1_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_1_call.regs>> = &regs;
+期望值
+return = 0
+regs.gpr[0] = 0xFFFFFFFFFFFFFFFF
+注释
+测试目的：验证 PSCI v0.1 MIGRATE 当前返回 NOT_SUPPORTED。 用例类别：接口测试 预置条件：设置 r0 为 MIGRATE function id。 测试步骤： step1、设置 regs.gpr[0]=0x95C1BA61。 step2、调用 emulate_psci_0_1_call。 step3、观察返回值和 regs.gpr[0]。 用例来源：switch case 覆盖 追溯ID：emulate_psci_0_1_call 等价列表：PSCI v0.1 MIGRATE。 其它说明：覆盖 MIGRATE case。 通过准则：函数返回 0；regs.gpr[0]=0xFFFFFFFFFFFFFFFF。
+ 
+⸻
+ 
+emulate_psci_0_1_call.005.IN.default
+构造代码
+regs.gpr[0] = 0x12345678UL;
+
+<<emulate_psci.emulate_psci_0_1_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_1_call.regs>> = &regs;
+期望值
+return = -5
+注释
+测试目的：验证 PSCI v0.1 遇到未知 function id 时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：设置 r0 为未知 function id。 测试步骤： step1、设置 regs.gpr[0]=0x12345678。 step2、调用 emulate_psci_0_1_call。 step3、观察返回值。 用例来源：无效等价类 追溯ID：emulate_psci_0_1_call 等价列表：未知 PSCI v0.1 function id。 其它说明：覆盖 default 分支。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+十四、
+emulate_psci_0_2_call
+以下所有用例使用：
+<<emulate_psci.emulate_psci_0_2_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_0_2_call.regs>> = &regs;
+用例表
+用例	regs.gpr[0]	额外构造	期望 return	期望 regs.gpr[0]
+001	0x84000000	无	0	0x00010000
+002	0x84000001	无	0	0
+003	0xC4000001	无	0	0
+004	0x84000002	vcast_psci_vcpu_reset_rc=0	0	0
+005	0x84000003	CPU_ON 成功构造	0	0
+006	0xC4000003	CPU_ON 成功构造	0	0
+007	0x84000004	affinity ON 构造	0	0
+008	0xC4000004	affinity OFF 构造	0	1
+009	0x84000005	无	0	0xFFFFFFFFFFFFFFFF
+010	0xC4000005	无	0	0xFFFFFFFFFFFFFFFF
+011	0x84000006	无	0	2
+012	0x84000007	无	0	0xFFFFFFFFFFFFFFFF
+013	0xC4000007	无	0	0xFFFFFFFFFFFFFFFF
+014	0x84000008	vcast_psci_guest_shutdown_rc=0	0	0xFFFFFFFFFFFFFFFA
+015	0x84000009	vcast_psci_guest_reboot_rc=0	0	0xFFFFFFFFFFFFFFFA
+016	0x8400000A	regs.gpr[1]=0x84000003	0	0
+017	0x8400000A	regs.gpr[1]=0x80000000	0	0xFFFFFFFFFFFFFFFF
+018	0x8400000E	system_suspend all reset	0	0xFFFFFFFFFFFFFFFA
+019	0xC400000E	system_suspend denied	0	0xFFFFFFFFFFFFFFFD
+020	0xDEADBEEF	无	-5	不检查
+注释模板
+测试目的：验证 PSCI v0.2/v1.0 分派函数对当前 function id 的处理结果。 用例类别：接口测试 预置条件：设置 regs.gpr[0] 为当前 function id，并按当前分支需要配置 VCPU、寄存器参数或 stub 返回值。 测试步骤： step1、设置 regs.gpr[0] 为当前 function id。 step2、根据当前 function id 设置必要的 regs.gpr[1]、regs.gpr[2]、regs.gpr[3] 或 VCPU 遍历数组。 step3、调用 emulate_psci_0_2_call。 step4、观察函数返回值和 regs.gpr[0]。 用例来源：switch case 覆盖 追溯ID：emulate_psci_0_2_call 等价列表：PSCI v0.2/v1.0 function id 分派。 其它说明：default 分支直接返回 VMM_EINVALID=-5，不会设置 r0；负 PSCI 返回值通过 64-bit 寄存器写回。 通过准则：返回值和 regs.gpr[0] 等于当前用例期望值。
+ 
+⸻
+ 
+十五、
+emulate_psci_call
+emulate_psci_call.001.IN.vcpu_null
+构造代码
+<<emulate_psci.emulate_psci_call.vcpu>> = 0;
+<<emulate_psci.emulate_psci_call.regs>> = &regs;
+<<emulate_psci.emulate_psci_call.is_smc>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 public PSCI 入口在 vcpu 为空时返回 invalid。 用例类别：接口测试 预置条件：设置 vcpu=NULL。 测试步骤： step1、设置 vcpu 为空。 step2、设置 regs 有效。 step3、调用 emulate_psci_call。 step4、观察返回值。 用例来源：无效等价类 追溯ID：emulate_psci_call 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu || !regs) 中 !vcpu 为 true。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+emulate_psci_call.002.IN.regs_null
+构造代码
+<<emulate_psci.emulate_psci_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_call.regs>> = 0;
+<<emulate_psci.emulate_psci_call.is_smc>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 public PSCI 入口在 regs 为空时返回 invalid。 用例类别：接口测试 预置条件：设置 vcpu 有效，regs=NULL。 测试步骤： step1、设置 vcpu 有效。 step2、设置 regs 为空。 step3、调用 emulate_psci_call。 step4、观察返回值。 用例来源：无效等价类 追溯ID：emulate_psci_call 等价列表：空寄存器指针。 其它说明：覆盖 if (!vcpu || !regs) 中 !regs 为 true。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+emulate_psci_call.003.R.version1
+构造代码
+guest_priv.psci_version = 1U;
+
+regs.gpr[0] = 0x95C1BA5EUL;
+
+<<emulate_psci.emulate_psci_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_call.regs>> = &regs;
+<<emulate_psci.emulate_psci_call.is_smc>> = 0;
+期望值
+return = 0
+regs.gpr[0] = 0xFFFFFFFFFFFFFFFF
+注释
+测试目的：验证 public PSCI 入口在 PSCI version 为 1 时分派到 v0.1 handler。 用例类别：基于需求的测试 预置条件：设置 guest private 的 PSCI version 为 1；设置 v0.1 function id 为 CPU_SUSPEND。 测试步骤： step1、设置 guest_priv.psci_version=1。 step2、设置 regs.gpr[0]=0x95C1BA5E。 step3、调用 emulate_psci_call。 step4、观察返回值和 regs.gpr[0]。 用例来源：需求分析 追溯ID：emulate_psci_call 等价列表：PSCI v0.1 分派。 其它说明：覆盖 case 1。 通过准则：函数返回 0；regs.gpr[0]=0xFFFFFFFFFFFFFFFF。
+ 
+⸻
+ 
+emulate_psci_call.004.R.version2
+构造代码
+guest_priv.psci_version = 2U;
+
+regs.gpr[0] = 0x84000000UL;
+
+<<emulate_psci.emulate_psci_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_call.regs>> = &regs;
+<<emulate_psci.emulate_psci_call.is_smc>> = 1;
+期望值
+return = 0
+regs.gpr[0] = 0x00010000
+注释
+测试目的：验证 public PSCI 入口在 PSCI version 为 2 时分派到 v0.2 handler。 用例类别：基于需求的测试 预置条件：设置 guest private 的 PSCI version 为 2；设置 v0.2 function id 为 PSCI_VERSION。 测试步骤： step1、设置 guest_priv.psci_version=2。 step2、设置 regs.gpr[0]=0x84000000。 step3、调用 emulate_psci_call。 step4、观察返回值和 regs.gpr[0]。 用例来源：需求分析 追溯ID：emulate_psci_call 等价列表：PSCI v0.2 分派。 其它说明：覆盖 case 2；is_smc 入参当前未使用，但本用例传入 true。 通过准则：函数返回 0；regs.gpr[0]=0x00010000。
+ 
+⸻
+ 
+emulate_psci_call.005.IN.version_invalid
+构造代码
+guest_priv.psci_version = 3U;
+
+<<emulate_psci.emulate_psci_call.vcpu>> = &src;
+<<emulate_psci.emulate_psci_call.regs>> = &regs;
+<<emulate_psci.emulate_psci_call.is_smc>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 public PSCI 入口在 PSCI version 非 1/2 时返回 invalid。 用例类别：接口测试 预置条件：设置 guest private 的 PSCI version 为 3。 测试步骤： step1、设置 guest_priv.psci_version=3。 step2、调用 emulate_psci_call。 step3、观察返回值。 用例来源：无效等价类 追溯ID：emulate_psci_call 等价列表：不支持的 PSCI version。 其它说明：覆盖 switch default 路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+十六、负值期望说明
+本文件中有两种返回方式：
+1. 函数直接返回 
+unsigned long
+例如：
+psci_vcpu_off
+psci_vcpu_on
+psci_vcpu_affinity_info
+do_psci_1_0_features
+psci_system_suspend
+负 PSCI 返回值按 64-bit unsigned 显示：
+-1 -> 0xFFFFFFFFFFFFFFFF
+-2 -> 0xFFFFFFFFFFFFFFFE
+-3 -> 0xFFFFFFFFFFFFFFFD
+-4 -> 0xFFFFFFFFFFFFFFFC
+-6 -> 0xFFFFFFFFFFFFFFFA
+2. 
+emulate_psci_0_1_call
+/ 
+emulate_psci_0_2_call
+写回 
+regs.gpr[0]
+64 位 helper 中：
+emulate_psci_set_reg(..., (u64)val)
+所以负 PSCI 返回值写到 regs.gpr[0] 后同样是 64-bit 形式：
+PSCI_RET_NOT_SUPPORTED    -> 0xFFFFFFFFFFFFFFFF
+PSCI_RET_DENIED           -> 0xFFFFFFFFFFFFFFFD
+PSCI_RET_INTERNAL_FAILURE -> 0xFFFFFFFFFFFFFFFA
+emulate_psci_call 自身返回 int，所以：
+VMM_OK       -> 0
+VMM_EINVALID -> -5
+不变。
