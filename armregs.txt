@@ -1,0 +1,767 @@
+下面先给 第 1 批：arm_sysregs.c 的 User Code / Stub 方案，以及下面 3 个函数的用例：
+board_id
+vexpress_cfgctrl_read
+vexpress_cfgctrl_write
+后续再继续：
+arm_sysregs_reg_read
+arm_sysregs_reg_write
+arm_sysregs_emulator_read8/read16/read32
+arm_sysregs_emulator_write8/write16/write32
+arm_sysregs_emulator_reset
+arm_sysregs_irq_handle
+arm_sysregs_emulator_probe/remove
+arm_sysregs_emulator_init/exit
+ 
+⸻
+ 
+一、User Code / Stub 方案
+1. Test Case Header User Code
+改写目的： 让每条用例的 Begin User Code 中可以使用 memset。
+#include <string.h>
+ 
+⸻
+ 
+2. User Global / Data
+改写目的： 为外部副作用函数和时间函数提供可控返回值；只定义简单变量，不定义新的辅助函数，减少额外测试负担。
+unsigned long long vcast_sysregs_timestamp;
+
+int vcast_sysregs_shutdown_rc;
+int vcast_sysregs_reboot_rc;
+int vcast_sysregs_irq_rc;
+
+unsigned int vcast_sysregs_last_irq;
+unsigned int vcast_sysregs_last_irq_level;
+unsigned int vcast_sysregs_last_irq_arg;
+ 
+⸻
+ 
+3. Stub：
+vmm_timer_timestamp
+改写目的： arm_sysregs_reg_read 和 arm_sysregs_emulator_reset 依赖时间戳。单元测试中需要固定时间，避免非确定性结果。
+return vcast_sysregs_timestamp;
+ 
+⸻
+ 
+4. Stub：
+vmm_manager_guest_shutdown_request
+改写目的： 隔离真实 guest shutdown 副作用。
+return vcast_sysregs_shutdown_rc;
+ 
+⸻
+ 
+5. Stub：
+vmm_manager_guest_reboot_request
+改写目的： 隔离真实 guest reboot 副作用。
+return vcast_sysregs_reboot_rc;
+ 
+⸻
+ 
+6. Stub：
+vmm_devemu_emulate_irq
+改写目的： arm_sysregs_reg_write 的 PB926 CLCD 分支会触发虚拟中断。这里记录入参并返回可控值，避免真实设备模拟副作用。
+如果你的 stub 参数名是 guest, irq, level，写：
+vcast_sysregs_last_irq = irq;
+vcast_sysregs_last_irq_level = level;
+vcast_sysregs_last_irq_arg = 0U;
+
+return vcast_sysregs_irq_rc;
+如果 VectorCAST 生成的参数名不同，按实际参数名替换即可。
+ 
+⸻
+ 
+7. Stub：
+vmm_printf
+改写目的： 避免错误路径中的打印格式化副作用，使未实现路径可稳定运行。
+return 0;
+ 
+⸻
+ 
+8. Lock 函数处理
+如果 VectorCAST 对下面函数生成 stub，建议设为空实现：
+vmm_read_lock
+vmm_read_unlock
+vmm_write_lock
+vmm_write_unlock
+改写目的： 被测逻辑不依赖锁的运行效果，单元测试中避免真实锁实现带来的环境依赖。
+示例：
+return;
+如果这些是宏或 inline，且当前编译运行无问题，可以不处理。
+ 
+⸻
+ 
+9. Test Case Init 默认值
+每条测试用例默认初始化：
+vcast_sysregs_timestamp = 0ULL;
+
+vcast_sysregs_shutdown_rc = 0;
+vcast_sysregs_reboot_rc = 0;
+vcast_sysregs_irq_rc = 0;
+
+vcast_sysregs_last_irq = 0U;
+vcast_sysregs_last_irq_level = 0U;
+vcast_sysregs_last_irq_arg = 0U;
+ 
+⸻
+ 
+二、公共对象构造模板
+涉及 struct arm_sysregs 的用例，在 Test Case User Code -> Begin 中先写：
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+s.guest = &guest;
+涉及 vexpress_cfgctrl_read/write 的用例，需要额外准备 daughterboard 数组：
+static unsigned int db_voltage[4];
+static unsigned int db_clock[4];
+static unsigned int val;
+
+memset(db_voltage, 0, sizeof(db_voltage));
+memset(db_clock, 0, sizeof(db_clock));
+val = 0U;
+
+s.db_voltage = db_voltage;
+s.db_clock = db_clock;
+
+s.db_num_vsensors = 2U;
+s.db_num_clocks = 3U;
+
+db_voltage[0] = 1000000U;
+db_voltage[1] = 1100000U;
+
+db_clock[0] = 45000000U;
+db_clock[1] = 23750000U;
+db_clock[2] = 66670000U;
+
+s.mb_clock[0] = 50000000U;
+s.mb_clock[1] = 23750000U;
+s.mb_clock[2] = 24000000U;
+s.mb_clock[3] = 24000000U;
+s.mb_clock[4] = 24000000U;
+s.mb_clock[5] = 24000000U;
+说明： vexpress_cfgctrl_read/write 中判断 motherboard clock 时使用的是：
+device < sizeof(s->mb_clock)
+这在当前源码中是按字节数判断，sizeof(s->mb_clock)=24。用例里访问 motherboard clock 时只使用 device=0..5，避免数组越界。
+ 
+⸻
+ 
+三、
+board_id
+board_id.001.R.vexpress
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x1190F500U;
+
+<<arm_sysregs.board_id.s>> = &s;
+期望值
+return = 0x190
+注释
+测试目的：验证 board_id 能从 VExpress SYS_ID 中提取 board id 字段。 用例类别：基于需求 预置条件：构造 struct arm_sysregs 对象，并设置 sys_id=0x1190F500。 测试步骤： step1、清零 s。 step2、设置 s.sys_id=0x1190F500。 step3、将 s 作为入参传入 board_id。 step4、观察返回值。 用例来源：需求分析 追溯ID：board_id 等价列表：VExpress board id 提取。 其它说明：(0x1190F500 >> 16) & 0xFFF = 0x190。 通过准则：函数返回 0x190。
+ 
+⸻
+ 
+board_id.002.R.pb926
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x41008004U;
+
+<<arm_sysregs.board_id.s>> = &s;
+期望值
+return = 0x100
+注释
+测试目的：验证 board_id 能从 VersatilePB SYS_ID 中提取 PB926 board id。 用例类别：基于需求 预置条件：构造 struct arm_sysregs 对象，并设置 sys_id=0x41008004。 测试步骤： step1、清零 s。 step2、设置 s.sys_id=0x41008004。 step3、将 s 作为入参传入 board_id。 step4、观察返回值。 用例来源：需求分析 追溯ID：board_id 等价列表：PB926 board id 提取。 其它说明：(0x41008004 >> 16) & 0xFFF = 0x100。 通过准则：函数返回 0x100。
+ 
+⸻
+ 
+四、
+vexpress_cfgctrl_read
+ 
+⸻
+ 
+vexpress_cfgctrl_read.001.IN.dcc_invalid
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0xAAAAAAAAU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证 DCC 非 0 时，vexpress_cfgctrl_read 返回 FALSE。 用例类别：接口 预置条件：构造有效 s 和 val 指针；设置 dcc=1。 测试步骤： step1、清零 s。 step2、设置 val=0xAAAAAAAA。 step3、设置 dcc=1。 step4、调用 vexpress_cfgctrl_read。 step5、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：非法 DCC。 其它说明：覆盖前置检查中 dcc != 0 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.002.IN.position_invalid
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0xAAAAAAAAU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证 position 非 0 时，vexpress_cfgctrl_read 返回 FALSE。 用例类别：接口 预置条件：构造有效 s 和 val 指针；设置 dcc=0，position=1。 测试步骤： step1、清零 s。 step2、设置 val=0xAAAAAAAA。 step3、设置 dcc=0。 step4、设置 position=1。 step5、调用 vexpress_cfgctrl_read。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：非法 position。 其它说明：覆盖前置检查中 position != 0 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.003.IN.site_invalid
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0xAAAAAAAAU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证 site 既不是 motherboard 也不是 daughterboard 1 时，vexpress_cfgctrl_read 返回 FALSE。 用例类别：接口 预置条件：构造有效 s 和 val 指针；设置 site=2。 测试步骤： step1、清零 s。 step2、设置 val=0xAAAAAAAA。 step3、设置 dcc=0。 step4、设置 position=0。 step5、设置 site=2。 step6、调用 vexpress_cfgctrl_read。 step7、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：非法 site。 其它说明：覆盖前置检查中 (site != MB && site != DB1) 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.004.R.volt_db1
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int db_voltage[4];
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+memset(db_voltage, 0, sizeof(db_voltage));
+val = 0U;
+
+db_voltage[0] = 1000000U;
+db_voltage[1] = 1100000U;
+
+s.db_voltage = db_voltage;
+s.db_num_vsensors = 2U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 1
+val = 1100000
+注释
+测试目的：验证 DB1 voltage sensor 读取成功路径。 用例类别：基于需求 预置条件：构造 DB1 voltage sensor 数组；设置 db_num_vsensors=2。 测试步骤： step1、清零 s 和 db_voltage。 step2、设置 db_voltage[1]=1100000。 step3、设置 s.db_voltage=db_voltage。 step4、设置 s.db_num_vsensors=2。 step5、设置 function 为 SYS_CFG_VOLT。 step6、设置 site 为 DB1。 step7、设置 device 为 1。 step8、调用 vexpress_cfgctrl_read。 step9、观察返回值和 val。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_read 等价列表：DB1 voltage read success。 其它说明：覆盖 site == DB1 && device < db_num_vsensors 为 true 的路径。 通过准则：函数返回 TRUE，即 1；val=1100000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.005.R.volt_mb
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 1
+val = 3300000
+注释
+测试目的：验证 motherboard voltage sensor 读取成功路径。 用例类别：基于需求 预置条件：构造有效 s 和 val 指针。 测试步骤： step1、清零 s。 step2、设置 val=0。 step3、设置 function 为 SYS_CFG_VOLT。 step4、设置 site 为 motherboard。 step5、设置 device 为 0。 step6、调用 vexpress_cfgctrl_read。 step7、观察返回值和 val。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_read 等价列表：motherboard voltage read success。 其它说明：覆盖 site == MB && device == 0 为 true 的路径。 通过准则：函数返回 TRUE，即 1；val=3300000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.006.IN.volt_unsupported
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0xAAAAAAAAU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证 voltage function 中 unsupported motherboard device 返回 FALSE。 用例类别：接口 预置条件：构造有效 s 和 val 指针。 测试步骤： step1、清零 s。 step2、设置 val=0xAAAAAAAA。 step3、设置 function 为 SYS_CFG_VOLT。 step4、设置 site 为 motherboard。 step5、设置 device 为 1。 step6、调用 vexpress_cfgctrl_read。 step7、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：unsupported voltage device。 其它说明：覆盖 SYS_CFG_VOLT 下所有支持条件均不满足后进入 unimplemented 路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.007.R.osc_mb
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0U;
+
+s.mb_clock[5] = 24000000U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 5U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 1
+val = 24000000
+注释
+测试目的：验证 motherboard oscillator 读取成功路径。 用例类别：基于需求 预置条件：设置 s.mb_clock[5]=24000000。 测试步骤： step1、清零 s。 step2、设置 s.mb_clock[5]=24000000。 step3、设置 function 为 SYS_CFG_OSC。 step4、设置 site 为 motherboard。 step5、设置 device 为 5。 step6、调用 vexpress_cfgctrl_read。 step7、观察返回值和 val。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_read 等价列表：motherboard oscillator read success。 其它说明：覆盖 site == MB && device < sizeof(s->mb_clock) 为 true 的路径，且 device 取 5 避免数组越界。 通过准则：函数返回 TRUE，即 1；val=24000000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.008.R.osc_db1
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int db_clock[4];
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+memset(db_clock, 0, sizeof(db_clock));
+val = 0U;
+
+db_clock[0] = 45000000U;
+db_clock[1] = 23750000U;
+db_clock[2] = 66670000U;
+
+s.db_clock = db_clock;
+s.db_num_clocks = 3U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 1
+val = 66670000
+注释
+测试目的：验证 daughterboard oscillator 读取成功路径。 用例类别：基于需求 预置条件：构造 DB1 clock 数组；设置 db_num_clocks=3。 测试步骤： step1、清零 s 和 db_clock。 step2、设置 db_clock[2]=66670000。 step3、设置 s.db_clock=db_clock。 step4、设置 s.db_num_clocks=3。 step5、设置 function 为 SYS_CFG_OSC。 step6、设置 site 为 DB1。 step7、设置 device 为 2。 step8、调用 vexpress_cfgctrl_read。 step9、观察返回值和 val。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_read 等价列表：daughterboard oscillator read success。 其它说明：覆盖 site == DB1 && device < db_num_clocks 为 true 的路径。 通过准则：函数返回 TRUE，即 1；val=66670000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.009.IN.osc_unsupported
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int db_clock[4];
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+memset(db_clock, 0, sizeof(db_clock));
+val = 0xAAAAAAAAU;
+
+s.db_clock = db_clock;
+s.db_num_clocks = 1U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证 oscillator function 中 DB1 device 超出 db_num_clocks 时返回 FALSE。 用例类别：接口 预置条件：设置 s.db_num_clocks=1，但请求 device 2。 测试步骤： step1、清零 s 和 db_clock。 step2、设置 s.db_clock=db_clock。 step3、设置 s.db_num_clocks=1。 step4、设置 function 为 SYS_CFG_OSC。 step5、设置 site 为 DB1。 step6、设置 device 为 2。 step7、调用 vexpress_cfgctrl_read。 step8、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：unsupported oscillator device。 其它说明：覆盖 SYS_CFG_OSC 中 DB1 支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.010.IN.function_default
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int val;
+
+memset(&s, 0, sizeof(s));
+val = 0xAAAAAAAAU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.function>> = 4U;
+<<arm_sysregs.vexpress_cfgctrl_read.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_read.val>> = &val;
+期望值
+return = 0
+注释
+测试目的：验证未实现的 SYS_CFGCTRL read function 返回 FALSE。 用例类别：接口 预置条件：设置 function 为 SYS_CFG_TEMP。 测试步骤： step1、清零 s。 step2、设置 val=0xAAAAAAAA。 step3、设置 function 为 4。 step4、设置 site 为 motherboard。 step5、设置 position 为 0。 step6、设置 device 为 0。 step7、调用 vexpress_cfgctrl_read。 step8、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_read 等价列表：未实现 read function。 其它说明：覆盖 switch default 路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+五、
+vexpress_cfgctrl_write
+ 
+⸻
+ 
+vexpress_cfgctrl_write.001.IN.dcc_invalid
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1234U;
+期望值
+return = 0
+注释
+测试目的：验证 DCC 非 0 时，vexpress_cfgctrl_write 返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 dcc=1。 测试步骤： step1、清零 s。 step2、设置 dcc=1。 step3、调用 vexpress_cfgctrl_write。 step4、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：非法 DCC。 其它说明：覆盖前置检查中 dcc != 0 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.002.IN.position_invalid
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1234U;
+期望值
+return = 0
+注释
+测试目的：验证 position 非 0 时，vexpress_cfgctrl_write 返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 position=1。 测试步骤： step1、清零 s。 step2、设置 dcc=0。 step3、设置 position=1。 step4、调用 vexpress_cfgctrl_write。 step5、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：非法 position。 其它说明：覆盖前置检查中 position != 0 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.003.IN.site_invalid
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1234U;
+期望值
+return = 0
+注释
+测试目的：验证 site 非 motherboard 且非 DB1 时，vexpress_cfgctrl_write 返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 site=2。 测试步骤： step1、清零 s。 step2、设置 dcc=0。 step3、设置 position=0。 step4、设置 site=2。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：非法 site。 其它说明：覆盖前置检查中 (site != MB && site != DB1) 为 true 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.004.R.osc_mb
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.mb_clock[1] = 0U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 23750000U;
+期望值
+return = 1
+s.mb_clock[1] = 23750000
+注释
+测试目的：验证 motherboard oscillator 写入成功路径。 用例类别：基于需求 预置条件：构造有效 s；设置 device=1。 测试步骤： step1、清零 s。 step2、设置 s.mb_clock[1]=0。 step3、设置 function 为 SYS_CFG_OSC。 step4、设置 site 为 motherboard。 step5、设置 device 为 1。 step6、设置写入值为 23750000。 step7、调用 vexpress_cfgctrl_write。 step8、观察返回值和 s.mb_clock[1]。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：motherboard oscillator write success。 其它说明：覆盖 site == MB && device < sizeof(s->mb_clock) 为 true 的路径。 通过准则：函数返回 TRUE，即 1；s.mb_clock[1]=23750000。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.005.R.osc_db1
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int db_clock[4];
+
+memset(&s, 0, sizeof(s));
+memset(db_clock, 0, sizeof(db_clock));
+
+s.db_clock = db_clock;
+s.db_num_clocks = 3U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 66670000U;
+期望值
+return = 1
+db_clock[2] = 66670000
+注释
+测试目的：验证 daughterboard oscillator 写入成功路径。 用例类别：基于需求 预置条件：构造 DB1 clock 数组；设置 db_num_clocks=3。 测试步骤： step1、清零 s 和 db_clock。 step2、设置 s.db_clock=db_clock。 step3、设置 s.db_num_clocks=3。 step4、设置 function 为 SYS_CFG_OSC。 step5、设置 site 为 DB1。 step6、设置 device 为 2。 step7、设置写入值为 66670000。 step8、调用 vexpress_cfgctrl_write。 step9、观察返回值和 db_clock[2]。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：daughterboard oscillator write success。 其它说明：覆盖 site == DB1 && device < db_num_clocks 为 true 的路径。 通过准则：函数返回 TRUE，即 1；db_clock[2]=66670000。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.006.IN.osc_unsupported
+Begin User Code
+static struct arm_sysregs s;
+static unsigned int db_clock[4];
+
+memset(&s, 0, sizeof(s));
+memset(db_clock, 0, sizeof(db_clock));
+
+s.db_clock = db_clock;
+s.db_num_clocks = 1U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 2U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 66670000U;
+期望值
+return = 0
+注释
+测试目的：验证 oscillator function 中 DB1 device 超出 db_num_clocks 时返回 FALSE。 用例类别：接口 预置条件：设置 s.db_num_clocks=1，请求 device 2。 测试步骤： step1、清零 s 和 db_clock。 step2、设置 s.db_clock=db_clock。 step3、设置 s.db_num_clocks=1。 step4、设置 function 为 SYS_CFG_OSC。 step5、设置 site 为 DB1。 step6、设置 device 为 2。 step7、调用 vexpress_cfgctrl_write。 step8、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：unsupported oscillator write。 其它说明：覆盖 SYS_CFG_OSC 中 DB1 支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.007.R.muxfpga_mb_device0
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 7U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 1
+注释
+测试目的：验证 SYS_CFG_MUXFPGA 在 motherboard device 0 时返回 TRUE。 用例类别：基于需求 预置条件：构造有效 s。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_MUXFPGA。 step3、设置 site 为 motherboard。 step4、设置 device 为 0。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：MUXFPGA supported write。 其它说明：覆盖 site == MB && device == 0 为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.008.IN.muxfpga_unsupported
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 7U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 0
+注释
+测试目的：验证 SYS_CFG_MUXFPGA 在非 device 0 时返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 device 为 1。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_MUXFPGA。 step3、设置 site 为 motherboard。 step4、设置 device 为 1。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：MUXFPGA unsupported device。 其它说明：覆盖 SYS_CFG_MUXFPGA 中支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.009.R.shutdown
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+s.guest = &guest;
+
+vcast_sysregs_shutdown_rc = 0;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 8U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 1
+注释
+测试目的：验证 SYS_CFG_SHUTDOWN 在 motherboard device 0 时发起 shutdown 请求并返回 TRUE。 用例类别：基于需求 预置条件：构造有效 s 和 guest；设置 shutdown stub 返回 0。 测试步骤： step1、清零 s 和 guest。 step2、设置 s.guest=&guest。 step3、设置 function 为 SYS_CFG_SHUTDOWN。 step4、设置 site 为 motherboard。 step5、设置 device 为 0。 step6、调用 vexpress_cfgctrl_write。 step7、观察返回值。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：shutdown supported write。 其它说明：覆盖 SYS_CFG_SHUTDOWN 中支持条件为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.010.IN.shutdown_unsupported
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 8U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 0
+注释
+测试目的：验证 SYS_CFG_SHUTDOWN 在非 motherboard site 时返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 site 为 DB1。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_SHUTDOWN。 step3、设置 site 为 DB1。 step4、设置 device 为 0。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：shutdown unsupported site。 其它说明：覆盖 SYS_CFG_SHUTDOWN 中支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.011.R.reboot
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+s.guest = &guest;
+
+vcast_sysregs_reboot_rc = 0;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 9U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 1
+注释
+测试目的：验证 SYS_CFG_REBOOT 在 motherboard device 0 时发起 reboot 请求并返回 TRUE。 用例类别：基于需求 预置条件：构造有效 s 和 guest；设置 reboot stub 返回 0。 测试步骤： step1、清零 s 和 guest。 step2、设置 s.guest=&guest。 step3、设置 function 为 SYS_CFG_REBOOT。 step4、设置 site 为 motherboard。 step5、设置 device 为 0。 step6、调用 vexpress_cfgctrl_write。 step7、观察返回值。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：reboot supported write。 其它说明：覆盖 SYS_CFG_REBOOT 中支持条件为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.012.IN.reboot_unsupported
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 9U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 0
+注释
+测试目的：验证 SYS_CFG_REBOOT 在非 device 0 时返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 device 为 1。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_REBOOT。 step3、设置 site 为 motherboard。 step4、设置 device 为 1。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：reboot unsupported device。 其它说明：覆盖 SYS_CFG_REBOOT 中支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.013.R.dvimode
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 11U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 1
+注释
+测试目的：验证 SYS_CFG_DVIMODE 在 motherboard device 0 时返回 TRUE。 用例类别：基于需求 预置条件：构造有效 s。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_DVIMODE。 step3、设置 site 为 motherboard。 step4、设置 device 为 0。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：需求分析 追溯ID：vexpress_cfgctrl_write 等价列表：DVI mode supported write。 其它说明：覆盖 SYS_CFG_DVIMODE 中支持条件为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.014.IN.dvimode_unsupported
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 11U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 1U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 0
+注释
+测试目的：验证 SYS_CFG_DVIMODE 在非 device 0 时返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 device 为 1。 测试步骤： step1、清零 s。 step2、设置 function 为 SYS_CFG_DVIMODE。 step3、设置 site 为 motherboard。 step4、设置 device 为 1。 step5、调用 vexpress_cfgctrl_write。 step6、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：DVI mode unsupported device。 其它说明：覆盖 SYS_CFG_DVIMODE 中支持条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.015.IN.function_default
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> = &s;
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.function>> = 12U;
+<<arm_sysregs.vexpress_cfgctrl_write.site>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.position>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.device>> = 0U;
+<<arm_sysregs.vexpress_cfgctrl_write.val>> = 1U;
+期望值
+return = 0
+注释
+测试目的：验证未实现的 SYS_CFGCTRL write function 返回 FALSE。 用例类别：接口 预置条件：构造有效 s；设置 function 为 SYS_CFG_POWER。 测试步骤： step1、清零 s。 step2、设置 function 为 12。 step3、设置 site 为 motherboard。 step4、设置 position 为 0。 step5、设置 device 为 0。 step6、调用 vexpress_cfgctrl_write。 step7、观察返回值。 用例来源：接口测试 追溯ID：vexpress_cfgctrl_write 等价列表：未实现 write function。 其它说明：覆盖 switch default 路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+本批到这里。下一批建议继续 arm_sysregs_reg_read，这个函数 switch case 很多，需要分表并逐条给注释，避免一次过长。
