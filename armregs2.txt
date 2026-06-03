@@ -1,0 +1,673 @@
+下面给 arm_sysregs.c 第 2 批，按你的要求，暂不展开以下三个函数：
+arm_sysregs_reg_read
+arm_sysregs_reg_write
+arm_sysregs_emulator_probe
+本批覆盖：
+arm_sysregs_emulator_read8
+arm_sysregs_emulator_read16
+arm_sysregs_emulator_read32
+arm_sysregs_emulator_write8
+arm_sysregs_emulator_write16
+arm_sysregs_emulator_write32
+arm_sysregs_emulator_reset
+arm_sysregs_irq_handle
+arm_sysregs_emulator_remove
+arm_sysregs_emulator_init
+arm_sysregs_emulator_exit
+ 
+⸻
+ 
+一、补充 User Code / Stub
+1. User Global / Data 补充
+如果上一批已经定义过同名变量，不要重复定义。缺哪个补哪个。
+int vcast_sysregs_register_emulator_rc;
+ 
+⸻
+ 
+2. Test Case Init 补充
+vcast_sysregs_register_emulator_rc = 0;
+ 
+⸻
+ 
+3. Stub：
+vmm_free
+改写目的： arm_sysregs_emulator_remove 会释放 db_clock、db_clock_reset、db_voltage 和 s。单元测试中这些对象可能是静态对象或栈对象，不能真实释放，所以用空 stub 隔离真实堆释放副作用。
+return;
+ 
+⸻
+ 
+4. Stub：
+vmm_devemu_unregister_irqchip
+改写目的： arm_sysregs_emulator_remove 会注销 irqchip。该行为属于外部设备模拟框架副作用，单元测试中用空 stub 隔离。
+return;
+ 
+⸻
+ 
+5. Stub：
+vmm_devemu_register_emulator
+改写目的： arm_sysregs_emulator_init 只转调注册接口。注册 emulator 属于外部框架副作用，用返回值变量控制成功 / 失败。
+return vcast_sysregs_register_emulator_rc;
+ 
+⸻
+ 
+6. Stub：
+vmm_devemu_unregister_emulator
+改写目的： arm_sysregs_emulator_exit 只转调注销接口。注销 emulator 属于外部框架副作用，单元测试中用空 stub 隔离。
+return;
+ 
+⸻
+ 
+二、
+arm_sysregs_emulator_read8
+arm_sysregs_emulator_read8.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned char dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+dst = 0U;
+
+<<arm_sysregs.arm_sysregs_emulator_read8.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read8.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_read8.dst>> = &dst;
+期望值
+return = 0
+dst = 0x78
+注释
+测试目的：验证 arm_sysregs_emulator_read8 在底层寄存器读取成功时，将 32 位寄存器值截断为低 8 位写入目标地址。 用例类别：基于需求 预置条件：构造有效 arm_sysregs 和 vmm_emudev；设置 edev.priv=&s；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08，读取 LED 寄存器。 step5、调用 arm_sysregs_emulator_read8。 step6、观察返回值和 dst。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_read8 等价列表：read8 成功路径。 其它说明：底层 arm_sysregs_reg_read 返回 0x12345678，read8 应写入低 8 位 0x78。 通过准则：函数返回 0；dst=0x78。
+ 
+⸻
+ 
+arm_sysregs_emulator_read8.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned char dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+edev.priv = &s;
+dst = 0xAAU;
+
+<<arm_sysregs.arm_sysregs_emulator_read8.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read8.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_read8.dst>> = &dst;
+期望值
+return = -1
+dst = 0xAA
+注释
+测试目的：验证 arm_sysregs_emulator_read8 在底层寄存器读取失败时返回错误码，且不修改目标地址内容。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 edev.priv=&s。 step3、设置 dst=0xAA。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_read8。 step6、观察返回值和 dst。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_read8 等价列表：read8 底层读取失败。 其它说明：底层 arm_sysregs_reg_read 对未知 offset 返回 VMM_EFAIL=-1，因此 read8 不写 dst。 通过准则：函数返回 -1；dst 保持 0xAA。
+ 
+⸻
+ 
+三、
+arm_sysregs_emulator_read16
+arm_sysregs_emulator_read16.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned short dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+dst = 0U;
+
+<<arm_sysregs.arm_sysregs_emulator_read16.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read16.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_read16.dst>> = &dst;
+期望值
+return = 0
+dst = 0x5678
+注释
+测试目的：验证 arm_sysregs_emulator_read16 在底层寄存器读取成功时，将 32 位寄存器值截断为低 16 位写入目标地址。 用例类别：基于需求 预置条件：构造有效 arm_sysregs 和 vmm_emudev；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08。 step5、调用 arm_sysregs_emulator_read16。 step6、观察返回值和 dst。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_read16 等价列表：read16 成功路径。 其它说明：底层读取值为 0x12345678，read16 应写入低 16 位 0x5678。 通过准则：函数返回 0；dst=0x5678。
+ 
+⸻
+ 
+arm_sysregs_emulator_read16.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned short dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+edev.priv = &s;
+dst = 0xAAAAU;
+
+<<arm_sysregs.arm_sysregs_emulator_read16.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read16.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_read16.dst>> = &dst;
+期望值
+return = -1
+dst = 0xAAAA
+注释
+测试目的：验证 arm_sysregs_emulator_read16 在底层寄存器读取失败时返回错误码，且不修改目标地址内容。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 edev.priv=&s。 step3、设置 dst=0xAAAA。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_read16。 step6、观察返回值和 dst。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_read16 等价列表：read16 底层读取失败。 其它说明：底层 arm_sysregs_reg_read 返回 -1 时，函数不写 dst。 通过准则：函数返回 -1；dst 保持 0xAAAA。
+ 
+⸻
+ 
+四、
+arm_sysregs_emulator_read32
+arm_sysregs_emulator_read32.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned int dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+dst = 0U;
+
+<<arm_sysregs.arm_sysregs_emulator_read32.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read32.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_read32.dst>> = &dst;
+期望值
+return = 0
+dst = 0x12345678
+注释
+测试目的：验证 arm_sysregs_emulator_read32 能直接返回底层寄存器读取结果。 用例类别：基于需求 预置条件：构造有效 s 和 edev；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08。 step5、调用 arm_sysregs_emulator_read32。 step6、观察返回值和 dst。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_read32 等价列表：read32 成功路径。 其它说明：该函数直接调用 arm_sysregs_reg_read，不做宽度截断。 通过准则：函数返回 0；dst=0x12345678。
+ 
+⸻
+ 
+arm_sysregs_emulator_read32.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned int dst;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+edev.priv = &s;
+dst = 0xAAAAAAAAU;
+
+<<arm_sysregs.arm_sysregs_emulator_read32.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_read32.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_read32.dst>> = &dst;
+期望值
+return = -1
+dst = 0xAAAAAAAA
+注释
+测试目的：验证 arm_sysregs_emulator_read32 在底层寄存器读取失败时返回错误码。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 edev.priv=&s。 step3、设置 dst=0xAAAAAAAA。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_read32。 step6、观察返回值和 dst。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_read32 等价列表：read32 底层读取失败。 其它说明：底层 arm_sysregs_reg_read 返回错误时，dst 不应被成功路径赋值。 通过准则：函数返回 -1；dst 保持 0xAAAAAAAA。
+ 
+⸻
+ 
+五、
+arm_sysregs_emulator_write8
+arm_sysregs_emulator_write8.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write8.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write8.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_write8.src>> = 0xABU;
+期望值
+return = 0
+s.leds = 0x123456AB
+注释
+测试目的：验证 arm_sysregs_emulator_write8 写 LED 寄存器时，只更新低 8 位。 用例类别：基于需求 预置条件：构造有效 s 和 edev；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08。 step5、设置写入值为 0xAB。 step6、调用 arm_sysregs_emulator_write8。 step7、观察返回值和 s.leds。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_write8 等价列表：write8 成功路径。 其它说明：write8 调用底层写入时使用 mask 0xFFFFFF00，因此结果为 0x123456AB。 通过准则：函数返回 0；s.leds=0x123456AB。
+ 
+⸻
+ 
+arm_sysregs_emulator_write8.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write8.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write8.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_write8.src>> = 0xABU;
+期望值
+return = -1
+s.leds = 0x12345678
+注释
+测试目的：验证 arm_sysregs_emulator_write8 在写入未支持 offset 时返回错误码，且不改变 LED 寄存器。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_write8。 step6、观察返回值和 s.leds。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_write8 等价列表：write8 底层写入失败。 其它说明：底层 arm_sysregs_reg_write 对未知 offset 返回 VMM_EFAIL=-1。 通过准则：函数返回 -1；s.leds 保持 0x12345678。
+ 
+⸻
+ 
+六、
+arm_sysregs_emulator_write16
+arm_sysregs_emulator_write16.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write16.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write16.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_write16.src>> = 0xCDEFU;
+期望值
+return = 0
+s.leds = 0x1234CDEF
+注释
+测试目的：验证 arm_sysregs_emulator_write16 写 LED 寄存器时，只更新低 16 位。 用例类别：基于需求 预置条件：构造有效 s 和 edev；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08。 step5、设置写入值为 0xCDEF。 step6、调用 arm_sysregs_emulator_write16。 step7、观察返回值和 s.leds。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_write16 等价列表：write16 成功路径。 其它说明：write16 调用底层写入时使用 mask 0xFFFF0000，因此结果为 0x1234CDEF。 通过准则：函数返回 0；s.leds=0x1234CDEF。
+ 
+⸻
+ 
+arm_sysregs_emulator_write16.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write16.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write16.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_write16.src>> = 0xCDEFU;
+期望值
+return = -1
+s.leds = 0x12345678
+注释
+测试目的：验证 arm_sysregs_emulator_write16 在写入未支持 offset 时返回错误码，且不改变 LED 寄存器。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_write16。 step6、观察返回值和 s.leds。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_write16 等价列表：write16 底层写入失败。 其它说明：底层写入失败时返回 VMM_EFAIL=-1。 通过准则：函数返回 -1；s.leds 保持 0x12345678。
+ 
+⸻
+ 
+七、
+arm_sysregs_emulator_write32
+arm_sysregs_emulator_write32.001.R.led_success
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write32.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write32.offset>> = 0x08U;
+<<arm_sysregs.arm_sysregs_emulator_write32.src>> = 0x89ABCDEFU;
+期望值
+return = 0
+s.leds = 0x89ABCDEF
+注释
+测试目的：验证 arm_sysregs_emulator_write32 写 LED 寄存器时更新完整 32 位值。 用例类别：基于需求 预置条件：构造有效 s 和 edev；设置 s.leds=0x12345678。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x08。 step5、设置写入值为 0x89ABCDEF。 step6、调用 arm_sysregs_emulator_write32。 step7、观察返回值和 s.leds。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_write32 等价列表：write32 成功路径。 其它说明：write32 调用底层写入时使用 mask 0x00000000，因此 LED 寄存器完全更新为写入值。 通过准则：函数返回 0；s.leds=0x89ABCDEF。
+ 
+⸻
+ 
+arm_sysregs_emulator_write32.002.IN.invalid_offset
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.leds = 0x12345678U;
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_write32.edev>> = &edev;
+<<arm_sysregs.arm_sysregs_emulator_write32.offset>> = 0x100U;
+<<arm_sysregs.arm_sysregs_emulator_write32.src>> = 0x89ABCDEFU;
+期望值
+return = -1
+s.leds = 0x12345678
+注释
+测试目的：验证 arm_sysregs_emulator_write32 在写入未支持 offset 时返回错误码，且不改变 LED 寄存器。 用例类别：接口 预置条件：构造有效 s 和 edev；设置 offset 为未支持寄存器地址。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.leds=0x12345678。 step3、设置 edev.priv=&s。 step4、设置 offset 为 0x100。 step5、调用 arm_sysregs_emulator_write32。 step6、观察返回值和 s.leds。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_write32 等价列表：write32 底层写入失败。 其它说明：底层 arm_sysregs_reg_write 对未知 offset 返回 VMM_EFAIL=-1。 通过准则：函数返回 -1；s.leds 保持 0x12345678。
+ 
+⸻
+ 
+八、
+arm_sysregs_emulator_reset
+arm_sysregs_emulator_reset.001.R.vexpress_with_db_clocks
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+static unsigned int db_clock[3];
+static unsigned int db_clock_reset[3];
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+memset(db_clock, 0, sizeof(db_clock));
+memset(db_clock_reset, 0, sizeof(db_clock_reset));
+
+s.sys_id = 0x1190F500U;
+
+s.db_num_clocks = 3U;
+s.db_clock = db_clock;
+s.db_clock_reset = db_clock_reset;
+
+db_clock[0] = 1U;
+db_clock[1] = 2U;
+db_clock[2] = 3U;
+
+db_clock_reset[0] = 45000000U;
+db_clock_reset[1] = 23750000U;
+db_clock_reset[2] = 66670000U;
+
+s.leds = 0xFFFFFFFFU;
+s.lockval = 0xFFFFFFFFU;
+s.cfgdata1 = 0xFFFFFFFFU;
+s.cfgdata2 = 0xFFFFFFFFU;
+s.flags = 0xFFFFFFFFU;
+s.resetlevel = 0xFFFFFFFFU;
+s.sys_clcd = 0xFFFFFFFFU;
+
+vcast_sysregs_timestamp = 1000ULL;
+
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_reset.edev>> = &edev;
+期望值
+return = 0
+
+s.ref_100hz = 1000
+s.ref_24mhz = 1000
+
+s.leds = 0
+s.lockval = 0
+s.cfgdata1 = 0
+s.cfgdata2 = 0
+s.flags = 0
+s.resetlevel = 0
+
+s.mb_clock[0] = 50000000
+s.mb_clock[1] = 23750000
+s.mb_clock[2] = 24000000
+s.mb_clock[3] = 24000000
+s.mb_clock[4] = 24000000
+s.mb_clock[5] = 24000000
+
+db_clock[0] = 45000000
+db_clock[1] = 23750000
+db_clock[2] = 66670000
+
+s.sys_clcd = 0
+注释
+测试目的：验证 arm_sysregs_emulator_reset 在 VExpress board 且存在 daughterboard clocks 时，重置基本寄存器、motherboard clocks、daughterboard clocks，并将 CLCD 设置为 RAZ/WI 值 0。 用例类别：基于需求 预置条件：构造 VExpress board 的 arm_sysregs；设置 db_num_clocks=3；配置 db_clock 和 db_clock_reset。 测试步骤： step1、清零 s、edev 和 clock 数组。 step2、设置 s.sys_id=0x1190F500。 step3、设置 s.db_num_clocks=3。 step4、设置 s.db_clock 和 s.db_clock_reset。 step5、设置 db_clock_reset 为三个复位频率。 step6、设置若干寄存器为非 0 值。 step7、设置 vcast_sysregs_timestamp=1000。 step8、设置 edev.priv=&s。 step9、调用 arm_sysregs_emulator_reset。 step10、观察返回值、时间基准、寄存器、clock 数组和 sys_clcd。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_reset 等价列表：VExpress reset，有 daughterboard clocks。 其它说明：覆盖 for 循环执行路径，以及 board_id(s) == BOARD_ID_VEXPRESS 为 true 的路径。 通过准则：函数返回 0；所有列出的字段符合期望。
+ 
+⸻
+ 
+arm_sysregs_emulator_reset.002.R.non_vexpress_no_db_clocks
+Begin User Code
+static struct arm_sysregs s;
+static struct vmm_emudev edev;
+
+memset(&s, 0, sizeof(s));
+memset(&edev, 0, sizeof(edev));
+
+s.sys_id = 0x41008004U;
+s.db_num_clocks = 0U;
+s.sys_clcd = 0U;
+
+vcast_sysregs_timestamp = 2000ULL;
+
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_reset.edev>> = &edev;
+期望值
+return = 0
+
+s.ref_100hz = 2000
+s.ref_24mhz = 2000
+
+s.sys_clcd = 0x1F00
+注释
+测试目的：验证 arm_sysregs_emulator_reset 在非 VExpress board 且无 daughterboard clocks 时，设置 CLCDID 为 VGA 标识 0x1f00。 用例类别：基于需求 预置条件：构造 PB926 board 的 arm_sysregs；设置 db_num_clocks=0。 测试步骤： step1、清零 s 和 edev。 step2、设置 s.sys_id=0x41008004。 step3、设置 s.db_num_clocks=0。 step4、设置 vcast_sysregs_timestamp=2000。 step5、设置 edev.priv=&s。 step6、调用 arm_sysregs_emulator_reset。 step7、观察返回值、时间基准和 sys_clcd。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_reset 等价列表：非 VExpress reset，无 daughterboard clocks。 其它说明：覆盖 for 循环不执行路径，以及 board_id(s) == BOARD_ID_VEXPRESS 为 false 的路径。 通过准则：函数返回 0；ref_100hz=2000；ref_24mhz=2000；sys_clcd=0x1F00。
+ 
+⸻
+ 
+九、
+arm_sysregs_irq_handle
+arm_sysregs_irq_handle.001.R.mux0_pb926_level1
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x41008004U;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.sys_mci = 0U;
+
+<<arm_sysregs.arm_sysregs_irq_handle.irq>> = 10U;
+<<arm_sysregs.arm_sysregs_irq_handle.cpu>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.level>> = 1;
+<<arm_sysregs.arm_sysregs_irq_handle.opaque>> = &s;
+期望值
+s.sys_mci = 0x4
+注释
+测试目的：验证 mux input 0 在 PB926 board 上 level 为 1 时，设置 SYS_MCI 中的 write-protect bit 2 对应值 0x4。 用例类别：基于需求 预置条件：构造 PB926 board；设置 mux_in_irq[0]=10。 测试步骤： step1、清零 s。 step2、设置 s.sys_id=0x41008004。 step3、设置 s.mux_in_irq[0]=10。 step4、设置 s.sys_mci=0。 step5、调用 arm_sysregs_irq_handle，传入 irq 10、level 1。 step6、观察 s.sys_mci。 用例来源：需求分析 追溯ID：arm_sysregs_irq_handle 等价列表：mux0 PB926 level high。 其它说明：覆盖 mux_in_irq[0] == irq，以及 PB926/EB board 使用 bit 0x4 的路径。 通过准则：s.sys_mci=0x4。
+ 
+⸻
+ 
+arm_sysregs_irq_handle.002.R.mux0_pba8_level0
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x01780500U;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.sys_mci = 0x2U;
+
+<<arm_sysregs.arm_sysregs_irq_handle.irq>> = 10U;
+<<arm_sysregs.arm_sysregs_irq_handle.cpu>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.level>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.opaque>> = &s;
+期望值
+s.sys_mci = 0x0
+注释
+测试目的：验证 mux input 0 在非 PB926/EB board 上 level 为 0 时，清除 SYS_MCI 中的 bit 0x2。 用例类别：基于需求 预置条件：构造 PBA8 board；设置 mux_in_irq[0]=10；预置 sys_mci=0x2。 测试步骤： step1、清零 s。 step2、设置 s.sys_id=0x01780500。 step3、设置 s.mux_in_irq[0]=10。 step4、设置 s.sys_mci=0x2。 step5、调用 arm_sysregs_irq_handle，传入 irq 10、level 0。 step6、观察 s.sys_mci。 用例来源：需求分析 追溯ID：arm_sysregs_irq_handle 等价列表：mux0 non-PB/EB level low。 其它说明：覆盖 mux0 分支中非 PB926/EB board 使用 bit 0x2 的路径，以及 level 为 false 的路径。 通过准则：s.sys_mci=0x0。
+ 
+⸻
+ 
+arm_sysregs_irq_handle.003.R.mux1_level1
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x01780500U;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.sys_mci = 0U;
+
+<<arm_sysregs.arm_sysregs_irq_handle.irq>> = 11U;
+<<arm_sysregs.arm_sysregs_irq_handle.cpu>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.level>> = 1;
+<<arm_sysregs.arm_sysregs_irq_handle.opaque>> = &s;
+期望值
+s.sys_mci = 0x1
+注释
+测试目的：验证 mux input 1 在 level 为 1 时，设置 SYS_MCI bit 0。 用例类别：基于需求 预置条件：设置 mux_in_irq[1]=11；初始 sys_mci=0。 测试步骤： step1、清零 s。 step2、设置 s.mux_in_irq[1]=11。 step3、设置 s.sys_mci=0。 step4、调用 arm_sysregs_irq_handle，传入 irq 11、level 1。 step5、观察 s.sys_mci。 用例来源：需求分析 追溯ID：arm_sysregs_irq_handle 等价列表：mux1 level high。 其它说明：覆盖 mux_in_irq[1] == irq 分支和 level 为 true 的路径。 通过准则：s.sys_mci=0x1。
+ 
+⸻
+ 
+arm_sysregs_irq_handle.004.R.mux1_level0
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x01780500U;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.sys_mci = 0x1U;
+
+<<arm_sysregs.arm_sysregs_irq_handle.irq>> = 11U;
+<<arm_sysregs.arm_sysregs_irq_handle.cpu>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.level>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.opaque>> = &s;
+期望值
+s.sys_mci = 0x0
+注释
+测试目的：验证 mux input 1 在 level 为 0 时，清除 SYS_MCI bit 0。 用例类别：基于需求 预置条件：设置 mux_in_irq[1]=11；预置 sys_mci=0x1。 测试步骤： step1、清零 s。 step2、设置 s.mux_in_irq[1]=11。 step3、设置 s.sys_mci=0x1。 step4、调用 arm_sysregs_irq_handle，传入 irq 11、level 0。 step5、观察 s.sys_mci。 用例来源：需求分析 追溯ID：arm_sysregs_irq_handle 等价列表：mux1 level low。 其它说明：覆盖 mux1 分支中 level 为 false 的路径。 通过准则：s.sys_mci=0x0。
+ 
+⸻
+ 
+arm_sysregs_irq_handle.005.R.no_match
+Begin User Code
+static struct arm_sysregs s;
+
+memset(&s, 0, sizeof(s));
+
+s.sys_id = 0x01780500U;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.sys_mci = 0xAAU;
+
+<<arm_sysregs.arm_sysregs_irq_handle.irq>> = 99U;
+<<arm_sysregs.arm_sysregs_irq_handle.cpu>> = 0;
+<<arm_sysregs.arm_sysregs_irq_handle.level>> = 1;
+<<arm_sysregs.arm_sysregs_irq_handle.opaque>> = &s;
+期望值
+s.sys_mci = 0xAA
+注释
+测试目的：验证 irq 不匹配任何 mux input 时，不修改 SYS_MCI。 用例类别：接口 预置条件：设置 mux_in_irq[0]=10，mux_in_irq[1]=11，但传入 irq 99。 测试步骤： step1、清零 s。 step2、设置两个 mux input irq。 step3、设置 s.sys_mci=0xAA。 step4、调用 arm_sysregs_irq_handle，传入 irq 99。 step5、观察 s.sys_mci。 用例来源：接口测试 追溯ID：arm_sysregs_irq_handle 等价列表：irq 无匹配。 其它说明：覆盖 mux0 和 mux1 条件均为 false 的路径。 通过准则：s.sys_mci 保持 0xAA。
+ 
+⸻
+ 
+十、
+arm_sysregs_emulator_remove
+arm_sysregs_emulator_remove.001.IN.priv_null
+Begin User Code
+static struct vmm_emudev edev;
+
+memset(&edev, 0, sizeof(edev));
+
+edev.priv = 0;
+
+<<arm_sysregs.arm_sysregs_emulator_remove.edev>> = &edev;
+期望值
+return = -1
+注释
+测试目的：验证 arm_sysregs_emulator_remove 在 edev->priv 为空时返回失败。 用例类别：接口 预置条件：构造 vmm_emudev，并设置 edev.priv=NULL。 测试步骤： step1、清零 edev。 step2、设置 edev.priv=0。 step3、调用 arm_sysregs_emulator_remove。 step4、观察返回值。 用例来源：接口测试 追溯ID：arm_sysregs_emulator_remove 等价列表：空私有数据指针。 其它说明：覆盖 if (!s) 为 true 的路径。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+arm_sysregs_emulator_remove.002.R.all_allocated
+Begin User Code
+static struct vmm_emudev edev;
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+static unsigned int db_clock[2];
+static unsigned int db_clock_reset[2];
+static unsigned int db_voltage[2];
+
+memset(&edev, 0, sizeof(edev));
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+memset(db_clock, 0, sizeof(db_clock));
+memset(db_clock_reset, 0, sizeof(db_clock_reset));
+memset(db_voltage, 0, sizeof(db_voltage));
+
+s.guest = &guest;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.db_clock = db_clock;
+s.db_clock_reset = db_clock_reset;
+s.db_voltage = db_voltage;
+
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_remove.edev>> = &edev;
+期望值
+return = 0
+edev.priv = 0
+注释
+测试目的：验证 arm_sysregs_emulator_remove 在私有数据有效且 DB clock/reset/voltage 指针均非空时，完成注销和资源释放流程，并清空 edev->priv。 用例类别：基于需求 预置条件：构造有效 arm_sysregs，设置 guest、两个 mux irq 和三个 DB 资源指针。 测试步骤： step1、清零 edev、s、guest 和 DB 数组。 step2、设置 s.guest=&guest。 step3、设置 s.mux_in_irq[0]=10，s.mux_in_irq[1]=11。 step4、设置 s.db_clock、s.db_clock_reset 和 s.db_voltage 为非空。 step5、设置 edev.priv=&s。 step6、调用 arm_sysregs_emulator_remove。 step7、观察返回值和 edev.priv。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_remove 等价列表：remove 成功，资源指针非空。 其它说明：vmm_free 和 irqchip unregister 已 stub，避免真实释放和设备框架副作用。 通过准则：函数返回 0；edev.priv=NULL。
+ 
+⸻
+ 
+arm_sysregs_emulator_remove.003.R.no_allocated_resources
+Begin User Code
+static struct vmm_emudev edev;
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&edev, 0, sizeof(edev));
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+s.guest = &guest;
+s.mux_in_irq[0] = 10U;
+s.mux_in_irq[1] = 11U;
+s.db_clock = 0;
+s.db_clock_reset = 0;
+s.db_voltage = 0;
+
+edev.priv = &s;
+
+<<arm_sysregs.arm_sysregs_emulator_remove.edev>> = &edev;
+期望值
+return = 0
+edev.priv = 0
+注释
+测试目的：验证 arm_sysregs_emulator_remove 在 DB 资源指针均为空时，仍能完成 remove 流程并清空 edev->priv。 用例类别：基于需求 预置条件：构造有效 arm_sysregs，但 db_clock、db_clock_reset 和 db_voltage 均为空。 测试步骤： step1、清零 edev、s 和 guest。 step2、设置 s.guest=&guest。 step3、设置两个 mux irq。 step4、设置三个 DB 资源指针为空。 step5、设置 edev.priv=&s。 step6、调用 arm_sysregs_emulator_remove。 step7、观察返回值和 edev.priv。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_remove 等价列表：remove 成功，资源指针为空。 其它说明：覆盖 if (s->db_clock)、if (s->db_clock_reset)、if (s->db_voltage) 为 false 的路径。 通过准则：函数返回 0；edev.priv=NULL。
+ 
+⸻
+ 
+十一、
+arm_sysregs_emulator_init
+arm_sysregs_emulator_init.001.R.register_ok
+Begin User Code
+vcast_sysregs_register_emulator_rc = 0;
+入参绑定
+/* arm_sysregs_emulator_init 无入参 */
+期望值
+return = 0
+注释
+测试目的：验证 arm_sysregs_emulator_init 在 emulator 注册成功时返回成功。 用例类别：基于需求 预置条件：设置 vmm_devemu_register_emulator stub 返回 0。 测试步骤： step1、设置 vcast_sysregs_register_emulator_rc=0。 step2、调用 arm_sysregs_emulator_init。 step3、观察返回值。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_init 等价列表：emulator 注册成功。 其它说明：该函数仅转调 vmm_devemu_register_emulator。 通过准则：函数返回 0。
+ 
+⸻
+ 
+arm_sysregs_emulator_init.002.FI.register_fail
+Begin User Code
+vcast_sysregs_register_emulator_rc = -1;
+入参绑定
+/* arm_sysregs_emulator_init 无入参 */
+期望值
+return = -1
+注释
+测试目的：通过故障注入验证 arm_sysregs_emulator_init 在 emulator 注册失败时返回注册接口错误码。 用例类别：故障注入 预置条件：设置 vmm_devemu_register_emulator stub 返回 -1。 测试步骤： step1、设置 vcast_sysregs_register_emulator_rc=-1。 step2、调用 arm_sysregs_emulator_init。 step3、观察返回值。 用例来源：故障注入 追溯ID：arm_sysregs_emulator_init 等价列表：emulator 注册失败。 其它说明：覆盖外部注册接口返回失败的传递路径。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+十二、
+arm_sysregs_emulator_exit
+arm_sysregs_emulator_exit.001.R
+Begin User Code
+/* 无需特殊构造 */
+入参绑定
+/* arm_sysregs_emulator_exit 无入参 */
+期望值
+无返回值
+注释
+测试目的：验证 arm_sysregs_emulator_exit 能正常调用 emulator 注销流程并返回。 用例类别：基于需求 预置条件：vmm_devemu_unregister_emulator 已 stub 为空实现。 测试步骤： step1、调用 arm_sysregs_emulator_exit。 step2、确认函数正常返回。 用例来源：需求分析 追溯ID：arm_sysregs_emulator_exit 等价列表：emulator 注销流程。 其它说明：该函数无分支，仅调用 vmm_devemu_unregister_emulator。 通过准则：函数无异常返回。
