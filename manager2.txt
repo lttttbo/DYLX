@@ -1,0 +1,1039 @@
+下面继续 vmm_manager.c 第 2 批。仍然不包含你指定暂缓的函数：
+vmm_manager_vcpu_orphan_create
+vmm_manager_guest_create
+vmm_manager_system_suspend
+vmm_manager_vcpu_set_affinity
+vmm_manager_init
+vmm_manager_guest_destory_exec
+本批覆盖：
+vmm_manager_vcpu_get_state
+vmm_manager_vcpu_set_state
+vmm_manager_vcpu_get_trap_cnt
+vmm_manager_vcpu_store_trap_cnt
+vmm_manager_vcpu_clear_trap_cnt
+vmm_manager_vcpu_get_hcpu
+vmm_manager_vcpu_check_current_hcpu
+vmm_manager_vcpu_hcpu_resched
+manager_vcpu_hcpu_func
+vmm_manager_vcpu_hcpu_func
+vmm_manager_vcpu_get_affinity
+vmm_manager_vcpu_get_hcpu_domain_id
+ 
+⸻
+ 
+一、本批补充 User Code / Stub
+1. User Global / Data 补充
+如果前面已经定义过同名变量，不要重复定义。
+int vcast_scheduler_get_state_rc;
+unsigned int vcast_scheduler_get_state_value;
+
+int vcast_scheduler_get_hcpu_rc;
+unsigned int vcast_scheduler_get_hcpu_value;
+
+int vcast_scheduler_force_resched_rc;
+unsigned int vcast_scheduler_force_resched_hcpu;
+
+unsigned int vcast_scheduler_check_current_hcpu_ret;
+
+unsigned long long vcast_scheduler_get_state_packed_value;
+
+int vcast_smp_ipi_sync_rc;
+unsigned int vcast_smp_ipi_sync_count;
+unsigned int vcast_smp_ipi_async_count;
+
+void *vcast_smp_ipi_sync_arg0;
+void *vcast_smp_ipi_async_arg0;
+
+void *vcast_manager_malloc_ptr;
+unsigned int vcast_manager_malloc_count;
+void *vcast_manager_free_ptr;
+unsigned int vcast_manager_free_count;
+
+unsigned int vcast_is_percpu_vcpu_ret;
+
+unsigned int vcast_hcpu_func_cb_count;
+void *vcast_hcpu_func_cb_vcpu;
+void *vcast_hcpu_func_cb_data;
+ 
+⸻
+ 
+2. Test Case Init 补充
+vcast_scheduler_get_state_rc = 0;
+vcast_scheduler_get_state_value = 0U;
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 0U;
+
+vcast_scheduler_force_resched_rc = 0;
+vcast_scheduler_force_resched_hcpu = 0U;
+
+vcast_scheduler_check_current_hcpu_ret = 0U;
+
+vcast_scheduler_get_state_packed_value = 0ULL;
+
+vcast_smp_ipi_sync_rc = 0;
+vcast_smp_ipi_sync_count = 0U;
+vcast_smp_ipi_async_count = 0U;
+vcast_smp_ipi_sync_arg0 = 0;
+vcast_smp_ipi_async_arg0 = 0;
+
+vcast_manager_malloc_ptr = 0;
+vcast_manager_malloc_count = 0U;
+vcast_manager_free_ptr = 0;
+vcast_manager_free_count = 0U;
+
+vcast_is_percpu_vcpu_ret = 0U;
+
+vcast_hcpu_func_cb_count = 0U;
+vcast_hcpu_func_cb_vcpu = 0;
+vcast_hcpu_func_cb_data = 0;
+ 
+⸻
+ 
+3. Unit Prefix User Code 补充
+改写目的： 给 manager_vcpu_hcpu_func 和 vmm_manager_vcpu_hcpu_func 提供测试 callback。
+static void vcast_hcpu_func_cb(struct vmm_vcpu *vcpu, void *data)
+{
+    vcast_hcpu_func_cb_count++;
+    vcast_hcpu_func_cb_vcpu = vcpu;
+    vcast_hcpu_func_cb_data = data;
+}
+ 
+⸻
+ 
+4. Stub：
+vmm_scheduler_get_state
+改写目的： 隔离 scheduler 状态查询，通过返回值控制 vmm_manager_vcpu_get_state 的成功 / 失败路径。
+if (state) {
+    *state = vcast_scheduler_get_state_value;
+}
+
+return vcast_scheduler_get_state_rc;
+ 
+⸻
+ 
+5. Stub：
+vmm_scheduler_state_change
+如果上一批已经加过，可以继续使用原来的。 改写目的： 隔离 scheduler 状态切换副作用，同时记录入参。
+vcast_scheduler_state_change_count++;
+vcast_scheduler_state_change_vcpu = (void *)vcpu;
+vcast_scheduler_state_change_state = new_state;
+
+return vcast_scheduler_state_change_rc;
+ 
+⸻
+ 
+6. Stub：
+vmm_scheduler_get_hcpu
+改写目的： 隔离 scheduler HCPU 查询，通过返回值控制 vmm_manager_vcpu_get_hcpu 和依赖它的函数路径。
+if (hcpu) {
+    *hcpu = vcast_scheduler_get_hcpu_value;
+}
+
+return vcast_scheduler_get_hcpu_rc;
+ 
+⸻
+ 
+7. Stub：
+vmm_scheduler_force_resched
+改写目的： 隔离真实 scheduler resched 副作用，同时记录目标 HCPU。
+vcast_scheduler_force_resched_hcpu = hcpu;
+return vcast_scheduler_force_resched_rc;
+ 
+⸻
+ 
+8. Stub：
+vmm_scheduler_check_current_hcpu
+改写目的： 隔离 scheduler 当前 HCPU 判断，通过变量控制布尔返回。
+return vcast_scheduler_check_current_hcpu_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+9. Stub：
+vmm_scheduler_get_state_packed
+改写目的： 为 vmm_manager_vcpu_hcpu_func 提供可控 packed state。
+return vcast_scheduler_get_state_packed_value;
+ 
+⸻
+ 
+10. Stub：
+vmm_cpumask_of
+改写目的： 为 HCPU IPI 调用提供非空 CPU mask 指针，避免依赖真实 CPU mask 构造。
+static struct vmm_cpumask mask;
+
+return &mask;
+ 
+⸻
+ 
+11. Stub：
+vmm_smp_ipi_sync_call
+改写目的： 隔离真实同步 IPI 副作用，并记录是否走同步路径。
+vcast_smp_ipi_sync_count++;
+vcast_smp_ipi_sync_arg0 = arg0;
+
+return vcast_smp_ipi_sync_rc;
+如果你的 VectorCAST stub 参数名不是 arg0，按实际参数名替换。
+ 
+⸻
+ 
+12. Stub：
+vmm_smp_ipi_async_call
+改写目的： 隔离真实异步 IPI 副作用，并记录是否走异步路径。
+vcast_smp_ipi_async_count++;
+vcast_smp_ipi_async_arg0 = arg0;
+
+return;
+如果你的 VectorCAST stub 参数名不是 arg0，按实际参数名替换。
+ 
+⸻
+ 
+13. Stub：
+vmm_malloc
+改写目的： 为 vmm_manager_vcpu_store_trap_cnt 提供可控内存返回，避免真实堆依赖。
+vcast_manager_malloc_count++;
+return vcast_manager_malloc_ptr;
+ 
+⸻
+ 
+14. Stub：
+vmm_free
+改写目的： 隔离真实释放副作用，并记录释放指针。
+vcast_manager_free_count++;
+vcast_manager_free_ptr = ptr;
+return;
+如果参数名不是 ptr，按实际参数名替换。
+ 
+⸻
+ 
+15. Stub：
+arch_atomic64_read
+改写目的： vmm_manager_vcpu_get_trap_cnt 读取 vcpu->trap_stat 中的 atomic64 计数。这里按等价行为返回 atom->counter，避免架构原子实现或汇编依赖。
+if (!atom) {
+    return 0ULL;
+}
+
+return atom->counter;
+ 
+⸻
+ 
+16. Stub：
+is_percpu_vcpu
+改写目的： 为 HCPU domain 相关函数提供可控 percpu 判断，避免依赖真实名称规则。
+return vcast_is_percpu_vcpu_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+二、
+vmm_manager_vcpu_get_state
+vmm_manager_vcpu_get_state.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_get_state.vcpu>> = 0;
+期望值
+return = 0x01
+注释
+测试目的：验证 vmm_manager_vcpu_get_state 在 vcpu 为空时返回 UNKNOWN 状态。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_get_state。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_state。 等价列表：空 VCPU 指针。 其它说明：VMM_VCPU_STATE_UNKNOWN=0x01。本用例覆盖 !vcpu 为 true 的路径。 通过准则：函数返回 0x01。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_state.002.FI.scheduler_get_state_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_state_rc = -1;
+vcast_scheduler_get_state_value = 0x08U;
+
+<<vmm_manager.vmm_manager_vcpu_get_state.vcpu>> = &vcpu;
+期望值
+return = 0x01
+注释
+测试目的：通过故障注入验证 scheduler 状态查询失败时，vmm_manager_vcpu_get_state 返回 UNKNOWN。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_state stub 返回 -1。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_state_rc=-1。 step3、设置入参 vcpu=&vcpu。 step4、调用 vmm_manager_vcpu_get_state。 step5、观察返回值。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_get_state。 等价列表：scheduler get_state 失败。 其它说明：覆盖 vmm_scheduler_get_state(vcpu, &state) != VMM_OK 为 true 的路径。 通过准则：函数返回 0x01。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_state.003.R.running
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_state_rc = 0;
+vcast_scheduler_get_state_value = 0x08U;
+
+<<vmm_manager.vmm_manager_vcpu_get_state.vcpu>> = &vcpu;
+期望值
+return = 0x08
+注释
+测试目的：验证 vmm_manager_vcpu_get_state 在 scheduler 状态查询成功时返回查询到的状态。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_state 返回 RUNNING 状态。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_state_rc=0。 step3、设置 vcast_scheduler_get_state_value=0x08。 step4、调用 vmm_manager_vcpu_get_state。 step5、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_get_state。 等价列表：状态查询成功。 其它说明：VMM_VCPU_STATE_RUNNING=0x08。 通过准则：函数返回 0x08。
+ 
+⸻
+ 
+三、
+vmm_manager_vcpu_set_state
+vmm_manager_vcpu_set_state.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x02U;
+期望值
+return = -1
+注释
+测试目的：验证 vmm_manager_vcpu_set_state 在 vcpu 为空时返回失败。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、设置 new_state=0x02。 step3、调用 vmm_manager_vcpu_set_state。 step4、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_state.002.IN.reset_hcpu_unknown
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = -1;
+vcast_scheduler_get_hcpu_value = 0xFFFFFFFFU;
+
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x02U;
+期望值
+return = -1
+注释
+测试目的：验证设置 RESET 状态时，如果目标 VCPU 的 HCPU 未知，则返回失败。 用例类别：接口测试 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_hcpu 返回失败。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=-1。 step3、设置 new_state=0x02。 step4、调用 vmm_manager_vcpu_set_state。 step5、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：RESET 状态切换，HCPU unknown。 其它说明：VMM_VCPU_STATE_RESET=0x02；当 vmm_manager_vcpu_get_hcpu 返回 unknown 时，函数返回 VMM_EFAIL=-1。 通过准则：函数返回 -1。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_state.003.R.reset_ipi_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 2U;
+
+vcast_smp_ipi_sync_rc = 0;
+vcast_smp_ipi_sync_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x02U;
+期望值
+return = 0
+vcast_smp_ipi_sync_count = 1
+注释
+测试目的：验证设置 RESET 状态时，如果 HCPU 有效，则通过同步 IPI 执行 reset 并返回 IPI 调用结果。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 HCPU 为 2；设置同步 IPI 返回 0。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=0。 step3、设置 vcast_scheduler_get_hcpu_value=2。 step4、设置 vcast_smp_ipi_sync_rc=0。 step5、设置 new_state=0x02。 step6、调用 vmm_manager_vcpu_set_state。 step7、观察返回值和同步 IPI 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：RESET 状态切换，同步 IPI 成功。 其它说明：覆盖 new_state == VMM_VCPU_STATE_RESET 为 true 且 HCPU 有效的路径。 通过准则：函数返回 0；vcast_smp_ipi_sync_count=1。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_state.004.FI.reset_ipi_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 1U;
+
+vcast_smp_ipi_sync_rc = -9;
+vcast_smp_ipi_sync_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x02U;
+期望值
+return = -9
+vcast_smp_ipi_sync_count = 1
+注释
+测试目的：通过故障注入验证设置 RESET 状态时同步 IPI 失败，函数返回 IPI 的错误码。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 HCPU 为 1；设置同步 IPI 返回 -9。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=0。 step3、设置 vcast_scheduler_get_hcpu_value=1。 step4、设置 vcast_smp_ipi_sync_rc=-9。 step5、设置 new_state=0x02。 step6、调用 vmm_manager_vcpu_set_state。 step7、观察返回值和同步 IPI 调用次数。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：RESET 状态切换，同步 IPI 失败。 其它说明：该函数直接返回 vmm_smp_ipi_sync_call 的返回值。 通过准则：函数返回 -9；vcast_smp_ipi_sync_count=1。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_state.005.R.ready_state_change_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_state_change_count = 0U;
+vcast_scheduler_state_change_rc = 0;
+vcast_scheduler_state_change_state = 0U;
+vcast_scheduler_state_change_vcpu = 0;
+
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x04U;
+期望值
+return = 0
+vcast_scheduler_state_change_count = 1
+vcast_scheduler_state_change_vcpu = &vcpu
+vcast_scheduler_state_change_state = 0x04
+注释
+测试目的：验证设置非 RESET 状态时，函数直接调用 scheduler state change。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 scheduler state change 返回 0。 测试步骤： step1、清零 vcpu。 step2、清零 scheduler state change 记录变量。 step3、设置 new_state=0x04。 step4、调用 vmm_manager_vcpu_set_state。 step5、观察返回值、调用次数、目标 VCPU 和目标状态。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：非 RESET 状态切换成功。 其它说明：VMM_VCPU_STATE_READY=0x04。覆盖 new_state == VMM_VCPU_STATE_RESET 为 false 的路径。 通过准则：函数返回 0；scheduler state change 被调用一次，状态为 0x04。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_state.006.FI.ready_state_change_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_state_change_count = 0U;
+vcast_scheduler_state_change_rc = -9;
+
+<<vmm_manager.vmm_manager_vcpu_set_state.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_state.new_state>> = 0x04U;
+期望值
+return = -9
+vcast_scheduler_state_change_count = 1
+注释
+测试目的：通过故障注入验证设置非 RESET 状态时，如果 scheduler state change 失败，函数返回该错误码。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 scheduler state change 返回 -9。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_state_change_rc=-9。 step3、设置 new_state=0x04。 step4、调用 vmm_manager_vcpu_set_state。 step5、观察返回值和 scheduler state change 调用次数。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_set_state。 等价列表：非 RESET 状态切换失败。 其它说明：函数直接返回 vmm_scheduler_state_change 的返回值。 通过准则：函数返回 -9；scheduler state change 被调用一次。
+ 
+⸻
+ 
+四、
+vmm_manager_vcpu_get_trap_cnt
+vmm_manager_vcpu_get_trap_cnt.001.IN.vcpu_null
+Begin User Code
+static struct trap_cnt cnt;
+
+memset(&cnt, 0, sizeof(cnt));
+
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.cnt>> = &cnt;
+期望值
+return = -1
+注释
+测试目的：验证 vmm_manager_vcpu_get_trap_cnt 在 vcpu 为空时返回失败。 用例类别：接口测试 预置条件：构造有效 cnt，但设置 vcpu=NULL。 测试步骤： step1、清零 cnt。 step2、设置入参 vcpu=NULL。 step3、设置入参 cnt=&cnt。 step4、调用 vmm_manager_vcpu_get_trap_cnt。 step5、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_trap_cnt。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu || !cnt) 中 !vcpu 为 true。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_trap_cnt.002.IN.cnt_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.cnt>> = 0;
+期望值
+return = -1
+注释
+测试目的：验证 vmm_manager_vcpu_get_trap_cnt 在输出参数 cnt 为空时返回失败。 用例类别：接口测试 预置条件：构造有效 vcpu，但设置 cnt=NULL。 测试步骤： step1、清零 vcpu。 step2、设置入参 vcpu=&vcpu。 step3、设置入参 cnt=NULL。 step4、调用 vmm_manager_vcpu_get_trap_cnt。 step5、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_trap_cnt。 等价列表：空输出参数指针。 其它说明：覆盖 if (!vcpu || !cnt) 中 !cnt 为 true。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_trap_cnt.003.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct trap_cnt cnt;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&cnt, 0, sizeof(cnt));
+
+vcpu.trap_stat.wfx_inst.counter = 1ULL;
+vcpu.trap_stat.smc_inst.counter = 2ULL;
+vcpu.trap_stat.hvc_inst.counter = 3ULL;
+vcpu.trap_stat.sys_inst.counter = 4ULL;
+vcpu.trap_stat.inst_abort.counter = 5ULL;
+vcpu.trap_stat.data_abort.counter = 6ULL;
+
+vcpu.trap_stat.irq_cnt[0].counter = 7ULL;
+vcpu.trap_stat.irq_cnt[1].counter = 8ULL;
+vcpu.trap_stat.irq_cnt[2].counter = 9ULL;
+vcpu.trap_stat.irq_cnt[3].counter = 10ULL;
+
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_get_trap_cnt.cnt>> = &cnt;
+期望值
+return = 0
+
+cnt.wfx_cnt = 1
+cnt.smc_cnt = 2
+cnt.hvc_cnt = 3
+cnt.sys_cnt = 4
+cnt.inst_abort_cnt = 5
+cnt.data_abort_cnt = 6
+
+cnt.sgi_cnt = 7
+cnt.ppi_cnt = 8
+cnt.spi_cnt = 9
+cnt.lpi_cnt = 10
+
+cnt.ec_all = 21
+cnt.irq_all = 34
+注释
+测试目的：验证 vmm_manager_vcpu_get_trap_cnt 能读取 VCPU trap 计数并计算异常计数总和和中断计数总和。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 cnt，并设置各 trap 计数字段。 测试步骤： step1、清零 vcpu 和 cnt。 step2、设置 WFX/SMC/HVC/SYS/inst abort/data abort 计数为 1 到 6。 step3、设置 SGI/PPI/SPI/LPI 计数为 7 到 10。 step4、调用 vmm_manager_vcpu_get_trap_cnt。 step5、观察返回值、各输出计数和汇总计数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_get_trap_cnt。 等价列表：trap count 获取成功。 其它说明：ec_all=1+2+3+4+5+6=21；irq_all=7+8+9+10=34。 通过准则：函数返回 0；所有输出字段等于期望值。
+ 
+⸻
+ 
+五、
+vmm_manager_vcpu_store_trap_cnt
+vmm_manager_vcpu_store_trap_cnt.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_store_trap_cnt.vcpu>> = 0;
+期望值
+return = NULL
+注释
+测试目的：验证 vmm_manager_vcpu_store_trap_cnt 在 vcpu 为空时返回空指针。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_store_trap_cnt。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_store_trap_cnt。 等价列表：空 VCPU 指针。 其它说明：覆盖 !vcpu 为 true 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_store_trap_cnt.002.IN.id_out_of_range
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = CONFIG_MAX_VCPU_COUNT;
+
+<<vmm_manager.vmm_manager_vcpu_store_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = NULL
+注释
+测试目的：验证 vmm_manager_vcpu_store_trap_cnt 在 VCPU id 超出范围时返回空指针。 用例类别：接口测试 预置条件：构造有效 vcpu，并设置 vcpu.id=CONFIG_MAX_VCPU_COUNT。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.id=CONFIG_MAX_VCPU_COUNT。 step3、调用 vmm_manager_vcpu_store_trap_cnt。 step4、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_store_trap_cnt。 等价列表：非法 VCPU id。 其它说明：覆盖 (unsigned int)vcpu->id >= CONFIG_MAX_VCPU_COUNT 为 true 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_store_trap_cnt.003.R.old_exists
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct trap_cnt old;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old, 0, sizeof(old));
+
+vcpu.id = 1U;
+old.ec_all = 123ULL;
+
+old_cnt[1] = &old;
+
+<<vmm_manager.vmm_manager_vcpu_store_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = &old
+注释
+测试目的：验证 vmm_manager_vcpu_store_trap_cnt 在指定 VCPU 已存在历史 trap 计数缓存时，直接返回原缓存指针。 用例类别：基于需求的测试 预置条件：构造 vcpu 和 old，设置 old_cnt[1]=&old。 测试步骤： step1、清零 vcpu 和 old。 step2、设置 vcpu.id=1。 step3、设置 old_cnt[1]=&old。 step4、调用 vmm_manager_vcpu_store_trap_cnt。 step5、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_store_trap_cnt。 等价列表：历史计数缓存已存在。 其它说明：覆盖 if (old_cnt[vcpu->id]) 为 true 的路径。 通过准则：函数返回 &old。
+ 
+⸻
+ 
+vmm_manager_vcpu_store_trap_cnt.004.FI.malloc_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 2U;
+old_cnt[2] = NULL;
+
+vcast_manager_malloc_ptr = 0;
+vcast_manager_malloc_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_store_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = NULL
+vcast_manager_malloc_count = 1
+注释
+测试目的：通过故障注入验证 vmm_manager_vcpu_store_trap_cnt 在内存申请失败时返回空指针。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 old_cnt[2]=NULL；设置 vmm_malloc stub 返回 NULL。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.id=2。 step3、设置 old_cnt[2]=NULL。 step4、设置 vcast_manager_malloc_ptr=0。 step5、调用 vmm_manager_vcpu_store_trap_cnt。 step6、观察返回值和 malloc 调用次数。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_store_trap_cnt。 等价列表：malloc 失败。 其它说明：覆盖 if (!old_cnt[vcpu->id]) 中分配失败路径。 通过准则：函数返回 NULL；vcast_manager_malloc_count=1。
+ 
+⸻
+ 
+vmm_manager_vcpu_store_trap_cnt.005.R.malloc_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct trap_cnt storage;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&storage, 0xAA, sizeof(storage));
+
+vcpu.id = 3U;
+old_cnt[3] = NULL;
+
+vcast_manager_malloc_ptr = &storage;
+vcast_manager_malloc_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_store_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = &storage
+old_cnt[3] = &storage
+storage.ec_all = 0
+storage.irq_all = 0
+vcast_manager_malloc_count = 1
+注释
+测试目的：验证 vmm_manager_vcpu_store_trap_cnt 在历史缓存不存在且内存申请成功时，创建并清零 trap 计数缓存。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 storage；设置 old_cnt[3]=NULL；设置 vmm_malloc 返回 &storage。 测试步骤： step1、清零 vcpu。 step2、将 storage 填充为非 0。 step3、设置 vcpu.id=3。 step4、设置 old_cnt[3]=NULL。 step5、设置 vcast_manager_malloc_ptr=&storage。 step6、调用 vmm_manager_vcpu_store_trap_cnt。 step7、观察返回值、old_cnt[3]、storage 内容和 malloc 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_store_trap_cnt。 等价列表：malloc 成功。 其它说明：源码中分配成功后会 memset(old_cnt[vcpu->id], 0, sizeof(struct trap_cnt))。 通过准则：函数返回 &storage；old_cnt[3]=&storage；storage 中关键字段清零；malloc 调用一次。
+ 
+⸻
+ 
+六、
+vmm_manager_vcpu_clear_trap_cnt
+vmm_manager_vcpu_clear_trap_cnt.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_clear_trap_cnt.vcpu>> = 0;
+期望值
+return = -1
+注释
+测试目的：验证 vmm_manager_vcpu_clear_trap_cnt 在 vcpu 为空时返回失败。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_clear_trap_cnt。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_clear_trap_cnt。 等价列表：空 VCPU 指针。 其它说明：覆盖 !vcpu 为 true 的路径。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+vmm_manager_vcpu_clear_trap_cnt.002.IN.id_out_of_range
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = CONFIG_MAX_VCPU_COUNT;
+
+<<vmm_manager.vmm_manager_vcpu_clear_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = -1
+注释
+测试目的：验证 vmm_manager_vcpu_clear_trap_cnt 在 VCPU id 超出范围时返回失败。 用例类别：接口测试 预置条件：构造有效 vcpu，并设置 vcpu.id=CONFIG_MAX_VCPU_COUNT。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.id=CONFIG_MAX_VCPU_COUNT。 step3、调用 vmm_manager_vcpu_clear_trap_cnt。 step4、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_clear_trap_cnt。 等价列表：非法 VCPU id。 其它说明：覆盖 (unsigned int)vcpu->id >= CONFIG_MAX_VCPU_COUNT 为 true 的路径。 通过准则：函数返回 VMM_EFAIL=-1。
+ 
+⸻
+ 
+vmm_manager_vcpu_clear_trap_cnt.003.R.old_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 4U;
+old_cnt[4] = NULL;
+
+vcast_manager_free_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_clear_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = 0
+vcast_manager_free_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_clear_trap_cnt 在历史缓存不存在时直接返回成功，且不调用释放函数。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 old_cnt[4]=NULL。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.id=4。 step3、设置 old_cnt[4]=NULL。 step4、清零 free 调用次数。 step5、调用 vmm_manager_vcpu_clear_trap_cnt。 step6、观察返回值和 free 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_clear_trap_cnt。 等价列表：历史缓存不存在。 其它说明：覆盖 if (!old_cnt[vcpu->id]) 为 true 的路径。 通过准则：函数返回 0；vcast_manager_free_count=0。
+ 
+⸻
+ 
+vmm_manager_vcpu_clear_trap_cnt.004.R.old_exists
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct trap_cnt old;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old, 0, sizeof(old));
+
+vcpu.id = 5U;
+old_cnt[5] = &old;
+
+vcast_manager_free_count = 0U;
+vcast_manager_free_ptr = 0;
+
+<<vmm_manager.vmm_manager_vcpu_clear_trap_cnt.vcpu>> = &vcpu;
+期望值
+return = 0
+vcast_manager_free_count = 1
+vcast_manager_free_ptr = &old
+old_cnt[5] = NULL
+注释
+测试目的：验证 vmm_manager_vcpu_clear_trap_cnt 在历史缓存存在时释放缓存并清空 old_cnt 指针。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 old，设置 old_cnt[5]=&old。 测试步骤： step1、清零 vcpu 和 old。 step2、设置 vcpu.id=5。 step3、设置 old_cnt[5]=&old。 step4、清零 free 记录变量。 step5、调用 vmm_manager_vcpu_clear_trap_cnt。 step6、观察返回值、free 记录和 old_cnt[5]。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_clear_trap_cnt。 等价列表：历史缓存存在。 其它说明：覆盖释放历史缓存路径。 通过准则：函数返回 0；free 调用一次；释放指针为 &old；old_cnt[5]=NULL。
+ 
+⸻
+ 
+七、
+vmm_manager_vcpu_get_hcpu
+vmm_manager_vcpu_get_hcpu.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_get_hcpu.vcpu>> = 0;
+期望值
+return = 0xFFFFFFFF
+注释
+测试目的：验证 vmm_manager_vcpu_get_hcpu 在 vcpu 为空时返回 unknown HCPU。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_get_hcpu。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_hcpu。 等价列表：空 VCPU 指针。 其它说明：通常 VMM_VCPU_HCPU_UNKNOWN=0xFFFFFFFF。如果工程实际值不同，以工程定义为准。 通过准则：函数返回 0xFFFFFFFF。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_hcpu.002.FI.scheduler_get_hcpu_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = -1;
+vcast_scheduler_get_hcpu_value = 3U;
+
+<<vmm_manager.vmm_manager_vcpu_get_hcpu.vcpu>> = &vcpu;
+期望值
+return = 0xFFFFFFFF
+注释
+测试目的：通过故障注入验证 scheduler HCPU 查询失败时，vmm_manager_vcpu_get_hcpu 返回 unknown HCPU。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_hcpu 返回 -1。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=-1。 step3、调用 vmm_manager_vcpu_get_hcpu。 step4、观察返回值。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_get_hcpu。 等价列表：scheduler get_hcpu 失败。 其它说明：覆盖 vmm_scheduler_get_hcpu(vcpu, &vhcpu) != VMM_OK 为 true 的路径。 通过准则：函数返回 0xFFFFFFFF。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_hcpu.003.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 3U;
+
+<<vmm_manager.vmm_manager_vcpu_get_hcpu.vcpu>> = &vcpu;
+期望值
+return = 3
+注释
+测试目的：验证 vmm_manager_vcpu_get_hcpu 在 scheduler 查询成功时返回查询到的 HCPU 编号。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_hcpu 返回 HCPU 3。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=0。 step3、设置 vcast_scheduler_get_hcpu_value=3。 step4、调用 vmm_manager_vcpu_get_hcpu。 step5、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_get_hcpu。 等价列表：HCPU 查询成功。 其它说明：覆盖正常返回路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+八、
+vmm_manager_vcpu_check_current_hcpu
+vmm_manager_vcpu_check_current_hcpu.001.R.true
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_check_current_hcpu_ret = 1U;
+
+<<vmm_manager.vmm_manager_vcpu_check_current_hcpu.vcpu>> = &vcpu;
+期望值
+return = 1
+注释
+测试目的：验证 vmm_manager_vcpu_check_current_hcpu 会返回 scheduler 当前 HCPU 检查结果 true。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 scheduler 检查结果为 true。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_check_current_hcpu_ret=1。 step3、调用 vmm_manager_vcpu_check_current_hcpu。 step4、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_check_current_hcpu。 等价列表：当前 HCPU 检查为 true。 其它说明：该函数直接转调 vmm_scheduler_check_current_hcpu。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+vmm_manager_vcpu_check_current_hcpu.002.R.false
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_check_current_hcpu_ret = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_check_current_hcpu.vcpu>> = &vcpu;
+期望值
+return = 0
+注释
+测试目的：验证 vmm_manager_vcpu_check_current_hcpu 会返回 scheduler 当前 HCPU 检查结果 false。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 scheduler 检查结果为 false。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_check_current_hcpu_ret=0。 step3、调用 vmm_manager_vcpu_check_current_hcpu。 step4、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_check_current_hcpu。 等价列表：当前 HCPU 检查为 false。 其它说明：该函数直接转调 vmm_scheduler_check_current_hcpu。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+九、
+vmm_manager_vcpu_hcpu_resched
+vmm_manager_vcpu_hcpu_resched.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_hcpu_resched.vcpu>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_resched 在 vcpu 为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_hcpu_resched。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_hcpu_resched。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_resched.002.FI.hcpu_unknown
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = -1;
+vcast_scheduler_get_hcpu_value = 0xFFFFFFFFU;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_resched.vcpu>> = &vcpu;
+期望值
+return = -23
+注释
+测试目的：通过故障注入验证目标 VCPU 的 HCPU unknown 时，vmm_manager_vcpu_hcpu_resched 返回 VMM_EFAULT。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 vmm_scheduler_get_hcpu 返回失败。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=-1。 step3、调用 vmm_manager_vcpu_hcpu_resched。 step4、观察返回值。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_hcpu_resched。 等价列表：目标 HCPU unknown。 其它说明：VMM_EFAULT=-23。覆盖 vhcpu == VMM_VCPU_HCPU_UNKNOWN 为 true 的路径。 通过准则：函数返回 -23。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_resched.003.R.force_resched_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 2U;
+
+vcast_scheduler_force_resched_rc = 0;
+vcast_scheduler_force_resched_hcpu = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_resched.vcpu>> = &vcpu;
+期望值
+return = 0
+vcast_scheduler_force_resched_hcpu = 2
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_resched 在目标 HCPU 有效时调用 scheduler force resched 并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 HCPU 为 2；设置 force resched 返回 0。 测试步骤： step1、清零 vcpu。 step2、设置 vcast_scheduler_get_hcpu_rc=0。 step3、设置 vcast_scheduler_get_hcpu_value=2。 step4、设置 vcast_scheduler_force_resched_rc=0。 step5、调用 vmm_manager_vcpu_hcpu_resched。 step6、观察返回值和 force resched 目标 HCPU。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_hcpu_resched。 等价列表：HCPU 有效，强制重调度成功。 其它说明：覆盖正常调用 vmm_scheduler_force_resched(vhcpu) 的路径。 通过准则：函数返回 0；记录的 HCPU 为 2。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_resched.004.FI.force_resched_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_hcpu_rc = 0;
+vcast_scheduler_get_hcpu_value = 1U;
+
+vcast_scheduler_force_resched_rc = -9;
+vcast_scheduler_force_resched_hcpu = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_resched.vcpu>> = &vcpu;
+期望值
+return = -9
+vcast_scheduler_force_resched_hcpu = 1
+注释
+测试目的：通过故障注入验证 scheduler force resched 失败时，vmm_manager_vcpu_hcpu_resched 返回该错误码。 用例类别：故障注入 预置条件：构造有效 vcpu；设置 HCPU 为 1；设置 force resched 返回 -9。 测试步骤： step1、清零 vcpu。 step2、设置 HCPU 查询成功，值为 1。 step3、设置 vcast_scheduler_force_resched_rc=-9。 step4、调用 vmm_manager_vcpu_hcpu_resched。 step5、观察返回值和 force resched 目标 HCPU。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_hcpu_resched。 等价列表：强制重调度失败。 其它说明：函数直接返回 vmm_scheduler_force_resched 的返回值。 通过准则：函数返回 -9；记录的 HCPU 为 1。
+ 
+⸻
+ 
+十、
+manager_vcpu_hcpu_func
+manager_vcpu_hcpu_func.001.R.called
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_hcpu_func_cb_count = 0U;
+vcast_hcpu_func_cb_vcpu = 0;
+vcast_hcpu_func_cb_data = 0;
+
+<<vmm_manager.manager_vcpu_hcpu_func.fptr>> = vcast_hcpu_func_cb;
+<<vmm_manager.manager_vcpu_hcpu_func.vptr>> = &vcpu;
+<<vmm_manager.manager_vcpu_hcpu_func.data>> = (void *)0x1234;
+期望值
+vcast_hcpu_func_cb_count = 1
+vcast_hcpu_func_cb_vcpu = &vcpu
+vcast_hcpu_func_cb_data = 0x1234
+注释
+测试目的：验证 manager_vcpu_hcpu_func 在回调函数和 VCPU 指针均有效时调用回调，并透传 data。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置测试回调 vcast_hcpu_func_cb。 测试步骤： step1、清零 vcpu。 step2、清零回调记录变量。 step3、设置 fptr=vcast_hcpu_func_cb。 step4、设置 vptr=&vcpu。 step5、设置 data=0x1234。 step6、调用 manager_vcpu_hcpu_func。 step7、观察回调记录变量。 用例来源：需求分析。 追踪ID：manager_vcpu_hcpu_func。 等价列表：有效回调和有效 VCPU。 其它说明：覆盖 if (func && vcpu) 为 true 的路径。 通过准则：回调调用次数为 1；回调 VCPU 为 &vcpu；回调 data 为 0x1234。
+ 
+⸻
+ 
+manager_vcpu_hcpu_func.002.IN.func_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_hcpu_func_cb_count = 0U;
+
+<<vmm_manager.manager_vcpu_hcpu_func.fptr>> = 0;
+<<vmm_manager.manager_vcpu_hcpu_func.vptr>> = &vcpu;
+<<vmm_manager.manager_vcpu_hcpu_func.data>> = (void *)0x1234;
+期望值
+vcast_hcpu_func_cb_count = 0
+注释
+测试目的：验证 manager_vcpu_hcpu_func 在回调函数为空时不执行回调。 用例类别：接口测试 预置条件：构造有效 vcpu，但设置 fptr=NULL。 测试步骤： step1、清零 vcpu。 step2、清零回调调用计数。 step3、设置 fptr=NULL。 step4、设置 vptr=&vcpu。 step5、调用 manager_vcpu_hcpu_func。 step6、观察回调调用计数。 用例来源：接口测试。 追踪ID：manager_vcpu_hcpu_func。 等价列表：空回调函数。 其它说明：覆盖 func && vcpu 中 func 为 false 的路径。 通过准则：回调调用次数保持 0。
+ 
+⸻
+ 
+manager_vcpu_hcpu_func.003.IN.vcpu_null
+Begin User Code
+vcast_hcpu_func_cb_count = 0U;
+
+<<vmm_manager.manager_vcpu_hcpu_func.fptr>> = vcast_hcpu_func_cb;
+<<vmm_manager.manager_vcpu_hcpu_func.vptr>> = 0;
+<<vmm_manager.manager_vcpu_hcpu_func.data>> = (void *)0x1234;
+期望值
+vcast_hcpu_func_cb_count = 0
+注释
+测试目的：验证 manager_vcpu_hcpu_func 在 VCPU 指针为空时不执行回调。 用例类别：接口测试 预置条件：设置有效回调函数，但设置 vptr=NULL。 测试步骤： step1、清零回调调用计数。 step2、设置 fptr=vcast_hcpu_func_cb。 step3、设置 vptr=NULL。 step4、调用 manager_vcpu_hcpu_func。 step5、观察回调调用计数。 用例来源：接口测试。 追踪ID：manager_vcpu_hcpu_func。 等价列表：空 VCPU 指针。 其它说明：覆盖 func && vcpu 中 vcpu 为 false 的路径。 通过准则：回调调用次数保持 0。
+ 
+⸻
+ 
+十一、
+vmm_manager_vcpu_hcpu_func
+vmm_manager_vcpu_hcpu_func.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.state_mask>> = 0x08U;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.func>> = vcast_hcpu_func_cb;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.data>> = 0;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.use_async>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_func 在 VCPU 指针为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：设置有效回调函数，但 vcpu=NULL。 测试步骤： step1、设置 vcpu=NULL。 step2、设置 func=vcast_hcpu_func_cb。 step3、调用 vmm_manager_vcpu_hcpu_func。 step4、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_hcpu_func。 等价列表：空 VCPU 指针。 其它说明：覆盖 unlikely(!vcpu || !func) 中 !vcpu 为 true。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_func.002.IN.func_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.state_mask>> = 0x08U;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.func>> = 0;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.data>> = 0;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.use_async>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_func 在回调函数为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 vcpu，但设置 func=NULL。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu=&vcpu。 step3、设置 func=NULL。 step4、调用 vmm_manager_vcpu_hcpu_func。 step5、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_hcpu_func。 等价列表：空回调函数。 其它说明：覆盖 unlikely(!vcpu || !func) 中 !func 为 true。 通过准则：函数返回 -5。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_func.003.R.state_not_match
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_state_packed_value = (((u64)2U) << 32) | 0x04U;
+
+vcast_smp_ipi_sync_count = 0U;
+vcast_smp_ipi_async_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.state_mask>> = 0x08U;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.func>> = vcast_hcpu_func_cb;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.data>> = (void *)0x1234;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.use_async>> = 0;
+期望值
+return = 0
+vcast_smp_ipi_sync_count = 0
+vcast_smp_ipi_async_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_func 在 VCPU 当前状态不匹配 state_mask 时不发送 IPI 并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 packed state 的状态为 READY；设置 state_mask 为 RUNNING。 测试步骤： step1、清零 vcpu。 step2、设置 packed state 为 HCPU 2、状态 READY。 step3、设置 state_mask=0x08。 step4、设置有效回调函数。 step5、调用 vmm_manager_vcpu_hcpu_func。 step6、观察返回值和 IPI 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_hcpu_func。 等价列表：状态不匹配。 其它说明：0x04 为 READY，0x08 为 RUNNING；VCPU_STATE(state_packed) & state_mask 为 0。 通过准则：函数返回 0；同步和异步 IPI 调用次数均为 0。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_func.004.R.state_match_sync
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_state_packed_value = (((u64)2U) << 32) | 0x08U;
+
+vcast_smp_ipi_sync_count = 0U;
+vcast_smp_ipi_async_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.state_mask>> = 0x08U;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.func>> = vcast_hcpu_func_cb;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.data>> = (void *)0x1234;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.use_async>> = 0;
+期望值
+return = 0
+vcast_smp_ipi_sync_count = 1
+vcast_smp_ipi_async_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_func 在状态匹配且 use_async=false 时通过同步 IPI 调用目标 HCPU 函数。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 packed state 的状态为 RUNNING、HCPU 为 2；设置 use_async=false。 测试步骤： step1、清零 vcpu。 step2、设置 packed state 为 HCPU 2、状态 RUNNING。 step3、设置 state_mask=0x08。 step4、设置有效回调函数和 data。 step5、设置 use_async=false。 step6、调用 vmm_manager_vcpu_hcpu_func。 step7、观察返回值、同步 IPI 调用次数和异步 IPI 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_hcpu_func。 等价列表：状态匹配，同步 IPI。 其它说明：覆盖 if (likely(cpu_mask)) 为 true 且 use_async 为 false 的路径。 通过准则：函数返回 0；同步 IPI 调用次数为 1；异步 IPI 调用次数为 0。
+ 
+⸻
+ 
+vmm_manager_vcpu_hcpu_func.005.R.state_match_async
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_get_state_packed_value = (((u64)1U) << 32) | 0x08U;
+
+vcast_smp_ipi_sync_count = 0U;
+vcast_smp_ipi_async_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.state_mask>> = 0x08U;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.func>> = vcast_hcpu_func_cb;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.data>> = (void *)0x5678;
+<<vmm_manager.vmm_manager_vcpu_hcpu_func.use_async>> = 1;
+期望值
+return = 0
+vcast_smp_ipi_sync_count = 0
+vcast_smp_ipi_async_count = 1
+注释
+测试目的：验证 vmm_manager_vcpu_hcpu_func 在状态匹配且 use_async=true 时通过异步 IPI 调用目标 HCPU 函数。 用例类别：基于需求的测试 预置条件：构造有效 vcpu；设置 packed state 的状态为 RUNNING、HCPU 为 1；设置 use_async=true。 测试步骤： step1、清零 vcpu。 step2、设置 packed state 为 HCPU 1、状态 RUNNING。 step3、设置 state_mask=0x08。 step4、设置有效回调函数和 data。 step5、设置 use_async=true。 step6、调用 vmm_manager_vcpu_hcpu_func。 step7、观察返回值、同步 IPI 调用次数和异步 IPI 调用次数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_hcpu_func。 等价列表：状态匹配，异步 IPI。 其它说明：覆盖 use_async 为 true 的路径。 通过准则：函数返回 0；同步 IPI 调用次数为 0；异步 IPI 调用次数为 1。
+ 
+⸻
+ 
+十二、
+vmm_manager_vcpu_get_affinity
+vmm_manager_vcpu_get_affinity.001.IN.vcpu_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_get_affinity.vcpu>> = 0;
+期望值
+return = NULL
+注释
+测试目的：验证 vmm_manager_vcpu_get_affinity 在 vcpu 为空时返回空指针。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 vcpu=NULL。 step2、调用 vmm_manager_vcpu_get_affinity。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_affinity。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_affinity.002.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&mask, 0, sizeof(mask));
+
+vcpu.cpu_affinity = &mask;
+
+<<vmm_manager.vmm_manager_vcpu_get_affinity.vcpu>> = &vcpu;
+期望值
+return = &mask
+注释
+测试目的：验证 vmm_manager_vcpu_get_affinity 在 VCPU 有效时返回其 cpu_affinity 指针。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 mask，并设置 vcpu.cpu_affinity=&mask。 测试步骤： step1、清零 vcpu 和 mask。 step2、设置 vcpu.cpu_affinity=&mask。 step3、调用 vmm_manager_vcpu_get_affinity。 step4、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_get_affinity。 等价列表：VCPU affinity 查询成功。 其它说明：函数内部加读锁后返回 vcpu->cpu_affinity。 通过准则：函数返回 &mask。
+ 
+⸻
+ 
+十三、
+vmm_manager_vcpu_get_hcpu_domain_id
+vmm_manager_vcpu_get_hcpu_domain_id.001.IN.vcpu_null
+Begin User Code
+static unsigned int id;
+
+id = 0xAAAAAAAAU;
+
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.hcpu_domain_id>> = &id;
+期望值
+return = -1
+id = 0xAAAAAAAA
+注释
+测试目的：验证 vmm_manager_vcpu_get_hcpu_domain_id 在 VCPU 为空时返回失败。 用例类别：接口测试 预置条件：构造输出变量 id，并设置 vcpu=NULL。 测试步骤： step1、设置 id=0xAAAAAAAA。 step2、设置入参 vcpu=NULL。 step3、设置输出参数为 &id。 step4、调用 vmm_manager_vcpu_get_hcpu_domain_id。 step5、观察返回值和 id。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_hcpu_domain_id。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：函数返回 -1；id 保持 0xAAAAAAAA。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_hcpu_domain_id.002.IN.percpu_vcpu
+Begin User Code
+static struct vmm_vcpu vcpu;
+static unsigned int id;
+
+memset(&vcpu, 0, sizeof(vcpu));
+id = 0xAAAAAAAAU;
+
+strlcpy(vcpu.name, "idle/0", sizeof(vcpu.name));
+
+vcast_is_percpu_vcpu_ret = 1U;
+
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.hcpu_domain_id>> = &id;
+期望值
+return = -1
+id = 0xAAAAAAAA
+注释
+测试目的：验证 vmm_manager_vcpu_get_hcpu_domain_id 在 VCPU 被识别为 percpu VCPU 时返回失败。 用例类别：接口测试 预置条件：构造有效 vcpu 和输出变量；设置 is_percpu_vcpu stub 返回 true。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.name="idle/0"。 step3、设置 id=0xAAAAAAAA。 step4、设置 vcast_is_percpu_vcpu_ret=1。 step5、调用 vmm_manager_vcpu_get_hcpu_domain_id。 step6、观察返回值和 id。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_get_hcpu_domain_id。 等价列表：percpu VCPU。 其它说明：覆盖 if(is_percpu_vcpu(vcpu->name)) 为 true 的路径。 通过准则：函数返回 -1；id 保持 0xAAAAAAAA。
+ 
+⸻
+ 
+vmm_manager_vcpu_get_hcpu_domain_id.003.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static unsigned int id;
+
+memset(&vcpu, 0, sizeof(vcpu));
+id = 0xAAAAAAAAU;
+
+strlcpy(vcpu.name, "guest/vcpu0", sizeof(vcpu.name));
+vcpu.hcpu_domain_id = 3U;
+
+vcast_is_percpu_vcpu_ret = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_get_hcpu_domain_id.hcpu_domain_id>> = &id;
+期望值
+return = 0
+id = 3
+注释
+测试目的：验证 vmm_manager_vcpu_get_hcpu_domain_id 在普通 VCPU 输入有效时返回 VCPU 的 HCPU domain id。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和输出变量；设置 vcpu.hcpu_domain_id=3；设置 is_percpu_vcpu 返回 false。 测试步骤： step1、清零 vcpu。 step2、设置 vcpu.name="guest/vcpu0"。 step3、设置 vcpu.hcpu_domain_id=3。 step4、设置 id=0xAAAAAAAA。 step5、设置 vcast_is_percpu_vcpu_ret=0。 step6、调用 vmm_manager_vcpu_get_hcpu_domain_id。 step7、观察返回值和 id。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_get_hcpu_domain_id。 等价列表：普通 VCPU domain id 查询成功。 其它说明：覆盖正常读取 vcpu->hcpu_domain_id 并写入输出参数的路径。 通过准则：函数返回 0；id=3。
