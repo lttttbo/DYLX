@@ -1,0 +1,478 @@
+明白。后续我会固定遵循：
+用例类别只使用：
+1. 基于需求的测试
+2. 接口测试
+3. 故障注入
+
+每条用例都单独给完整注释，不再用多条共用模板。
+下面给 vmm_manager.c 第 1 批用例。按照你的要求，本批不包含：
+vmm_manager_vcpu_orphan_create
+vmm_manager_guest_create
+vmm_manager_system_suspend
+vmm_manager_vcpu_set_affinity
+vmm_manager_init
+vmm_manager_guest_destory_exec
+本批先覆盖这些基础函数：
+string_to_board_type
+vmm_manager_hcall_createvm_lock
+vmm_manager_hcall_createvm_unlock
+vmm_manager_lock
+vmm_manager_unlock
+vmm_manager_max_vcpu_count
+vmm_manager_vcpu_count
+vmm_manager_vcpu
+manager_vcpu_ipi_reset
+vmm_manager_vcpu_iterate
+ 
+⸻
+ 
+一、User Code / Stub 方案
+1. Test Case Header User Code
+改写目的： 让每条用例的 Begin User Code 可以使用 memset、strcmp 等基础函数声明。
+#include <string.h>
+ 
+⸻
+ 
+2. User Global / Data
+改写目的： 保存 stub 调用次数、最后一次入参、回调控制变量。这里只定义简单变量，不定义大型结构体对象，避免跨用例污染和不完整类型问题。
+unsigned int vcast_manager_mutex_lock_count;
+unsigned int vcast_manager_mutex_unlock_count;
+void *vcast_manager_last_mutex_lock;
+void *vcast_manager_last_mutex_unlock;
+
+unsigned int vcast_scheduler_state_change_count;
+void *vcast_scheduler_state_change_vcpu;
+unsigned int vcast_scheduler_state_change_state;
+int vcast_scheduler_state_change_rc;
+
+unsigned int vcast_vcpu_iter_count;
+unsigned int vcast_vcpu_iter_last_id;
+unsigned int vcast_vcpu_iter_break_after;
+int vcast_vcpu_iter_rc;
+void *vcast_vcpu_iter_last_priv;
+ 
+⸻
+ 
+3. Unit Prefix User Code
+改写目的： 为 vmm_manager_vcpu_iterate 提供一个可控 callback。该 callback 只用于测试驱动，不替代被测函数逻辑。
+static int vcast_vcpu_iter_cb(struct vmm_vcpu *vcpu, void *priv)
+{
+    vcast_vcpu_iter_count++;
+    vcast_vcpu_iter_last_priv = priv;
+
+    if (vcpu) {
+        vcast_vcpu_iter_last_id = vcpu->id;
+    } else {
+        vcast_vcpu_iter_last_id = 0xFFFFFFFFU;
+    }
+
+    if ((vcast_vcpu_iter_break_after != 0U) &&
+        (vcast_vcpu_iter_count >= vcast_vcpu_iter_break_after)) {
+        return vcast_vcpu_iter_rc;
+    }
+
+    return VMM_OK;
+}
+ 
+⸻
+ 
+4. Stub：
+vmm_mutex_lock
+改写目的： 隔离真实 mutex 依赖，同时记录 manager lock 是否被调用。
+Stub User Code：
+vcast_manager_mutex_lock_count++;
+vcast_manager_last_mutex_lock = (void *)lock;
+return;
+如果 VectorCAST 生成的参数名不是 lock，把 lock 替换成实际参数名。
+ 
+⸻
+ 
+5. Stub：
+vmm_mutex_unlock
+改写目的： 隔离真实 mutex 依赖，同时记录 manager unlock 是否被调用。
+Stub User Code：
+vcast_manager_mutex_unlock_count++;
+vcast_manager_last_mutex_unlock = (void *)lock;
+return;
+如果 VectorCAST 生成的参数名不是 lock，把 lock 替换成实际参数名。
+ 
+⸻
+ 
+6. Stub：
+vmm_scheduler_state_change
+改写目的： manager_vcpu_ipi_reset 只转调 scheduler state change。这里隔离 scheduler 副作用，同时记录目标状态。
+Stub User Code：
+vcast_scheduler_state_change_count++;
+vcast_scheduler_state_change_vcpu = (void *)vcpu;
+vcast_scheduler_state_change_state = new_state;
+return vcast_scheduler_state_change_rc;
+如果 VectorCAST 生成的参数名不是 vcpu / new_state，按实际参数名替换。
+ 
+⸻
+ 
+7. Stub：
+vmm_printf
+改写目的： 避免 warning 路径中的真实打印副作用。
+return 0;
+ 
+⸻
+ 
+8. Test Case Init 默认值
+每条用例默认初始化：
+vcast_manager_mutex_lock_count = 0U;
+vcast_manager_mutex_unlock_count = 0U;
+vcast_manager_last_mutex_lock = 0;
+vcast_manager_last_mutex_unlock = 0;
+
+vcast_scheduler_state_change_count = 0U;
+vcast_scheduler_state_change_vcpu = 0;
+vcast_scheduler_state_change_state = 0U;
+vcast_scheduler_state_change_rc = 0;
+
+vcast_vcpu_iter_count = 0U;
+vcast_vcpu_iter_last_id = 0xFFFFFFFFU;
+vcast_vcpu_iter_break_after = 0U;
+vcast_vcpu_iter_rc = 0;
+vcast_vcpu_iter_last_priv = 0;
+ 
+⸻
+ 
+二、
+string_to_board_type
+ 
+⸻
+ 
+string_to_board_type.001.IN.null_default_evb
+Begin User Code
+<<vmm_manager.string_to_board_type.str>> = 0;
+期望值
+return = 0
+注释
+测试目的：验证 string_to_board_type 在输入字符串为空时返回默认板型 EVB。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置入参 str=NULL。 step2、调用 string_to_board_type。 step3、观察函数返回值。 用例来源：接口测试。 追踪ID：string_to_board_type。 等价列表：空指针输入。 其它说明：BOARD_EVB 的枚举值为 0；本用例覆盖 if(str == NULL) 为 true 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+string_to_board_type.002.R.evb_first_match
+Begin User Code
+static char str[] = "evb";
+
+<<vmm_manager.string_to_board_type.str>> = str;
+期望值
+return = 0
+注释
+测试目的：验证 string_to_board_type 能识别字符串 "evb" 并返回 EVB 板型。 用例类别：基于需求的测试 预置条件：构造字符串 "evb"。 测试步骤： step1、定义字符串 str="evb"。 step2、将 str 作为入参传入 string_to_board_type。 step3、观察函数返回值。 用例来源：需求分析。 追踪ID：string_to_board_type。 等价列表：合法板型字符串 EVB。 其它说明："evb" 是 board_type_map 的第一个元素，返回 BOARD_EVB=0。 通过准则：函数返回 0。
+ 
+⸻
+ 
+string_to_board_type.003.R.sip_alias_mod
+Begin User Code
+static char str[] = "sip";
+
+<<vmm_manager.string_to_board_type.str>> = str;
+期望值
+return = 2
+注释
+测试目的：验证 string_to_board_type 能识别字符串 "sip"，并返回与 MOD 相同的板型值。 用例类别：基于需求的测试 预置条件：构造字符串 "sip"。 测试步骤： step1、定义字符串 str="sip"。 step2、将 str 作为入参传入 string_to_board_type。 step3、观察函数返回值。 用例来源：需求分析。 追踪ID：string_to_board_type。 等价列表：合法板型字符串 SIP。 其它说明：源码中 BOARD_SIP = BOARD_MOD，因此 "sip" 返回值为 2。 通过准则：函数返回 2。
+ 
+⸻
+ 
+string_to_board_type.004.R.fob_b_last_match
+Begin User Code
+static char str[] = "fob-b";
+
+<<vmm_manager.string_to_board_type.str>> = str;
+期望值
+return = 4
+注释
+测试目的：验证 string_to_board_type 能识别 board_type_map 中最后一个有效板型 "fob-b"。 用例类别：基于需求的测试 预置条件：构造字符串 "fob-b"。 测试步骤： step1、定义字符串 str="fob-b"。 step2、将 str 作为入参传入 string_to_board_type。 step3、观察函数返回值。 用例来源：需求分析。 追踪ID：string_to_board_type。 等价列表：合法板型字符串 FOB-B。 其它说明："fob-b" 对应 BOARD_FOB_B=4；本用例覆盖循环经过前面多个不匹配元素后匹配最后元素的路径。 通过准则：函数返回 4。
+ 
+⸻
+ 
+string_to_board_type.005.IN.unknown_default_evb
+Begin User Code
+static char str[] = "unknown";
+
+<<vmm_manager.string_to_board_type.str>> = str;
+期望值
+return = 0
+注释
+测试目的：验证 string_to_board_type 在输入未知板型字符串时返回默认 EVB。 用例类别：接口测试 预置条件：构造未知字符串 "unknown"。 测试步骤： step1、定义字符串 str="unknown"。 step2、将 str 作为入参传入 string_to_board_type。 step3、观察函数返回值。 用例来源：接口测试。 追踪ID：string_to_board_type。 等价列表：未知板型字符串。 其它说明：当遍历 board_type_map 后仍无匹配项时，函数打印 warning 并返回 BOARD_EVB=0。 通过准则：函数返回 0。
+ 
+⸻
+ 
+三、manager 锁函数
+ 
+⸻
+ 
+vmm_manager_hcall_createvm_lock.001.R.lock_called
+Begin User Code
+vcast_manager_mutex_lock_count = 0U;
+vcast_manager_last_mutex_lock = 0;
+期望值
+vcast_manager_mutex_lock_count = 1
+注释
+测试目的：验证 vmm_manager_hcall_createvm_lock 会调用一次 hcall createvm mutex lock。 用例类别：基于需求的测试 预置条件：vmm_mutex_lock 已 stub，并记录调用次数。 测试步骤： step1、清零 vcast_manager_mutex_lock_count。 step2、调用 vmm_manager_hcall_createvm_lock。 step3、观察 vcast_manager_mutex_lock_count。 用例来源：需求分析。 追踪ID：vmm_manager_hcall_createvm_lock。 等价列表：hcall createvm lock 正常调用。 其它说明：该函数无返回值，功能为转调 vmm_mutex_lock(&mngr.hcall_createvm_lock)。 通过准则：vcast_manager_mutex_lock_count=1。
+ 
+⸻
+ 
+vmm_manager_hcall_createvm_unlock.001.R.unlock_called
+Begin User Code
+vcast_manager_mutex_unlock_count = 0U;
+vcast_manager_last_mutex_unlock = 0;
+期望值
+vcast_manager_mutex_unlock_count = 1
+注释
+测试目的：验证 vmm_manager_hcall_createvm_unlock 会调用一次 hcall createvm mutex unlock。 用例类别：基于需求的测试 预置条件：vmm_mutex_unlock 已 stub，并记录调用次数。 测试步骤： step1、清零 vcast_manager_mutex_unlock_count。 step2、调用 vmm_manager_hcall_createvm_unlock。 step3、观察 vcast_manager_mutex_unlock_count。 用例来源：需求分析。 追踪ID：vmm_manager_hcall_createvm_unlock。 等价列表：hcall createvm unlock 正常调用。 其它说明：该函数无返回值，功能为转调 vmm_mutex_unlock(&mngr.hcall_createvm_lock)。 通过准则：vcast_manager_mutex_unlock_count=1。
+ 
+⸻
+ 
+vmm_manager_lock.001.R.lock_called
+Begin User Code
+vcast_manager_mutex_lock_count = 0U;
+vcast_manager_last_mutex_lock = 0;
+期望值
+vcast_manager_mutex_lock_count = 1
+注释
+测试目的：验证 vmm_manager_lock 会调用一次 manager mutex lock。 用例类别：基于需求的测试 预置条件：vmm_mutex_lock 已 stub，并记录调用次数。 测试步骤： step1、清零 vcast_manager_mutex_lock_count。 step2、调用 vmm_manager_lock。 step3、观察 vcast_manager_mutex_lock_count。 用例来源：需求分析。 追踪ID：vmm_manager_lock。 等价列表：manager lock 正常调用。 其它说明：该函数无返回值，功能为转调 vmm_mutex_lock(&mngr.lock)。 通过准则：vcast_manager_mutex_lock_count=1。
+ 
+⸻
+ 
+vmm_manager_unlock.001.R.unlock_called
+Begin User Code
+vcast_manager_mutex_unlock_count = 0U;
+vcast_manager_last_mutex_unlock = 0;
+期望值
+vcast_manager_mutex_unlock_count = 1
+注释
+测试目的：验证 vmm_manager_unlock 会调用一次 manager mutex unlock。 用例类别：基于需求的测试 预置条件：vmm_mutex_unlock 已 stub，并记录调用次数。 测试步骤： step1、清零 vcast_manager_mutex_unlock_count。 step2、调用 vmm_manager_unlock。 step3、观察 vcast_manager_mutex_unlock_count。 用例来源：需求分析。 追踪ID：vmm_manager_unlock。 等价列表：manager unlock 正常调用。 其它说明：该函数无返回值，功能为转调 vmm_mutex_unlock(&mngr.lock)。 通过准则：vcast_manager_mutex_unlock_count=1。
+ 
+⸻
+ 
+四、计数与索引基础函数
+ 
+⸻
+ 
+vmm_manager_max_vcpu_count.001.R
+Begin User Code
+/* 无需特殊构造 */
+期望值
+return = CONFIG_MAX_VCPU_COUNT
+注释
+测试目的：验证 vmm_manager_max_vcpu_count 返回系统配置的最大 VCPU 数量。 用例类别：基于需求的测试 预置条件：无。 测试步骤： step1、调用 vmm_manager_max_vcpu_count。 step2、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_max_vcpu_count。 等价列表：最大 VCPU 数量查询。 其它说明：该函数直接返回 CONFIG_MAX_VCPU_COUNT。如果 VectorCAST 期望栏不能填写宏，请填写工程 expanded 后的实际数值。 通过准则：函数返回值等于 CONFIG_MAX_VCPU_COUNT。
+ 
+⸻
+ 
+vmm_manager_vcpu_count.001.R
+Begin User Code
+mngr.vcpu_count = 3U;
+期望值
+return = 3
+注释
+测试目的：验证 vmm_manager_vcpu_count 返回当前 manager 中记录的 VCPU 数量。 用例类别：基于需求的测试 预置条件：设置 mngr.vcpu_count=3。 测试步骤： step1、设置 mngr.vcpu_count=3。 step2、调用 vmm_manager_vcpu_count。 step3、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_count。 等价列表：VCPU 当前数量查询。 其它说明：函数内部会调用 manager lock/unlock；lock 已 stub，不影响返回值。 通过准则：函数返回 3。
+ 
+⸻
+ 
+vmm_manager_vcpu.001.IN.id_out_of_range
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu.vcpu_id>> = 0xFFFFFFFFU;
+期望值
+return = NULL
+注释
+测试目的：验证 vmm_manager_vcpu 在 VCPU id 超出最大范围时返回空指针。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置 vcpu_id=0xFFFFFFFF。 step2、调用 vmm_manager_vcpu。 step3、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu。 等价列表：非法 VCPU id。 其它说明：覆盖 vcpu_id < CONFIG_MAX_VCPU_COUNT 为 false 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu.002.R.used_vcpu
+Begin User Code
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_avail_array[i] = TRUE;
+}
+
+vcpu_avail_array[1] = FALSE;
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+<<vmm_manager.vmm_manager_vcpu.vcpu_id>> = 1U;
+期望值
+return = &vcpu_array[1]
+注释
+测试目的：验证 vmm_manager_vcpu 在 id 合法且对应 VCPU 已被占用时返回对应 VCPU 指针。 用例类别：基于需求的测试 预置条件：构造 vcpu_array 和 vcpu_avail_array，并设置 id 1 对应 VCPU 为已占用。 测试步骤： step1、定义静态 vcpu_array 和 vcpu_avail_array。 step2、初始化所有 VCPU id。 step3、设置所有 VCPU 为可用。 step4、设置 vcpu_avail_array[1]=FALSE，表示 id 1 已占用。 step5、设置 mngr.vcpu_array=vcpu_array。 step6、设置 mngr.vcpu_avail_array=vcpu_avail_array。 step7、设置入参 vcpu_id=1。 step8、调用 vmm_manager_vcpu。 step9、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu。 等价列表：合法 id，VCPU 已占用。 其它说明：源码中 mngr.vcpu_avail_array[id] == FALSE 表示该 VCPU 实例已被使用。 通过准则：函数返回 &vcpu_array[1]。
+ 
+⸻
+ 
+vmm_manager_vcpu.003.IN.available_vcpu
+Begin User Code
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_avail_array[i] = TRUE;
+}
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+<<vmm_manager.vmm_manager_vcpu.vcpu_id>> = 1U;
+期望值
+return = NULL
+注释
+测试目的：验证 vmm_manager_vcpu 在 id 合法但对应 VCPU 仍可用时返回空指针。 用例类别：接口测试 预置条件：构造 vcpu_array 和 vcpu_avail_array，并设置 id 1 对应 VCPU 为可用。 测试步骤： step1、定义静态 vcpu_array 和 vcpu_avail_array。 step2、初始化所有 VCPU id。 step3、设置所有 VCPU 为可用。 step4、设置 mngr.vcpu_array=vcpu_array。 step5、设置 mngr.vcpu_avail_array=vcpu_avail_array。 step6、设置入参 vcpu_id=1。 step7、调用 vmm_manager_vcpu。 step8、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu。 等价列表：合法 id，VCPU 未占用。 其它说明：覆盖 if (!mngr.vcpu_avail_array[vcpu_id]) 为 false 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+五、
+manager_vcpu_ipi_reset
+manager_vcpu_ipi_reset.001.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_scheduler_state_change_count = 0U;
+vcast_scheduler_state_change_vcpu = 0;
+vcast_scheduler_state_change_state = 0U;
+vcast_scheduler_state_change_rc = 0;
+
+<<vmm_manager.manager_vcpu_ipi_reset.vcpu_ptr>> = &vcpu;
+<<vmm_manager.manager_vcpu_ipi_reset.dummy1>> = 0;
+<<vmm_manager.manager_vcpu_ipi_reset.dummy2>> = 0;
+期望值
+vcast_scheduler_state_change_count = 1
+vcast_scheduler_state_change_vcpu = &vcpu
+vcast_scheduler_state_change_state = 0x02
+注释
+测试目的：验证 manager_vcpu_ipi_reset 会请求 scheduler 将目标 VCPU 状态切换为 RESET。 用例类别：基于需求的测试 预置条件：vmm_scheduler_state_change 已 stub，并记录调用次数、目标 VCPU 和目标状态。 测试步骤： step1、构造静态 vcpu。 step2、清零 scheduler state change 记录变量。 step3、设置 vcpu_ptr=&vcpu。 step4、调用 manager_vcpu_ipi_reset。 step5、观察 scheduler state change 记录变量。 用例来源：需求分析。 追踪ID：manager_vcpu_ipi_reset。 等价列表：IPI reset handler 正常路径。 其它说明：VMM_VCPU_STATE_RESET=0x02。该函数无返回值，只转调 vmm_scheduler_state_change(vcpu, RESET)。 通过准则：调用次数为 1；目标 VCPU 为 &vcpu；目标状态为 0x02。
+ 
+⸻
+ 
+六、
+vmm_manager_vcpu_iterate
+ 
+⸻
+ 
+vmm_manager_vcpu_iterate.001.IN.iter_null
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_iterate.iter>> = 0;
+<<vmm_manager.vmm_manager_vcpu_iterate.priv>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_iterate 在迭代回调为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：无。 测试步骤： step1、设置 iter=NULL。 step2、设置 priv=NULL。 step3、调用 vmm_manager_vcpu_iterate。 step4、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_iterate。 等价列表：空迭代回调。 其它说明：覆盖 if (!iter) 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_iterate.002.R.no_used_vcpu
+Begin User Code
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_avail_array[i] = TRUE;
+}
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+vcast_vcpu_iter_count = 0U;
+vcast_vcpu_iter_break_after = 0U;
+vcast_vcpu_iter_rc = 0;
+
+<<vmm_manager.vmm_manager_vcpu_iterate.iter>> = vcast_vcpu_iter_cb;
+<<vmm_manager.vmm_manager_vcpu_iterate.priv>> = 0;
+期望值
+return = 0
+vcast_vcpu_iter_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_iterate 在没有已占用 VCPU 时不调用迭代回调并返回成功。 用例类别：基于需求的测试 预置条件：构造 VCPU 数组和可用数组，设置所有 vcpu_avail_array 元素为 TRUE。 测试步骤： step1、定义静态 vcpu_array 和 vcpu_avail_array。 step2、初始化所有 VCPU id。 step3、设置所有 VCPU 为可用状态。 step4、设置 mngr.vcpu_array=vcpu_array。 step5、设置 mngr.vcpu_avail_array=vcpu_avail_array。 step6、清零迭代回调计数。 step7、设置 iter=vcast_vcpu_iter_cb。 step8、调用 vmm_manager_vcpu_iterate。 step9、观察返回值和回调计数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_iterate。 等价列表：无已占用 VCPU。 其它说明：源码中 vcpu_avail_array[v] == TRUE 时会 continue，不会调用回调。 通过准则：函数返回 0；vcast_vcpu_iter_count=0。
+ 
+⸻
+ 
+vmm_manager_vcpu_iterate.003.R.two_used_vcpus
+Begin User Code
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_avail_array[i] = TRUE;
+}
+
+vcpu_avail_array[0] = FALSE;
+vcpu_avail_array[2] = FALSE;
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+vcast_vcpu_iter_count = 0U;
+vcast_vcpu_iter_last_id = 0xFFFFFFFFU;
+vcast_vcpu_iter_break_after = 0U;
+vcast_vcpu_iter_rc = 0;
+
+<<vmm_manager.vmm_manager_vcpu_iterate.iter>> = vcast_vcpu_iter_cb;
+<<vmm_manager.vmm_manager_vcpu_iterate.priv>> = (void *)0x1234;
+期望值
+return = 0
+vcast_vcpu_iter_count = 2
+vcast_vcpu_iter_last_id = 2
+vcast_vcpu_iter_last_priv = 0x1234
+注释
+测试目的：验证 vmm_manager_vcpu_iterate 会遍历所有已占用的 VCPU，并把 priv 参数传递给回调。 用例类别：基于需求的测试 预置条件：构造 VCPU 数组和可用数组；设置 id 0 和 id 2 为已占用。 测试步骤： step1、定义静态 vcpu_array 和 vcpu_avail_array。 step2、初始化所有 VCPU id。 step3、设置所有 VCPU 为可用状态。 step4、设置 vcpu_avail_array[0]=FALSE。 step5、设置 vcpu_avail_array[2]=FALSE。 step6、设置 manager 数组指针。 step7、清零迭代回调记录变量。 step8、设置 iter=vcast_vcpu_iter_cb。 step9、设置 priv=0x1234。 step10、调用 vmm_manager_vcpu_iterate。 step11、观察返回值、回调次数、最后一次 VCPU id 和最后一次 priv。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_iterate。 等价列表：多个已占用 VCPU 正常遍历。 其它说明：源码中 vcpu_avail_array[v] == FALSE 表示该 VCPU 已使用，需要调用回调。 通过准则：函数返回 0；回调次数为 2；最后一次 VCPU id 为 2；最后一次 priv 为 0x1234。
+ 
+⸻
+ 
+vmm_manager_vcpu_iterate.004.FI.callback_fail_break
+Begin User Code
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_avail_array[i] = TRUE;
+}
+
+vcpu_avail_array[0] = FALSE;
+vcpu_avail_array[1] = FALSE;
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+vcast_vcpu_iter_count = 0U;
+vcast_vcpu_iter_last_id = 0xFFFFFFFFU;
+vcast_vcpu_iter_break_after = 1U;
+vcast_vcpu_iter_rc = -9;
+
+<<vmm_manager.vmm_manager_vcpu_iterate.iter>> = vcast_vcpu_iter_cb;
+<<vmm_manager.vmm_manager_vcpu_iterate.priv>> = 0;
+期望值
+return = -9
+vcast_vcpu_iter_count = 1
+vcast_vcpu_iter_last_id = 0
+注释
+测试目的：通过故障注入验证 vmm_manager_vcpu_iterate 在回调返回非 0 时立即停止遍历并返回该错误码。 用例类别：故障注入 预置条件：构造两个已占用 VCPU；设置测试回调第一次调用即返回 -9。 测试步骤： step1、定义静态 vcpu_array 和 vcpu_avail_array。 step2、初始化所有 VCPU id。 step3、设置所有 VCPU 为可用状态。 step4、设置 id 0 和 id 1 为已占用。 step5、设置 mngr.vcpu_array=vcpu_array。 step6、设置 mngr.vcpu_avail_array=vcpu_avail_array。 step7、设置 vcast_vcpu_iter_break_after=1。 step8、设置 vcast_vcpu_iter_rc=-9。 step9、设置 iter=vcast_vcpu_iter_cb。 step10、调用 vmm_manager_vcpu_iterate。 step11、观察返回值、回调次数和最后一次 VCPU id。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_iterate。 等价列表：回调失败导致提前退出。 其它说明：覆盖 if (rc) { break; } 为 true 的路径。 通过准则：函数返回 -9；回调次数为 1；最后一次 VCPU id 为 0。
