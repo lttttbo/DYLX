@@ -1,0 +1,56 @@
+可以，把第四章定位成 “方案可行性验证”，不要写成完整测试报告。重点不是覆盖所有场景，而是证明第二章分析的三个模块链路能够跑通，方案具备继续详细设计和实现的基础。
+下面是精简后的第四章版本。
+ 
+⸻
+ 
+4 模块功能可行性验证
+本章针对第二章中分析的三个核心模块进行基础可行性验证，包括 TEEClient 栈、OP-TEE OS、TEE 虚拟化模块。验证目标不是进行完整功能测试，而是通过少量关键用例确认各模块的基本功能链路能够正常工作，为后续详细设计和实现提供依据。
+4.1 测试设计
+本次测试采用分模块验证方式，分别对普通世界侧调用链路、Secure World 内部处理流程以及虚拟化转发流程进行验证。每个模块只选择最能体现其核心功能的测试项，不展开复杂异常场景和压力测试。
+整体测试思路如下：
+验证模块	验证目标	主要观测点
+TEEClient 栈	验证 CA 能够通过 libteec 和 TEE Driver 发起请求	CA 返回值、libteec 调用结果、tee-supplicant 日志
+OP-TEE OS	验证 OP-TEE OS 能够接收请求并执行 TA/PTA	OP-TEE 启动日志、Session 创建、Command 返回
+TEE 虚拟化	验证 Guest 请求经 Mediator 转发后可访问 OP-TEE OS	SMC 截获、GPA 解析、参数转换、返回结果
+本次验证主要使用日志、返回值和截图作为测试数据。具体日志截图可在实际测试完成后补充到对应表格中。
+4.2 TEEClient 栈可行性验证
+TEEClient 栈验证主要用于确认普通世界侧调用链路是否可用。测试时在 Guest 或普通 Linux 环境中运行一个简单 CA 程序，通过 TEEC_InitializeContext、TEEC_OpenSession 和 TEEC_InvokeCommand 发起调用，观察 CA 是否能够正常返回，同时确认 TEE Driver 和 tee-supplicant 是否参与处理。
+该测试用于证明 CA 到 OP-TEE 请求入口的基础链路是可用的，即：
+CA → libteec → Linux TEE Driver → OP-TEE
+测试数据记录如下：
+测试项	测试操作	预期结果	实际结果 / 截图	结论
+CA 基础调用	运行 hello_world CA 或自定义 CA	CA 能够成功打开 Session 并调用 Command	待补充	通过 / 不通过
+tee-supplicant 验证	启动 tee-supplicant 并观察日志	tee-supplicant 正常运行，无异常退出	待补充	通过 / 不通过
+测试结论：若 CA 能够正常完成 Session 创建和 Command 调用，且 tee-supplicant、TEE Driver 无明显错误日志，则说明 TEEClient 栈具备基本可用性，可以作为后续 OP-TEE 虚拟化调用链路的普通世界侧基础。
+4.3 OP-TEE OS 可行性验证
+OP-TEE OS 验证主要用于确认 Secure World 内部处理能力是否正常。测试时观察 OP-TEE OS 启动日志，确认其能够完成初始化；随后通过 CA 调用 TA 或 PTA，验证 OP-TEE OS 能够完成 SMC 请求处理、Session 管理和命令分发。
+该测试用于证明 OP-TEE OS 自身能够作为安全服务后端正常工作，即：
+SMC 入口 → Session 管理 → Command 分发 → TA/PTA 执行 → 返回结果
+测试数据记录如下：
+测试项	测试操作	预期结果	实际结果 / 截图	结论
+OP-TEE OS 启动	启动系统并查看 OP-TEE 日志	OP-TEE OS 初始化成功	待补充	通过 / 不通过
+TA/PTA 调用	调用测试 TA 或 PTA 命令	OP-TEE OS 正常返回执行结果	待补充	通过 / 不通过
+测试结论：若 OP-TEE OS 能够正常启动，并且能够完成 TA/PTA 调用，则说明 Secure World 侧基础功能正常，满足作为虚拟化方案后端安全执行环境的前提条件。
+4.4 TEE 虚拟化可行性验证
+TEE 虚拟化验证主要用于确认 Guest 发起的 OP-TEE 请求能否通过 Hypervisor 和 OP-TEE Mediator 转发到 Secure World。测试时由 Guest 内 CA 发起标准 TEE 调用，Hypervisor 截获 SMC 后进入 Mediator，Mediator 完成 GPA 解析、请求复制、参数转换和 SMC 转发，最终将 OP-TEE OS 返回结果回写给 Guest。
+该测试用于证明 OP-TEE Mediator 方案的主流程是可行的，即：
+Guest SMC → Mediator → 参数转换 → OP-TEE OS → 结果回写 → Guest
+测试数据记录如下：
+测试项	测试操作	预期结果	实际结果 / 截图	结论
+SMC 截获验证	Guest 内运行 CA，触发 OP-TEE SMC	Hypervisor 能够截获 SMC 并进入 Mediator	待补充	通过 / 不通过
+参数转换验证	Guest 通过 a1/a2 传入请求 GPA	Mediator 能完成 GPA 解析和参数转换	待补充	通过 / 不通过
+结果回写验证	TA 返回 output 参数或返回值	Guest 能获取正确执行结果	待补充	通过 / 不通过
+测试结论：若 Guest 发起的 OP-TEE 请求能够被 Mediator 正确截获、转换并转发到 OP-TEE OS，同时 Guest 能够收到正确返回结果，则说明 OP-TEE 虚拟化方案的核心链路具备可行性。
+4.5 简易验证流程图
+flowchart TB
+    A["Guest CA 发起调用"]
+    B["TEEClient 栈<br/>libteec / Driver"]
+    C["Hypervisor<br/>截获 SMC"]
+    D["OP-TEE Mediator<br/>解析 / 转换 / 转发"]
+    E["OP-TEE OS<br/>执行 TA/PTA"]
+    F["结果返回 Guest"]
+
+    A --> B --> C --> D --> E --> F
+4.6 本章结论
+通过上述基础可行性验证，可以从三个层面确认方案的可行性：首先，TEEClient 栈能够正常发起 OP-TEE 请求；其次，OP-TEE OS 能够正常接收请求并完成 TA/PTA 执行；最后，TEE 虚拟化路径下，Mediator 能够完成 Guest 请求的截获、参数转换、Secure World 转发和结果回写。
+因此，若上述验证项均通过，则可以认为当前 OP-TEE 虚拟化方案的主调用链路已经具备可行性，后续可以进入详细设计阶段，进一步补充异常处理、资源隔离、多 Guest 场景、RPC 细节和安全性验证。
