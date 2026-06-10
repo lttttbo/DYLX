@@ -1,0 +1,141 @@
+下面内容可以直接作为 第 4 章 模块功能测试 的初稿使用，和你前面目录中的 2.1 TEEClient 栈分析、2.2 OP-TEE OS 分析、2.3 TEE 虚拟化分析 对应。
+ 
+⸻
+ 
+4 模块功能测试
+本章主要针对第二章中分析的三个核心模块进行功能验证，包括 TEEClient 栈、OP-TEE OS 以及 TEE 虚拟化相关流程。测试目标是验证各模块在标准调用链路中的功能完整性、接口正确性以及模块间交互是否符合预期。测试内容以功能性验证为主，重点覆盖正常调用流程、基础异常输入、RPC 交互以及虚拟化场景下的 SMC 转发与参数处理能力。
+4.1 测试设计
+本次测试采用分层验证方式，先对普通世界侧的 TEEClient 栈进行基础调用测试，再对 OP-TEE OS 内部的会话管理、命令分发、TA/PTA 执行等功能进行验证，最后对 TEE 虚拟化场景下的 OP-TEE Mediator 转发流程进行测试。通过分层测试可以分别确认各模块自身功能正确，再通过端到端用例验证完整调用链路的可用性。
+测试整体分为三类：
+测试模块	测试目标	验证重点
+TEEClient 栈测试	验证 CA 到内核 TEE 驱动的调用链路	libteec API、tee-supplicant、TEE Driver、共享内存
+OP-TEE OS 测试	验证 Secure World 内部处理流程	SMC 入口、Session 管理、Command 分发、TA/PTA 执行
+TEE 虚拟化测试	验证 Guest SMC 经过 Mediator 后可正确转发	GPA 解析、参数复制、地址转换、RPC 转发、结果回写
+测试过程中主要通过 CA 测试程序、OP-TEE 启动日志、tee-supplicant 日志、Hypervisor/Mediator 调试日志以及测试程序返回值进行结果判断。对于需要截图或日志证明的测试项，可以在后续文档中补充实际运行截图。
+4.2 测试环境
+测试环境用于说明本次验证所使用的硬件平台、软件版本和运行条件。由于当前章节为概要设计，具体版本号、提交号和日志截图可以在后续测试执行完成后补充。
+项目	内容
+硬件平台	待补充，例如：A1 EVB / QEMU / 目标板
+Hypervisor	待补充
+Guest OS	待补充，例如：Linux Kernel 版本
+OP-TEE OS	待补充，例如：OP-TEE OS 分支或提交号
+OP-TEE Client	待补充
+tee-supplicant	待补充
+测试 TA/PTA	hello_world TA / 自定义测试 TA / PTA
+编译工具链	待补充，例如：Yocto SDK / GCC 版本
+4.3 TEEClient 栈测试
+TEEClient 栈测试主要验证普通世界侧从 CA 发起请求到 Linux TEE Driver 的完整调用流程。测试时通过 CA 调用 GlobalPlatform TEE Client API，包括初始化上下文、打开 Session、调用 Command、关闭 Session 等操作，确认 libteec 能够正确封装请求，并通过内核 TEE Driver 将请求发送到 OP-TEE OS。同时，对需要普通世界辅助完成的操作，例如安全存储或文件系统访问，需要验证 tee-supplicant 是否能够正常接收并处理 RPC 请求。
+4.3.1 测试用例设计
+用例编号	测试项	测试方法	预期结果
+TC-CLIENT-001	CA 基础调用	运行 hello_world CA，打开 Session 并调用 Command	CA 返回成功，TA 正常执行
+TC-CLIENT-002	libteec 接口测试	调用 TEEC_InitializeContext、TEEC_OpenSession、TEEC_InvokeCommand	API 返回值符合预期
+TC-CLIENT-003	共享内存测试	CA 传入 input/output memref 参数	输入参数可被 TA 读取，输出结果可回写
+TC-CLIENT-004	tee-supplicant 测试	触发安全存储或 RPMB 相关 RPC	tee-supplicant 正常收到并返回 RPC 结果
+TC-CLIENT-005	异常参数测试	传入非法 UUID、非法参数类型或非法长度	调用失败，返回错误码，不影响系统运行
+4.3.2 测试数据
+用例编号	输入数据	实际结果	日志或截图	测试结论
+TC-CLIENT-001	待补充	待补充	待补充	通过 / 不通过
+TC-CLIENT-002	待补充	待补充	待补充	通过 / 不通过
+TC-CLIENT-003	待补充	待补充	待补充	通过 / 不通过
+TC-CLIENT-004	待补充	待补充	待补充	通过 / 不通过
+TC-CLIENT-005	待补充	待补充	待补充	通过 / 不通过
+4.3.3 测试结论
+通过 TEEClient 栈测试，可以验证普通世界侧 CA、libteec、TEE Driver 和 tee-supplicant 之间的基础交互流程是否正常。如果所有测试项均通过，说明普通世界侧具备向 OP-TEE OS 发起标准请求的能力，共享内存传递、Session 管理以及 RPC 辅助流程可以满足后续虚拟化测试的基础要求。
+4.4 OP-TEE OS 测试
+OP-TEE OS 测试主要验证 Secure World 内部的请求处理流程。测试内容覆盖 SMC 请求进入 OP-TEE OS 后的参数解析、会话创建、命令分发、TA/PTA 执行以及结果返回。该部分测试重点不关注虚拟化转发逻辑，而是确认 OP-TEE OS 本身在非虚拟化或标准调用条件下可以正常工作。
+4.4.1 测试用例设计
+用例编号	测试项	测试方法	预期结果
+TC-OS-001	OP-TEE OS 启动测试	启动系统并查看 Secure World 日志	OP-TEE OS 正常初始化
+TC-OS-002	SMC 入口测试	通过 CA 发起标准 OP-TEE 调用	OP-TEE OS 能够接收并处理请求
+TC-OS-003	Session 管理测试	多次打开和关闭 TA Session	Session 创建和释放正常
+TC-OS-004	Command 分发测试	对 TA 调用不同 Command ID	命令能够正确分发到 TA
+TC-OS-005	PTA 调用测试	调用内建 PTA 服务	PTA 返回结果符合预期
+TC-OS-006	RPC 流程测试	触发安全存储等需要 RPC 的操作	OP-TEE OS 能够发起 RPC 并恢复执行
+4.4.2 测试数据
+用例编号	测试输入	观测点	实际结果	日志或截图	测试结论
+TC-OS-001	系统启动	OP-TEE boot log	待补充	待补充	通过 / 不通过
+TC-OS-002	标准 CA 调用	SMC 处理日志	待补充	待补充	通过 / 不通过
+TC-OS-003	多次 Open/Close Session	Session 日志	待补充	待补充	通过 / 不通过
+TC-OS-004	不同 Command ID	TA 执行日志	待补充	待补充	通过 / 不通过
+TC-OS-005	PTA 调用	PTA 返回值	待补充	待补充	通过 / 不通过
+TC-OS-006	安全存储操作	RPC 日志	待补充	待补充	通过 / 不通过
+4.4.3 测试结论
+通过 OP-TEE OS 测试，可以确认 Secure World 内部基础功能运行正常，包括 OP-TEE OS 初始化、SMC 请求处理、会话维护、命令分发、TA/PTA 执行以及 RPC 恢复流程。该部分测试通过后，可以说明 OP-TEE OS 本身具备作为虚拟化后端安全服务的基础能力。
+4.5 TEE 虚拟化测试
+TEE 虚拟化测试主要验证 Guest 发起的 OP-TEE SMC 请求经过 Hypervisor 和 OP-TEE Mediator 后，能够被正确解析、转换并转发到 OP-TEE OS。测试重点包括 Guest GPA 解析、请求结构复制、参数地址转换、共享内存处理、RPC 转发以及返回结果回写。该部分测试用于验证 OP-TEE Mediator 是否能够在不破坏 Guest 隔离性的前提下，为 Guest 提供 OP-TEE 服务访问能力。
+4.5.1 测试用例设计
+用例编号	测试项	测试方法	预期结果
+TC-VIRT-001	Guest SMC 截获测试	Guest 发起 OP-TEE 调用，观察 Hypervisor 日志	Hypervisor 能够截获并进入 Mediator
+TC-VIRT-002	GPA 解析测试	Guest 通过 a1/a2 传入请求 GPA	Mediator 能正确解析并校验 GPA
+TC-VIRT-003	请求复制测试	拷贝 Guest optee_msg_arg 到 Hypervisor	请求结构内容一致
+TC-VIRT-004	参数转换测试	使用 value 和 memref 参数调用 TA	参数可正确转换并传入 OP-TEE OS
+TC-VIRT-005	RPC 转发测试	触发 OP-TEE OS RPC 请求	Mediator 可正确转发并恢复调用
+TC-VIRT-006	结果回写测试	TA 修改 output 参数后返回	Guest 可读取正确返回结果
+TC-VIRT-007	异常输入测试	传入非法 GPA 或非法参数长度	Mediator 拒绝请求并返回错误
+TC-VIRT-008	多 Guest 隔离测试	多个 Guest 分别访问 OP-TEE 服务	Session 和共享内存互不影响
+4.5.2 测试数据
+用例编号	输入条件	Mediator 观测点	OP-TEE OS 观测点	Guest 侧结果	测试结论
+TC-VIRT-001	待补充	SMC trap 日志	-	待补充	通过 / 不通过
+TC-VIRT-002	待补充	GPA 解析结果	-	待补充	通过 / 不通过
+TC-VIRT-003	待补充	msg_arg 副本	-	待补充	通过 / 不通过
+TC-VIRT-004	待补充	参数转换记录	TA 参数日志	待补充	通过 / 不通过
+TC-VIRT-005	待补充	RPC 转发日志	RPC 请求日志	待补充	通过 / 不通过
+TC-VIRT-006	待补充	回写记录	TA 返回值	待补充	通过 / 不通过
+TC-VIRT-007	非法 GPA / 非法长度	错误处理日志	-	返回错误	通过 / 不通过
+TC-VIRT-008	多 Guest 并发或轮询调用	VMID / Session 映射	Session 日志	待补充	通过 / 不通过
+4.5.3 测试结论
+通过 TEE 虚拟化测试，可以验证 OP-TEE Mediator 能够完成 Guest 请求到 OP-TEE OS 请求的转换和转发。若 GPA 解析、请求复制、参数转换、RPC 处理和结果回写均符合预期，则说明虚拟化路径下 Guest 能够安全、稳定地访问 OP-TEE 服务。同时，多 Guest 测试结果可用于验证不同 Guest 之间的会话和共享内存资源是否具备基本隔离能力。
+4.6 端到端验证
+在完成三个模块的独立测试后，需要进行端到端功能验证。端到端测试从 Guest 内的 CA 发起请求开始，依次经过 TEEClient 栈、Hypervisor/Mediator、OP-TEE OS，最终由 TA/PTA 完成处理并将结果返回 Guest。该测试用于确认各模块单独测试通过后，整体链路仍然能够协同工作。
+用例编号	测试链路	测试方法	预期结果	测试结论
+TC-E2E-001	Guest CA → Mediator → OP-TEE OS → TA	运行 hello_world TA	Guest 收到正确返回值	通过 / 不通过
+TC-E2E-002	Guest CA → Mediator → OP-TEE OS → PTA	调用 PTA 服务	PTA 返回结果正确	通过 / 不通过
+TC-E2E-003	Guest CA → Mediator → OP-TEE OS → RPC → Guest	触发安全存储或 RPC 请求	RPC 完成后调用继续执行	通过 / 不通过
+TC-E2E-004	多次连续调用	循环执行 CA 测试程序	多次调用无异常	通过 / 不通过
+端到端测试通过后，可以说明 TEEClient 栈、OP-TEE OS 和 TEE 虚拟化模块之间的基础交互链路已经打通，能够满足后续详细设计和稳定性测试的基础条件。
+4.7 本章测试结论
+本章围绕 TEEClient 栈、OP-TEE OS 和 TEE 虚拟化三个模块进行了模块化测试设计。测试内容覆盖普通世界侧调用链路、Secure World 内部处理流程以及虚拟化场景下的 Mediator 转发流程。通过上述测试，可以验证系统是否具备以下能力：
+验证项	结论
+CA 能够通过 libteec 发起 OP-TEE 调用	待补充
+TEE Driver 与 tee-supplicant 工作正常	待补充
+OP-TEE OS 能够完成 Session 和 Command 处理	待补充
+TA/PTA 能够正常执行并返回结果	待补充
+Mediator 能够完成 GPA 解析和参数转换	待补充
+虚拟化场景下结果能够正确回写 Guest	待补充
+RPC 流程能够在虚拟化场景下恢复执行	待补充
+多 Guest 场景具备基本隔离能力	待补充
+综合来看，如果各项测试均通过，则可以认为当前 OP-TEE 虚拟化方案在功能链路上具备可行性，TEEClient 栈、OP-TEE OS 以及 OP-TEE Mediator 之间的基础交互流程符合设计预期。后续详细设计阶段可继续补充更细粒度的异常路径、并发访问、性能开销和安全隔离测试。
+4.8 简易测试关系图
+flowchart TB
+    A["模块功能测试"]
+
+    A --> B["TEEClient 栈测试"]
+    A --> C["OP-TEE OS 测试"]
+    A --> D["TEE 虚拟化测试"]
+
+    B --> B1["CA / libteec"]
+    B --> B2["TEE Driver"]
+    B --> B3["tee-supplicant"]
+
+    C --> C1["SMC 入口"]
+    C --> C2["Session / Command"]
+    C --> C3["TA / PTA"]
+
+    D --> D1["GPA 解析"]
+    D --> D2["参数转换"]
+    D --> D3["RPC / 回写"]
+
+    B1 --> E["端到端验证"]
+    C3 --> E
+    D3 --> E
+
+    E --> F["测试结论"]
+如果你觉得这个图放在文档里还是偏大，可以改成下面这个更紧凑的版本：
+模块功能测试
+ ├─ TEEClient 栈：CA / libteec / Driver / tee-supplicant
+ ├─ OP-TEE OS：SMC / Session / Command / TA/PTA
+ └─ TEE 虚拟化：GPA / 参数转换 / RPC / 回写
+        ↓
+     端到端验证
+        ↓
+     测试结论
