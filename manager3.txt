@@ -1,0 +1,572 @@
+下面继续 vmm_manager.c 第 3 批。本批补上你指出的：
+__vmm_manager_good_hcpu
+并继续覆盖一组相对独立的 VCPU resource 相关函数：
+vmm_manager_vcpu_resource_add
+vmm_manager_vcpu_resource_remove
+vmm_manager_vcpu_resource_flush
+仍然不包含你指定暂缓的函数：
+vmm_manager_vcpu_orphan_create
+vmm_manager_guest_create
+vmm_manager_system_suspend
+vmm_manager_vcpu_set_affinity
+vmm_manager_init
+vmm_manager_guest_destory_exec
+ 
+⸻
+ 
+一、本批补充 User Code / Stub
+1. User Global / Data 补充
+如果前面已经定义过同名变量，不要重复定义。
+unsigned int vcast_timer_started_ret;
+unsigned int vcast_smp_processor_id_ret;
+
+unsigned long vcast_good_hcpu_affinity_bits;
+unsigned long vcast_good_hcpu_online_bits;
+unsigned long vcast_good_hcpu_effective_bits;
+
+unsigned int vcast_scheduler_get_hcpu_use_map;
+unsigned int vcast_scheduler_get_hcpu_map[CONFIG_MAX_VCPU_COUNT];
+int vcast_scheduler_get_hcpu_rc_map[CONFIG_MAX_VCPU_COUNT];
+
+unsigned int vcast_res_cleanup_count;
+void *vcast_res_cleanup_vcpu;
+void *vcast_res_cleanup_res;
+ 
+⸻
+ 
+2. Test Case Init 补充
+unsigned int vcast_i;
+
+vcast_timer_started_ret = 0U;
+vcast_smp_processor_id_ret = 0U;
+
+vcast_good_hcpu_affinity_bits = 0UL;
+vcast_good_hcpu_online_bits = 0UL;
+vcast_good_hcpu_effective_bits = 0UL;
+
+vcast_scheduler_get_hcpu_use_map = 0U;
+for (vcast_i = 0U; vcast_i < (unsigned int)CONFIG_MAX_VCPU_COUNT; vcast_i++) {
+    vcast_scheduler_get_hcpu_map[vcast_i] = 0xFFFFFFFFU;
+    vcast_scheduler_get_hcpu_rc_map[vcast_i] = 0;
+}
+
+vcast_res_cleanup_count = 0U;
+vcast_res_cleanup_vcpu = 0;
+vcast_res_cleanup_res = 0;
+ 
+⸻
+ 
+3. Unit Prefix User Code 补充
+3.1 resource cleanup 测试回调
+改写目的： 用于 vmm_manager_vcpu_resource_flush 测试，记录 cleanup 是否被调用以及最后一次入参。
+static void vcast_res_cleanup(struct vmm_vcpu *vcpu,
+                              struct vmm_vcpu_resource *res)
+{
+    vcast_res_cleanup_count++;
+    vcast_res_cleanup_vcpu = vcpu;
+    vcast_res_cleanup_res = res;
+}
+ 
+⸻
+ 
+4. Stub：
+vmm_timer_started
+改写目的： __vmm_manager_good_hcpu 需要根据 timer subsystem 是否启动决定走 fallback 还是负载选择路径。单元测试中通过变量控制该条件。
+return vcast_timer_started_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+5. Stub：
+vmm_smp_processor_id
+改写目的： __vmm_manager_good_hcpu 在 timer 未启动或 affinity 为空时返回当前 CPU。单元测试中通过变量控制当前 CPU id。
+return vcast_smp_processor_id_ret;
+ 
+⸻
+ 
+6. Stub：
+vmm_cpumask_and
+改写目的： __vmm_manager_good_hcpu 会对 affinity 和 cpu_online_mask 取交集。这里用 bit 变量模拟交集结果，避免依赖真实 cpumask 构造。
+vcast_good_hcpu_effective_bits =
+    vcast_good_hcpu_affinity_bits & vcast_good_hcpu_online_bits;
+return;
+ 
+⸻
+ 
+7. Stub：
+vmm_cpumask_first
+改写目的： 为 __vmm_manager_good_hcpu 提供可控的第一个可用 CPU。
+unsigned int c;
+
+for (c = 0U; c < (unsigned int)CONFIG_CPU_COUNT; c++) {
+    if (vcast_good_hcpu_effective_bits & (1UL << c)) {
+        return c;
+    }
+}
+
+return CONFIG_CPU_COUNT;
+ 
+⸻
+ 
+8. Stub：
+vmm_cpumask_weight
+改写目的： 为 __vmm_manager_good_hcpu 提供可控 affinity CPU 数量。
+unsigned int c;
+unsigned int count = 0U;
+
+for (c = 0U; c < (unsigned int)CONFIG_CPU_COUNT; c++) {
+    if (vcast_good_hcpu_effective_bits & (1UL << c)) {
+        count++;
+    }
+}
+
+return count;
+ 
+⸻
+ 
+9. Stub：
+vmm_cpumask_test_cpu
+改写目的： 为 __vmm_manager_good_hcpu 判断某个 CPU 是否在有效 affinity 中提供可控结果。
+if (cpu >= (u32)CONFIG_CPU_COUNT) {
+    return FALSE;
+}
+
+return (vcast_good_hcpu_effective_bits & (1UL << cpu)) ? TRUE : FALSE;
+如果 VectorCAST 生成的参数名不是 cpu，请按实际参数名替换。
+ 
+⸻
+ 
+10. Stub：
+vmm_scheduler_get_hcpu
+如果你前面已经有 vmm_scheduler_get_hcpu stub，建议替换为下面这个兼容版本。
+改写目的： 既支持普通单值返回，也支持按 VCPU id 返回不同 HCPU，满足 __vmm_manager_good_hcpu 的负载统计测试。
+if (vcast_scheduler_get_hcpu_use_map &&
+    vcpu &&
+    ((unsigned int)vcpu->id < (unsigned int)CONFIG_MAX_VCPU_COUNT)) {
+    if (hcpu) {
+        *hcpu = vcast_scheduler_get_hcpu_map[vcpu->id];
+    }
+    return vcast_scheduler_get_hcpu_rc_map[vcpu->id];
+}
+
+if (hcpu) {
+    *hcpu = vcast_scheduler_get_hcpu_value;
+}
+
+return vcast_scheduler_get_hcpu_rc;
+如果 VectorCAST 生成的参数名不是 vcpu / hcpu，按实际参数名替换。
+ 
+⸻
+ 
+11. Lock Stub 说明
+以下锁函数如果已经可运行，不需要处理；如果编译或运行依赖真实锁环境，建议空 stub：
+vmm_spin_lock_irqsave_lite
+vmm_spin_unlock_irqrestore_lite
+vmm_read_lock_irqsave_lite
+vmm_read_unlock_irqrestore_lite
+vmm_write_lock_irqsave_lite
+vmm_write_unlock_irqrestore_lite
+改写目的： 这些锁不是本批被测逻辑的目标，空 stub 可避免单元测试环境锁依赖。
+ 
+⸻
+ 
+二、
+__vmm_manager_good_hcpu
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.001.R.timer_not_started_return_current_cpu
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+vcast_timer_started_ret = 0U;
+vcast_smp_processor_id_ret = 5U;
+
+vcast_good_hcpu_affinity_bits = (1UL << 1) | (1UL << 2);
+vcast_good_hcpu_online_bits = (1UL << 1) | (1UL << 2);
+
+<<vmm_manager.__vmm_manager_good_hcpu.priority>> = 3U;
+<<vmm_manager.__vmm_manager_good_hcpu.affinity>> = &affinity;
+期望值
+return = 5
+注释
+测试目的：验证 __vmm_manager_good_hcpu 在 timer subsystem 未启动时，不进行负载统计，直接返回当前 CPU id。 用例类别：基于需求的测试 预置条件：构造有效 affinity 指针；设置 vmm_timer_started 返回 false；设置当前 CPU 为 5。 测试步骤： step1、清零 affinity。 step2、设置 vcast_timer_started_ret=0。 step3、设置 vcast_smp_processor_id_ret=5。 step4、设置 affinity 和 online bits 均包含 CPU1、CPU2。 step5、调用 __vmm_manager_good_hcpu。 step6、观察返回值。 用例来源：需求分析。 追踪ID：__vmm_manager_good_hcpu。 等价列表：timer 未启动。 其它说明：覆盖 !vmm_timer_started() 为 true 的路径。 通过准则：函数返回 5。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.002.IN.empty_affinity_return_current_cpu
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+vcast_timer_started_ret = 1U;
+vcast_smp_processor_id_ret = 3U;
+
+vcast_good_hcpu_affinity_bits = 0UL;
+vcast_good_hcpu_online_bits = 0xFFFFUL;
+
+<<vmm_manager.__vmm_manager_good_hcpu.priority>> = 3U;
+<<vmm_manager.__vmm_manager_good_hcpu.affinity>> = &affinity;
+期望值
+return = 3
+注释
+测试目的：验证 __vmm_manager_good_hcpu 在 timer 已启动但有效 affinity 为空时返回当前 CPU id。 用例类别：接口测试 预置条件：构造有效 affinity 指针；设置 timer 已启动；设置 affinity bits 为空。 测试步骤： step1、清零 affinity。 step2、设置 vcast_timer_started_ret=1。 step3、设置 vcast_smp_processor_id_ret=3。 step4、设置 vcast_good_hcpu_affinity_bits=0。 step5、设置 vcast_good_hcpu_online_bits=0xFFFF。 step6、调用 __vmm_manager_good_hcpu。 step7、观察返回值。 用例来源：接口测试。 追踪ID：__vmm_manager_good_hcpu。 等价列表：有效 affinity 为空。 其它说明：覆盖 vmm_cpumask_weight(affinity) < 1 为 true 的路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.003.R_choose_min_loaded_cpu
+Begin User Code
+static struct vmm_cpumask affinity;
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(&affinity, 0, sizeof(affinity));
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_array[i].priority = 0U;
+    vcpu_avail_array[i] = TRUE;
+    vcast_scheduler_get_hcpu_map[i] = 0xFFFFFFFFU;
+    vcast_scheduler_get_hcpu_rc_map[i] = 0;
+}
+
+vcpu_array[0].priority = 3U;
+vcpu_array[1].priority = 3U;
+vcpu_array[2].priority = 3U;
+vcpu_array[3].priority = 4U;
+
+vcpu_avail_array[0] = FALSE;
+vcpu_avail_array[1] = FALSE;
+vcpu_avail_array[2] = FALSE;
+vcpu_avail_array[3] = FALSE;
+
+vcast_scheduler_get_hcpu_use_map = 1U;
+vcast_scheduler_get_hcpu_map[0] = 1U;
+vcast_scheduler_get_hcpu_map[1] = 1U;
+vcast_scheduler_get_hcpu_map[2] = 2U;
+vcast_scheduler_get_hcpu_map[3] = 2U;
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+vcast_timer_started_ret = 1U;
+vcast_smp_processor_id_ret = 0U;
+
+vcast_good_hcpu_affinity_bits = (1UL << 1) | (1UL << 2);
+vcast_good_hcpu_online_bits = (1UL << 1) | (1UL << 2);
+
+<<vmm_manager.__vmm_manager_good_hcpu.priority>> = 3U;
+<<vmm_manager.__vmm_manager_good_hcpu.affinity>> = &affinity;
+期望值
+return = 2
+注释
+测试目的：验证 __vmm_manager_good_hcpu 在有效 affinity 中选择同优先级 VCPU 数量最少的 HCPU。 用例类别：基于需求的测试 预置条件：构造 VCPU 数组；设置 CPU1 和 CPU2 均在 affinity 中；设置优先级 3 的 VCPU 在 CPU1 上有 2 个、CPU2 上有 1 个。 测试步骤： step1、清零 affinity、VCPU 数组和 available 数组。 step2、初始化 VCPU id。 step3、设置 VCPU0、VCPU1、VCPU2 的优先级为 3。 step4、设置 VCPU3 的优先级为 4。 step5、设置 VCPU0、1、2、3 均为已占用。 step6、设置 VCPU0 和 VCPU1 当前 HCPU 为 1。 step7、设置 VCPU2 当前 HCPU 为 2。 step8、设置 VCPU3 当前 HCPU 为 2，但优先级不匹配。 step9、设置有效 affinity 为 CPU1 和 CPU2。 step10、调用 __vmm_manager_good_hcpu，查询优先级 3。 step11、观察返回值。 用例来源：需求分析。 追踪ID：__vmm_manager_good_hcpu。 等价列表：有效 affinity，按负载选择 HCPU。 其它说明：优先级 3 的计数为 CPU1=2、CPU2=1，因此应选择 CPU2；同时覆盖优先级不匹配 VCPU 被跳过的路径。 通过准则：函数返回 2。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.004.R_skip_unknown_and_out_of_affinity
+Begin User Code
+static struct vmm_cpumask affinity;
+static struct vmm_vcpu vcpu_array[CONFIG_MAX_VCPU_COUNT];
+static bool vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+unsigned int i;
+
+memset(&affinity, 0, sizeof(affinity));
+memset(vcpu_array, 0, sizeof(vcpu_array));
+memset(vcpu_avail_array, 0, sizeof(vcpu_avail_array));
+
+for (i = 0U; i < (unsigned int)CONFIG_MAX_VCPU_COUNT; i++) {
+    vcpu_array[i].id = i;
+    vcpu_array[i].priority = 0U;
+    vcpu_avail_array[i] = TRUE;
+    vcast_scheduler_get_hcpu_map[i] = 0xFFFFFFFFU;
+    vcast_scheduler_get_hcpu_rc_map[i] = 0;
+}
+
+vcpu_array[0].priority = 3U;
+vcpu_array[1].priority = 3U;
+vcpu_array[2].priority = 3U;
+
+vcpu_avail_array[0] = FALSE;
+vcpu_avail_array[1] = FALSE;
+vcpu_avail_array[2] = FALSE;
+
+vcast_scheduler_get_hcpu_use_map = 1U;
+
+/* VCPU0: HCPU 查询失败，最终视为 UNKNOWN */
+vcast_scheduler_get_hcpu_rc_map[0] = -1;
+vcast_scheduler_get_hcpu_map[0] = 0xFFFFFFFFU;
+
+/* VCPU1: HCPU 为 3，但 CPU3 不在有效 affinity 中 */
+vcast_scheduler_get_hcpu_rc_map[1] = 0;
+vcast_scheduler_get_hcpu_map[1] = 3U;
+
+/* VCPU2: HCPU 为 1，在 affinity 中 */
+vcast_scheduler_get_hcpu_rc_map[2] = 0;
+vcast_scheduler_get_hcpu_map[2] = 1U;
+
+mngr.vcpu_array = vcpu_array;
+mngr.vcpu_avail_array = vcpu_avail_array;
+
+vcast_timer_started_ret = 1U;
+vcast_smp_processor_id_ret = 0U;
+
+vcast_good_hcpu_affinity_bits = (1UL << 1) | (1UL << 2);
+vcast_good_hcpu_online_bits = (1UL << 1) | (1UL << 2);
+
+<<vmm_manager.__vmm_manager_good_hcpu.priority>> = 3U;
+<<vmm_manager.__vmm_manager_good_hcpu.affinity>> = &affinity;
+期望值
+return = 2
+注释
+测试目的：验证 __vmm_manager_good_hcpu 在统计负载时会跳过 HCPU unknown 的 VCPU，以及 HCPU 不在有效 affinity 中的 VCPU。 用例类别：基于需求的测试 预置条件：构造三个已占用 VCPU；设置一个 HCPU unknown，一个 HCPU 不在 affinity 中，一个 HCPU 在 affinity 中。 测试步骤： step1、清零 affinity、VCPU 数组和 available 数组。 step2、初始化 VCPU0、VCPU1、VCPU2，优先级均为 3。 step3、设置三个 VCPU 均为已占用。 step4、设置 VCPU0 的 HCPU 查询失败。 step5、设置 VCPU1 的 HCPU 为 3。 step6、设置 VCPU2 的 HCPU 为 1。 step7、设置有效 affinity 为 CPU1 和 CPU2。 step8、调用 __vmm_manager_good_hcpu。 step9、观察返回值。 用例来源：需求分析。 追踪ID：__vmm_manager_good_hcpu。 等价列表：负载统计跳过无效 VCPU。 其它说明：VCPU0 因 HCPU unknown 被跳过；VCPU1 因 HCPU3 不在 affinity 中被跳过；VCPU2 计入 CPU1，因此 CPU2 负载更低，应返回 2。 通过准则：函数返回 2。
+ 
+⸻
+ 
+三、
+vmm_manager_vcpu_resource_add
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_add.001.IN.vcpu_null
+Begin User Code
+static struct vmm_vcpu_resource res;
+static char name[] = "res0";
+
+memset(&res, 0, sizeof(res));
+
+res.name = name;
+res.cleanup = vcast_res_cleanup;
+
+<<vmm_manager.vmm_manager_vcpu_resource_add.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_resource_add.res>> = &res;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_add 在 VCPU 指针为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 resource，但设置 vcpu=NULL。 测试步骤： step1、清零 res。 step2、设置 res.name="res0"。 step3、设置 res.cleanup=vcast_res_cleanup。 step4、设置入参 vcpu=NULL。 step5、调用 vmm_manager_vcpu_resource_add。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_add。 等价列表：空 VCPU 指针。 其它说明：覆盖参数检查中 !vcpu 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_add.002.IN.res_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+INIT_LIST_HEAD(&vcpu.res_head);
+
+<<vmm_manager.vmm_manager_vcpu_resource_add.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_add.res>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_add 在 resource 指针为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 VCPU，但设置 res=NULL。 测试步骤： step1、清零 vcpu。 step2、初始化 vcpu.res_head。 step3、设置入参 vcpu=&vcpu。 step4、设置入参 res=NULL。 step5、调用 vmm_manager_vcpu_resource_add。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_add。 等价列表：空 resource 指针。 其它说明：覆盖参数检查中 !res 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_add.003.IN.name_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu_resource res;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&res, 0, sizeof(res));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+
+res.name = 0;
+res.cleanup = vcast_res_cleanup;
+
+<<vmm_manager.vmm_manager_vcpu_resource_add.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_add.res>> = &res;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_add 在 resource name 为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 VCPU 和 resource，但设置 res.name=NULL。 测试步骤： step1、清零 vcpu 和 res。 step2、初始化 vcpu.res_head。 step3、设置 res.name=NULL。 step4、设置 res.cleanup=vcast_res_cleanup。 step5、调用 vmm_manager_vcpu_resource_add。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_add。 等价列表：resource name 为空。 其它说明：覆盖参数检查中 !res->name 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_add.004.IN.cleanup_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu_resource res;
+static char name[] = "res0";
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&res, 0, sizeof(res));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+
+res.name = name;
+res.cleanup = 0;
+
+<<vmm_manager.vmm_manager_vcpu_resource_add.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_add.res>> = &res;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_add 在 cleanup 回调为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 VCPU 和 resource，但设置 res.cleanup=NULL。 测试步骤： step1、清零 vcpu 和 res。 step2、初始化 vcpu.res_head。 step3、设置 res.name="res0"。 step4、设置 res.cleanup=NULL。 step5、调用 vmm_manager_vcpu_resource_add。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_add。 等价列表：resource cleanup 为空。 其它说明：覆盖参数检查中 !res->cleanup 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_add.005.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu_resource res;
+static char name[] = "res0";
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&res, 0, sizeof(res));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+
+res.name = name;
+res.cleanup = vcast_res_cleanup;
+
+<<vmm_manager.vmm_manager_vcpu_resource_add.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_add.res>> = &res;
+期望值
+return = 0
+注释
+测试目的：验证 vmm_manager_vcpu_resource_add 在 VCPU 和 resource 参数均有效时，将 resource 加入 VCPU 资源链表并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和 resource；初始化 VCPU resource 链表；设置 resource name 和 cleanup。 测试步骤： step1、清零 vcpu 和 res。 step2、初始化 vcpu.res_head。 step3、设置 res.name="res0"。 step4、设置 res.cleanup=vcast_res_cleanup。 step5、调用 vmm_manager_vcpu_resource_add。 step6、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_resource_add。 等价列表：resource add 成功。 其它说明：覆盖参数检查全部为 false，并执行 list_add_tail 的路径。 通过准则：函数返回 VMM_OK=0。
+ 
+⸻
+ 
+四、
+vmm_manager_vcpu_resource_remove
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_remove.001.IN.vcpu_null
+Begin User Code
+static struct vmm_vcpu_resource res;
+
+memset(&res, 0, sizeof(res));
+INIT_LIST_HEAD(&res.head);
+
+<<vmm_manager.vmm_manager_vcpu_resource_remove.vcpu>> = 0;
+<<vmm_manager.vmm_manager_vcpu_resource_remove.res>> = &res;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_remove 在 VCPU 指针为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 resource，但设置 vcpu=NULL。 测试步骤： step1、清零 res。 step2、初始化 res.head。 step3、设置入参 vcpu=NULL。 step4、设置入参 res=&res。 step5、调用 vmm_manager_vcpu_resource_remove。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_remove。 等价列表：空 VCPU 指针。 其它说明：覆盖参数检查中 !vcpu 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_remove.002.IN.res_null
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+INIT_LIST_HEAD(&vcpu.res_head);
+
+<<vmm_manager.vmm_manager_vcpu_resource_remove.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_remove.res>> = 0;
+期望值
+return = -5
+注释
+测试目的：验证 vmm_manager_vcpu_resource_remove 在 resource 指针为空时返回 VMM_EINVALID。 用例类别：接口测试 预置条件：构造有效 VCPU，但设置 res=NULL。 测试步骤： step1、清零 vcpu。 step2、初始化 vcpu.res_head。 step3、设置入参 vcpu=&vcpu。 step4、设置入参 res=NULL。 step5、调用 vmm_manager_vcpu_resource_remove。 step6、观察返回值。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_remove。 等价列表：空 resource 指针。 其它说明：覆盖参数检查中 !res 为 true 的路径。 通过准则：函数返回 VMM_EINVALID=-5。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_remove.003.R.success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu_resource res;
+static char name[] = "res0";
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&res, 0, sizeof(res));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+INIT_LIST_HEAD(&res.head);
+
+res.name = name;
+res.cleanup = vcast_res_cleanup;
+
+list_add_tail(&res.head, &vcpu.res_head);
+
+<<vmm_manager.vmm_manager_vcpu_resource_remove.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_resource_remove.res>> = &res;
+期望值
+return = 0
+注释
+测试目的：验证 vmm_manager_vcpu_resource_remove 在 VCPU 和 resource 参数均有效时，从 VCPU resource 链表中移除指定 resource 并返回成功。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和 resource，并将 resource 预先加入 VCPU resource 链表。 测试步骤： step1、清零 vcpu 和 res。 step2、初始化 vcpu.res_head。 step3、初始化 res.head。 step4、设置 res.name="res0"。 step5、设置 res.cleanup=vcast_res_cleanup。 step6、通过 list_add_tail 将 resource 加入 vcpu.res_head。 step7、调用 vmm_manager_vcpu_resource_remove。 step8、观察返回值。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_resource_remove。 等价列表：resource remove 成功。 其它说明：覆盖参数检查全部为 false，并执行 list_del 的路径。 通过准则：函数返回 VMM_OK=0。
+ 
+⸻
+ 
+五、
+vmm_manager_vcpu_resource_flush
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_flush.001.IN.vcpu_null
+Begin User Code
+vcast_res_cleanup_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_resource_flush.vcpu>> = 0;
+期望值
+vcast_res_cleanup_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_resource_flush 在 VCPU 指针为空时直接返回，不执行任何 cleanup。 用例类别：接口测试 预置条件：清零 resource cleanup 调用计数。 测试步骤： step1、设置 vcast_res_cleanup_count=0。 step2、设置入参 vcpu=NULL。 step3、调用 vmm_manager_vcpu_resource_flush。 step4、观察 cleanup 调用计数。 用例来源：接口测试。 追踪ID：vmm_manager_vcpu_resource_flush。 等价列表：空 VCPU 指针。 其它说明：覆盖 if (!vcpu) 为 true 的路径。 通过准则：vcast_res_cleanup_count=0。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_flush.002.R.empty_list
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_res_cleanup_count = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_resource_flush.vcpu>> = &vcpu;
+期望值
+vcast_res_cleanup_count = 0
+注释
+测试目的：验证 vmm_manager_vcpu_resource_flush 在 VCPU resource 链表为空时正常返回，不执行 cleanup。 用例类别：基于需求的测试 预置条件：构造有效 VCPU，并初始化空 resource 链表。 测试步骤： step1、清零 vcpu。 step2、初始化 vcpu.res_head 为空链表。 step3、清零 vcast_res_cleanup_count。 step4、调用 vmm_manager_vcpu_resource_flush。 step5、观察 cleanup 调用计数。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_resource_flush。 等价列表：resource 链表为空。 其它说明：覆盖 while (!list_empty(&vcpu->res_head)) 为 false 的路径。 通过准则：vcast_res_cleanup_count=0。
+ 
+⸻
+ 
+vmm_manager_vcpu_resource_flush.003.R.flush_cleanup_and_null_cleanup
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_vcpu_resource res_with_cleanup;
+static struct vmm_vcpu_resource res_without_cleanup;
+static char name1[] = "res1";
+static char name2[] = "res2";
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&res_with_cleanup, 0, sizeof(res_with_cleanup));
+memset(&res_without_cleanup, 0, sizeof(res_without_cleanup));
+
+INIT_LIST_HEAD(&vcpu.res_head);
+INIT_LIST_HEAD(&res_with_cleanup.head);
+INIT_LIST_HEAD(&res_without_cleanup.head);
+
+res_with_cleanup.name = name1;
+res_with_cleanup.cleanup = vcast_res_cleanup;
+
+res_without_cleanup.name = name2;
+res_without_cleanup.cleanup = 0;
+
+list_add_tail(&res_with_cleanup.head, &vcpu.res_head);
+list_add_tail(&res_without_cleanup.head, &vcpu.res_head);
+
+vcast_res_cleanup_count = 0U;
+vcast_res_cleanup_vcpu = 0;
+vcast_res_cleanup_res = 0;
+
+<<vmm_manager.vmm_manager_vcpu_resource_flush.vcpu>> = &vcpu;
+期望值
+vcast_res_cleanup_count = 1
+vcast_res_cleanup_vcpu = &vcpu
+vcast_res_cleanup_res = &res_with_cleanup
+注释
+测试目的：验证 vmm_manager_vcpu_resource_flush 能循环弹出 VCPU resource 链表中的所有 resource，并且只对 cleanup 非空的 resource 调用 cleanup。 用例类别：基于需求的测试 预置条件：构造有效 VCPU；构造两个 resource，一个 cleanup 非空，一个 cleanup 为空；将两个 resource 加入 VCPU resource 链表。 测试步骤： step1、清零 vcpu、res_with_cleanup 和 res_without_cleanup。 step2、初始化 vcpu.res_head。 step3、初始化两个 resource 的链表节点。 step4、设置 res_with_cleanup.cleanup=vcast_res_cleanup。 step5、设置 res_without_cleanup.cleanup=NULL。 step6、将两个 resource 加入 vcpu.res_head。 step7、清零 cleanup 记录变量。 step8、调用 vmm_manager_vcpu_resource_flush。 step9、观察 cleanup 调用次数、最后一次 VCPU 入参和最后一次 resource 入参。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_resource_flush。 等价列表：resource flush，cleanup 非空与 cleanup 为空。 其它说明：覆盖 while 循环执行路径，以及 if (res->cleanup) 的 true 和 false 路径。 通过准则：cleanup 调用次数为 1；cleanup 的 VCPU 入参为 &vcpu；cleanup 的 resource 入参为 &res_with_cleanup。
