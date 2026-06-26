@@ -1,0 +1,821 @@
+可以，锁宏我建议不要再做单独 static inline 包装。 虽然从编译器角度看，static inline 包装大概率会被优化掉，性能通常不会有实际影响，但对这类底层代码来说，锁/中断宏最好保持原始调用形态，原因是：
+	1.	vmm_read_lock_irqsave_lite(lock, flags) 这类宏通常依赖调用点的 flags 变量语义；
+	2.	包一层函数后，往往要变成 flags * 传参，代码形态会发生变化；
+	3.	优化打开时大概率等价，但 debug / 低优化 / 特殊编译参数下不一定完全无调用开销；
+	4.	锁宏、IRQ 宏经常带 barrier / arch 相关细节，少包一层更稳。
+所以最终方案改成：
+不单独包装锁宏；
+但把“加锁 + rbtree 遍历 + 解锁”的完整流程提取为 helper；
+锁宏仍然直接写在 helper 内。
+这样既减少原 5 个函数的 KW 复杂度，又避免对锁宏做薄封装。
+ 
+⸻
+ 
+1. 复杂度分析：和你给的结果基本吻合
+按你确认的配置：
+Cyclomatic v(G);FUNCTION,CLASS-METHOD;CYCLOMATIC;15;15
+KW 使用的是 CYCLOMATIC，不是 EXTCYCLOMATIC。所以主要按：
+1 + if + loop + case
+计算，不应额外统计 && / ||。
+ 
+这 5 个函数大致可以这样看：
+函数	源码肉眼粗算	你给的 KW 值	判断
+vmm_guest_iterate_excluded_region()	约 7	18	被锁宏、rbtree 宏明显放大
+vmm_guest_aspace_reset()	约 9	39	三段加锁遍历导致宏展开贡献极大
+vmm_guest_add_region()	约 16	16	基本就是源码层面的连续 if (rc)
+__add_region_to_tree_and_probe_list()	约 10	16	主要被 write-lock 宏和 rbtree 插入逻辑放大
+__region_add_cleanup()	约 12~13	16	switch/case、fallthrough、循环和条件共同造成
+这里最能印证前面推断的是：
+vmm_guest_add_region() = 16
+这个函数没有锁宏和 rbtree 遍历宏，KW 值基本等于源码中显式 if / else if 的数量。因此可以反推出： 其他几个函数复杂度偏高，主要确实来自宏展开，而不是 KW 把 && / || 当作扩展复杂度来算。
+ 
+⸻
+ 
+2. 最终修改方案原则
+下面方案满足你的约束：
+1. 5 个原函数都降到 15 以内；
+2. 新增 helper 也尽量控制在 15 以内；
+3. 不使用 goto；
+4. 新增函数入参不超过 5 个；
+5. 不使用 typedef；
+6. 不单独封装锁宏；
+7. 可提取公共部分的地方提取公共部分。
+注意：vmm_guest_add_region() 是已有对外接口，参数本身超过 5 个，这里不改它的签名；“新增函数入参不超过 5 个”只约束新增 helper。
+ 
+⸻
+ 
+3. 公共 helper：region 判断、tree 选择、region 遍历
+这部分建议放在这几个函数之前。
+struct vmm_guest_region_tree {
+        struct rb_root *root;
+        vmm_rwlock_t *root_lock;
+        struct dlist *probe_list;
+};
+
+struct vmm_guest_region_walk_ops {
+        bool (*match)(struct vmm_guest *, struct vmm_region *, void *);
+        void (*visit)(struct vmm_guest *, struct vmm_region *, void *);
+        void *priv;
+};
+
+static bool vmm_guest_region_is_device_non_alias(
+                const struct vmm_region *reg)
+{
+        return ((reg->flags & VMM_REGION_ISDEVICE) != 0U) &&
+               ((reg->flags & VMM_REGION_ALIAS) == 0U);
+}
+
+static bool vmm_guest_region_is_ram_or_rom(const struct vmm_region *reg)
+{
+        return ((reg->flags & (VMM_REGION_ISRAM | VMM_REGION_ISROM)) != 0U);
+}
+
+static bool vmm_guest_region_is_real_ram_or_rom(
+                const struct vmm_region *reg)
+{
+        return vmm_guest_region_is_ram_or_rom(reg) &&
+               ((reg->flags & VMM_REGION_REAL) != 0U);
+}
+
+static bool vmm_guest_region_needs_host_ram_free(
+                const struct vmm_region *reg)
+{
+        return ((reg->flags & (VMM_REGION_ALIAS | VMM_REGION_VIRTUAL)) == 0U) &&
+               vmm_guest_region_is_ram_or_rom(reg);
+}
+
+static void vmm_guest_region_tree_select(struct vmm_guest_aspace *aspace,
+                                         u32 reg_flags,
+                                         struct vmm_guest_region_tree *tree)
+{
+        if ((reg_flags & (u32)VMM_REGION_IO) != 0U) {
+                tree->root = &aspace->reg_iotree;
+                tree->root_lock = &aspace->reg_iotree_lock;
+                tree->probe_list = &aspace->reg_ioprobe_list;
+        } else {
+                tree->root = &aspace->reg_memtree;
+                tree->root_lock = &aspace->reg_memtree_lock;
+                tree->probe_list = &aspace->reg_memprobe_list;
+        }
+}
+这里没有封装锁宏，只提取了通用判断和 tree 选择逻辑。
+ 
+⸻
+ 
+3.1 不带 match 的遍历 helper
+用于 vmm_guest_aspace_reset()，保持原语义： 先解锁，再在 callback 内判断 region flags。
+static void vmm_guest_aspace_walk_regions_unlocked(
+                struct vmm_guest *guest,
+                const struct vmm_guest_region_tree *tree,
+                const struct vmm_guest_region_walk_ops *ops)
+{
+        irq_flags_t flags;
+        struct vmm_region *reg = NULL, *next_reg = NULL;
+
+        vmm_read_lock_irqsave_lite(tree->root_lock, flags);
+        rbtree_postorder_for_each_entry_safe(reg, next_reg, tree->root, head) {
+                vmm_read_unlock_irqrestore_lite(tree->root_lock, flags);
+                ops->visit(guest, reg, ops->priv);
+                vmm_read_lock_irqsave_lite(tree->root_lock, flags);
+        }
+        vmm_read_unlock_irqrestore_lite(tree->root_lock, flags);
+}
+ 
+⸻
+ 
+3.2 带 match 的遍历 helper
+用于 vmm_guest_iterate_excluded_region()，保持原语义： 在持锁状态下判断 match，匹配后再解锁执行 callback。
+static void vmm_guest_aspace_walk_matched_regions_unlocked(
+                struct vmm_guest *guest,
+                const struct vmm_guest_region_tree *tree,
+                const struct vmm_guest_region_walk_ops *ops)
+{
+        irq_flags_t flags;
+        struct vmm_region *reg = NULL, *next_reg = NULL;
+
+        vmm_read_lock_irqsave_lite(tree->root_lock, flags);
+        rbtree_postorder_for_each_entry_safe(reg, next_reg, tree->root, head) {
+                if (!ops->match(guest, reg, ops->priv)) {
+                        continue;
+                }
+
+                vmm_read_unlock_irqrestore_lite(tree->root_lock, flags);
+                ops->visit(guest, reg, ops->priv);
+                vmm_read_lock_irqsave_lite(tree->root_lock, flags);
+        }
+        vmm_read_unlock_irqrestore_lite(tree->root_lock, flags);
+}
+这两个 walker 里仍然直接使用原锁宏，没有额外锁包装函数。 之所以拆成两个 walker，是为了避免在 reset 场景中额外引入 ops->match 判断和函数指针调用。
+ 
+⸻
+ 
+4. 优化 
+vmm_guest_iterate_excluded_region()
+struct vmm_guest_iterate_excluded_region_ctx {
+        u32 reg_flags;
+        u32 reg_flags_excluded;
+        void (*func)(struct vmm_guest *, struct vmm_region *, void *);
+        void *priv;
+        bool is_region_found;
+};
+
+static bool vmm_guest_iterate_excluded_region_match(
+                struct vmm_guest *guest,
+                struct vmm_region *reg,
+                void *priv)
+{
+        struct vmm_guest_iterate_excluded_region_ctx *ctx = priv;
+
+        (void)guest;
+
+        if ((reg->flags & ctx->reg_flags_excluded) != 0U) {
+                return false;
+        }
+
+        return ((reg->flags & ctx->reg_flags) == ctx->reg_flags);
+}
+
+static void vmm_guest_iterate_excluded_region_visit(
+                struct vmm_guest *guest,
+                struct vmm_region *reg,
+                void *priv)
+{
+        struct vmm_guest_iterate_excluded_region_ctx *ctx = priv;
+
+        ctx->func(guest, reg, ctx->priv);
+        ctx->is_region_found = true;
+}
+
+int vmm_guest_iterate_excluded_region(
+                struct vmm_guest *guest,
+                u32 reg_flags,
+                u32 reg_flags_excluded,
+                void (*func)(struct vmm_guest *, struct vmm_region *, void *),
+                void *priv)
+{
+        struct vmm_guest_aspace *aspace;
+        struct vmm_guest_region_tree tree;
+        struct vmm_guest_region_walk_ops ops;
+        struct vmm_guest_iterate_excluded_region_ctx ctx;
+
+        if (!guest || !func) {
+                return VMM_EFAIL;
+        }
+
+        aspace = &guest->aspace;
+        vmm_guest_region_tree_select(aspace, reg_flags, &tree);
+
+        ctx.reg_flags = reg_flags;
+        ctx.reg_flags_excluded = reg_flags_excluded;
+        ctx.func = func;
+        ctx.priv = priv;
+        ctx.is_region_found = false;
+
+        ops.match = vmm_guest_iterate_excluded_region_match;
+        ops.visit = vmm_guest_iterate_excluded_region_visit;
+        ops.priv = &ctx;
+
+        vmm_guest_aspace_walk_matched_regions_unlocked(guest, &tree, &ops);
+
+        if (!ctx.is_region_found) {
+                return VMM_EEXIST;
+        }
+
+        return VMM_OK;
+}
+预期复杂度：
+vmm_guest_iterate_excluded_region(): 约 3~4
+原来的锁宏和 rbtree 遍历宏被移入公共 walker，当前函数复杂度会明显低于 15。
+ 
+⸻
+ 
+5. 优化 
+vmm_guest_aspace_reset()
+5.1 reset callback
+static void vmm_guest_reset_device_region(struct vmm_guest *guest,
+                                          struct vmm_region *reg,
+                                          void *priv)
+{
+        (void)priv;
+
+        if (vmm_guest_region_is_device_non_alias(reg)) {
+                vmm_devemu_reset_region(guest, reg);
+        }
+}
+
+#ifdef CONFIG_GUEST_STAGE2_MAPPING
+static void vmm_guest_stage2_map_region(struct vmm_guest *guest,
+                                        struct vmm_region *reg,
+                                        void *priv)
+{
+        physical_size_t os;
+        physical_size_t ps;
+        physical_addr_t gpa;
+
+        (void)priv;
+
+        if (!vmm_guest_region_is_ram_or_rom(reg)) {
+                return;
+        }
+
+        ps = reg->phys_size;
+        gpa = reg->gphys_addr;
+
+        while (ps > 0) {
+                guest_stage2_map(guest, gpa, &os);
+                ps = ps - os;
+                gpa = gpa + os;
+        }
+}
+#endif
+5.2 reset 主函数
+int vmm_guest_aspace_reset(struct vmm_guest *guest)
+{
+        struct vmm_guest_aspace *aspace;
+        struct vmm_guest_aspace_event evt;
+        struct vmm_guest_region_tree tree;
+        struct vmm_guest_region_walk_ops ops;
+
+        /* Sanity Check */
+        if (!guest) {
+                return VMM_EFAIL;
+        }
+
+        aspace = &guest->aspace;
+
+        ops.match = NULL;
+        ops.visit = vmm_guest_reset_device_region;
+        ops.priv = NULL;
+
+        /* Reset device emulation for io regions */
+        vmm_guest_region_tree_select(aspace, (u32)VMM_REGION_IO, &tree);
+        vmm_guest_aspace_walk_regions_unlocked(guest, &tree, &ops);
+
+        /* Mem region tree */
+        vmm_guest_region_tree_select(aspace, 0U, &tree);
+
+#ifdef CONFIG_GUEST_STAGE2_MAPPING
+        /* Do guest stage2 mapping */
+        ops.visit = vmm_guest_stage2_map_region;
+        vmm_guest_aspace_walk_regions_unlocked(guest, &tree, &ops);
+#endif
+
+        /* Reset device emulation for mem regions */
+        ops.visit = vmm_guest_reset_device_region;
+        vmm_guest_aspace_walk_regions_unlocked(guest, &tree, &ops);
+
+        /*
+         * Notify the listeners about reset event.
+         * No locks taken at this point.
+         */
+        evt.guest = guest;
+        evt.data = NULL;
+        vmm_blocking_notifier_call(&guest_aspace_notifier_chain,
+                                   VMM_GUEST_ASPACE_EVENT_RESET,
+                                   &evt);
+
+        /* Reset device emulation context */
+        return vmm_devemu_reset_context(guest);
+}
+预期复杂度：
+vmm_guest_aspace_reset(): 约 2
+原来的三段重复遍历都被压到 vmm_guest_aspace_walk_regions_unlocked() 中。
+ 
+⸻
+ 
+6. 优化 
+vmm_guest_add_region()
+这个函数和锁无关，主要是大量属性设置后的 if (rc)。这里用属性结构体和 helper 拆分。
+6.1 属性参数结构体与 helper
+struct vmm_guest_add_region_attr_ctx {
+        const char *device_type;
+        const char *mainfest_type;
+        const char *address_type;
+        const char *compatible;
+        u32 compatible_len;
+        physical_addr_t gphys_addr;
+        physical_addr_t aphys_addr;
+        physical_size_t phys_size;
+        u32 align_order;
+        physical_addr_t hphys_addr;
+};
+
+static int vmm_guest_devtree_set_string_attr(
+                struct vmm_devtree_node *rnode,
+                const char *attr_name,
+                const char *value,
+                u32 len)
+{
+        return vmm_devtree_setattr(rnode,
+                                   attr_name,
+                                   (void *)value,
+                                   VMM_DEVTREE_ATTRTYPE_STRING,
+                                   len,
+                                   FALSE);
+}
+
+static int vmm_guest_add_region_set_manifest_addr(
+                struct vmm_devtree_node *rnode,
+                struct vmm_guest_add_region_attr_ctx *attr)
+{
+        if (!strcmp(attr->mainfest_type,
+                    VMM_DEVTREE_MANIFEST_TYPE_VAL_REAL)) {
+                return vmm_devtree_setattr(rnode,
+                                           VMM_DEVTREE_HOST_PHYS_ATTR_NAME,
+                                           &attr->hphys_addr,
+                                           VMM_DEVTREE_ATTRTYPE_PHYSADDR,
+                                           sizeof(attr->hphys_addr),
+                                           FALSE);
+        }
+
+        if (!strcmp(attr->mainfest_type,
+                    VMM_DEVTREE_MANIFEST_TYPE_VAL_ALIAS)) {
+                return vmm_devtree_setattr(rnode,
+                                           VMM_DEVTREE_ALIAS_PHYS_ATTR_NAME,
+                                           &attr->aphys_addr,
+                                           VMM_DEVTREE_ATTRTYPE_PHYSADDR,
+                                           sizeof(attr->aphys_addr),
+                                           FALSE);
+        }
+
+        return VMM_OK;
+}
+
+static int vmm_guest_add_region_set_node_attrs(
+                struct vmm_devtree_node *rnode,
+                struct vmm_guest_add_region_attr_ctx *attr)
+{
+        int rc;
+
+        rc = vmm_guest_devtree_set_string_attr(
+                        rnode,
+                        VMM_DEVTREE_DEVICE_TYPE_ATTR_NAME,
+                        attr->device_type,
+                        strlen(attr->device_type) + 1);
+        if (rc) {
+                return rc;
+        }
+
+        rc = vmm_guest_devtree_set_string_attr(
+                        rnode,
+                        VMM_DEVTREE_MANIFEST_TYPE_ATTR_NAME,
+                        attr->mainfest_type,
+                        strlen(attr->mainfest_type) + 1);
+        if (rc) {
+                return rc;
+        }
+
+        rc = vmm_guest_devtree_set_string_attr(
+                        rnode,
+                        VMM_DEVTREE_ADDRESS_TYPE_ATTR_NAME,
+                        attr->address_type,
+                        strlen(attr->address_type) + 1);
+        if (rc) {
+                return rc;
+        }
+
+        if (attr->compatible) {
+                rc = vmm_guest_devtree_set_string_attr(
+                                rnode,
+                                VMM_DEVTREE_COMPATIBLE_ATTR_NAME,
+                                attr->compatible,
+                                attr->compatible_len);
+                if (rc) {
+                        return rc;
+                }
+        }
+
+        rc = vmm_devtree_setattr(rnode,
+                                 VMM_DEVTREE_GUEST_PHYS_ATTR_NAME,
+                                 &attr->gphys_addr,
+                                 VMM_DEVTREE_ATTRTYPE_PHYSADDR,
+                                 sizeof(attr->gphys_addr),
+                                 FALSE);
+        if (rc) {
+                return rc;
+        }
+
+        rc = vmm_guest_add_region_set_manifest_addr(rnode, attr);
+        if (rc) {
+                return rc;
+        }
+
+        rc = vmm_devtree_setattr(rnode,
+                                 VMM_DEVTREE_PHYS_SIZE_ATTR_NAME,
+                                 &attr->phys_size,
+                                 VMM_DEVTREE_ATTRTYPE_PHYSSIZE,
+                                 sizeof(attr->phys_size),
+                                 FALSE);
+        if (rc) {
+                return rc;
+        }
+
+        return vmm_devtree_setattr(rnode,
+                                   VMM_DEVTREE_ALIGN_ORDER_ATTR_NAME,
+                                   &attr->align_order,
+                                   VMM_DEVTREE_ATTRTYPE_UINT32,
+                                   sizeof(attr->align_order),
+                                   FALSE);
+}
+
+static int vmm_guest_devtree_delnode_return(
+                struct vmm_devtree_node *rnode,
+                int rc)
+{
+        vmm_devtree_delnode(rnode);
+        return rc;
+}
+6.2 add_region 主函数
+int vmm_guest_add_region(struct vmm_guest *guest,
+                         struct vmm_devtree_node *parent,
+                         const char *name,
+                         const char *device_type,
+                         const char *mainfest_type,
+                         const char *address_type,
+                         const char *compatible,
+                         u32 compatible_len,
+                         physical_addr_t gphys_addr,
+                         physical_addr_t aphys_addr,
+                         physical_size_t phys_size,
+                         u32 align_order,
+                         physical_addr_t hphys_addr,
+                         void *rpriv)
+{
+        int rc;
+        struct vmm_region *reg = NULL;
+        struct vmm_devtree_node *rnode;
+        struct vmm_guest_add_region_attr_ctx attr;
+
+        /* Sanity checks */
+        if (!guest || !guest->aspace.node || !parent ||
+            !name || !device_type || !mainfest_type || !address_type) {
+                return VMM_EINVALID;
+        }
+
+        attr.device_type = device_type;
+        attr.mainfest_type = mainfest_type;
+        attr.address_type = address_type;
+        attr.compatible = compatible;
+        attr.compatible_len = compatible_len;
+        attr.gphys_addr = gphys_addr;
+        attr.aphys_addr = aphys_addr;
+        attr.phys_size = phys_size;
+        attr.align_order = align_order;
+        attr.hphys_addr = hphys_addr;
+
+        /*
+         * TODO: Make sure aspace node is parent/ancestor of given
+         * parent node.
+         */
+
+        /* Create region node */
+        rnode = vmm_devtree_addnode(parent, name);
+        if (!rnode) {
+                return VMM_EINVALID;
+        }
+
+        rc = vmm_guest_add_region_set_node_attrs(rnode, &attr);
+        if (rc) {
+                return vmm_guest_devtree_delnode_return(rnode, rc);
+        }
+
+        /* Add region */
+        rc = region_add(guest, rnode, &reg, rpriv, FALSE);
+        if (rc) {
+                return vmm_guest_devtree_delnode_return(rnode, rc);
+        }
+
+        /* Mark this region as dynamically added */
+        reg->flags |= VMM_REGION_ISDYNAMIC;
+
+        return VMM_OK;
+}
+预期复杂度：
+vmm_guest_add_region(): 约 5
+ 
+⸻
+ 
+7. 优化 
+__region_add_cleanup()
+原函数使用 switch + fallthrough，KW 很容易把它算高。这里改成 cleanup level 模型，彻底去掉 fallthrough。
+enum region_add_cleanup_level {
+        REGION_ADD_CLEANUP_NONE = 0,
+        REGION_ADD_CLEANUP_FREE_REGION,
+        REGION_ADD_CLEANUP_DREF_SHM,
+        REGION_ADD_CLEANUP_FREE_MAPS,
+        REGION_ADD_CLEANUP_RAM_FREE,
+        REGION_ADD_CLEANUP_UNPROBE,
+        REGION_ADD_CLEANUP_ARCH_DEL,
+};
+
+static enum region_add_cleanup_level
+__region_add_get_cleanup_level(enum region_add_fail fail)
+{
+        switch (fail) {
+        case region_arch_del_fail:
+                return REGION_ADD_CLEANUP_ARCH_DEL;
+        case region_unprobe_fail:
+                return REGION_ADD_CLEANUP_UNPROBE;
+        case region_ram_free_fail:
+                return REGION_ADD_CLEANUP_RAM_FREE;
+        case region_free_maps_fail:
+                return REGION_ADD_CLEANUP_FREE_MAPS;
+        case region_dref_shm_fail:
+                return REGION_ADD_CLEANUP_DREF_SHM;
+        case region_free_fail:
+                return REGION_ADD_CLEANUP_FREE_REGION;
+        default:
+                return REGION_ADD_CLEANUP_NONE;
+        }
+}
+
+static void __region_add_cleanup_unprobe(struct vmm_guest *guest,
+                                         struct vmm_region *reg)
+{
+        if (vmm_guest_region_is_device_non_alias(reg)) {
+                vmm_devemu_remove_region(guest, reg);
+        }
+}
+
+static void __region_add_cleanup_free_host_ram_maps(
+                struct vmm_region *reg)
+{
+        u32 i;
+        enum vmm_region_mapping_flags maps_flags;
+
+        if (!vmm_guest_region_needs_host_ram_free(reg)) {
+                return;
+        }
+
+        for (i = (u32)0; i < reg->maps_count; i++) {
+                /* Use maps_flags to avoid KW warning. */
+                maps_flags = reg->maps[i].flags;
+                if (!(maps_flags & VMM_REGION_MAPPING_ISHOSTRAM)) {
+                        continue;
+                }
+
+                vmm_host_ram_free(reg->maps[i].hphys_addr,
+                                  mapping_phys_size(reg, i));
+                reg->maps[i].flags &= ~VMM_REGION_MAPPING_ISHOSTRAM;
+        }
+}
+
+static void __region_add_cleanup_dref_shm(struct vmm_region *reg)
+{
+        if (reg->shm != NULL) {
+                vmm_shmem_dref(reg->shm);
+                reg->shm = NULL;
+        }
+}
+
+static void __region_add_cleanup_free_region(
+                struct vmm_guest *guest,
+                struct vmm_devtree_node *rnode,
+                struct vmm_region *reg)
+{
+        vmm_free(reg);
+        vmm_printf("%s: region_add failed for %s/%s\n",
+                   "__region_add_cleanup",
+                   guest->name,
+                   rnode->name);
+        vmm_devtree_dref_node(rnode);
+}
+
+static void __region_add_cleanup(struct vmm_guest *guest,
+                                 struct vmm_devtree_node *rnode,
+                                 struct vmm_region *reg,
+                                 enum region_add_fail fail)
+{
+        enum region_add_cleanup_level level;
+
+        level = __region_add_get_cleanup_level(fail);
+
+        if (level >= REGION_ADD_CLEANUP_ARCH_DEL) {
+                arch_guest_del_region(guest, reg);
+        }
+
+        if (level >= REGION_ADD_CLEANUP_UNPROBE) {
+                __region_add_cleanup_unprobe(guest, reg);
+        }
+
+        if (level >= REGION_ADD_CLEANUP_RAM_FREE) {
+                __region_add_cleanup_free_host_ram_maps(reg);
+        }
+
+        if (level >= REGION_ADD_CLEANUP_FREE_MAPS) {
+                vmm_free(reg->maps);
+        }
+
+        if (level >= REGION_ADD_CLEANUP_DREF_SHM) {
+                __region_add_cleanup_dref_shm(reg);
+        }
+
+        if (level >= REGION_ADD_CLEANUP_FREE_REGION) {
+                __region_add_cleanup_free_region(guest, rnode, reg);
+        }
+}
+
+static int __region_add_cleanup_return(struct vmm_guest *guest,
+                                       struct vmm_devtree_node *rnode,
+                                       struct vmm_region *reg,
+                                       enum region_add_fail fail,
+                                       int rc)
+{
+        __region_add_cleanup(guest, rnode, reg, fail);
+        return rc;
+}
+预期复杂度：
+__region_add_cleanup(): 约 7
+__region_add_get_cleanup_level(): 约 7
+__region_add_cleanup_free_host_ram_maps(): 约 4
+__region_add_cleanup_return() 有 5 个参数，满足你的约束。
+ 
+⸻
+ 
+8. 优化 
+__add_region_to_tree_and_probe_list()
+这里不包装 write-lock 宏，而是把 tree 插入流程提取出来。
+8.1 插入位置结构体和 helper
+struct vmm_guest_region_insert_pos {
+        struct rb_node **new;
+        struct rb_node *parent;
+};
+
+static int __region_probe_device_if_needed(struct vmm_guest *guest,
+                                           struct vmm_region *reg)
+{
+        if (!vmm_guest_region_is_device_non_alias(reg)) {
+                return VMM_OK;
+        }
+
+        return vmm_devemu_probe_region(guest, reg);
+}
+
+static int __region_find_insert_pos(
+                const struct vmm_guest_region_tree *tree,
+                struct vmm_region *reg,
+                struct vmm_guest_region_insert_pos *pos)
+{
+        struct vmm_region *pnode_reg = NULL;
+
+        pos->new = &tree->root->rb_node;
+        pos->parent = NULL;
+
+        while (*pos->new != NULL) {
+                pos->parent = *pos->new;
+                pnode_reg = rb_entry(pos->parent,
+                                      struct vmm_region,
+                                      head);
+
+                if (VMM_REGION_GPHYS_END(reg) <=
+                    VMM_REGION_GPHYS_START(pnode_reg)) {
+                        pos->new = &pos->parent->rb_left;
+                } else if (VMM_REGION_GPHYS_END(pnode_reg) <=
+                           VMM_REGION_GPHYS_START(reg)) {
+                        pos->new = &pos->parent->rb_right;
+                } else {
+                        return VMM_EINVALID;
+                }
+        }
+
+        return VMM_OK;
+}
+
+static int __region_insert_to_tree(struct vmm_guest *guest,
+                                   struct vmm_region *reg,
+                                   const struct vmm_guest_region_tree *tree,
+                                   bool add_probe_list)
+{
+        int rc;
+        irq_flags_t flags;
+        struct vmm_guest_region_insert_pos pos;
+
+        vmm_write_lock_irqsave_lite(tree->root_lock, flags);
+
+        rc = __region_find_insert_pos(tree, reg, &pos);
+        if (rc == VMM_OK) {
+                rb_link_node(&reg->head, pos.parent, pos.new);
+                rb_insert_color(&reg->head, tree->root);
+
+                if (add_probe_list) {
+                        list_add_tail(&reg->phead, tree->probe_list);
+                }
+
+                if (vmm_guest_region_is_real_ram_or_rom(reg)) {
+                        region_add_mem_block(guest, reg);
+                }
+        }
+
+        vmm_write_unlock_irqrestore_lite(tree->root_lock, flags);
+
+        return rc;
+}
+8.2 主函数
+static int __add_region_to_tree_and_probe_list(struct vmm_guest *guest,
+                    struct vmm_devtree_node *rnode,
+                    struct vmm_region *reg,
+                    bool add_probe_list)
+{
+        int rc;
+        struct vmm_guest_region_tree tree;
+        struct vmm_guest_aspace *aspace = &guest->aspace;
+
+        /* Probe device emulation for real & virtual device regions */
+        rc = __region_probe_device_if_needed(guest, reg);
+        if (rc != VMM_OK) {
+                return __region_add_cleanup_return(guest, rnode, reg,
+                                                   region_ram_free_fail,
+                                                   rc);
+        }
+
+        /* Call arch specific add region callback */
+        rc = arch_guest_add_region(guest, reg);
+        if (rc != VMM_OK) {
+                return __region_add_cleanup_return(guest, rnode, reg,
+                                                   region_unprobe_fail,
+                                                   rc);
+        }
+
+        /* Add region to tree and probe list */
+        vmm_guest_region_tree_select(aspace, reg->flags, &tree);
+
+        rc = __region_insert_to_tree(guest, reg, &tree, add_probe_list);
+        if (rc != VMM_OK) {
+                return __region_add_cleanup_return(guest, rnode, reg,
+                                                   region_arch_del_fail,
+                                                   rc);
+        }
+
+        return VMM_OK;
+}
+预期复杂度：
+__add_region_to_tree_and_probe_list(): 约 4
+__region_insert_to_tree(): 15 以下
+__region_find_insert_pos(): 约 4
+__region_insert_to_tree() 仍然直接使用原始 write-lock 宏，没有单独封装锁。
+ 
+⸻
+ 
+9. 重构后复杂度预期汇总
+函数	原 KW 复杂度	重构后预期
+vmm_guest_iterate_excluded_region()	18	约 3~4
+vmm_guest_aspace_reset()	39	约 2
+vmm_guest_add_region()	16	约 5
+__add_region_to_tree_and_probe_list()	16	约 4
+__region_add_cleanup()	16	约 7
+新增 helper 中复杂度较高的几个：
+新增 helper	预期复杂度
+vmm_guest_aspace_walk_regions_unlocked()	15 以下
+vmm_guest_aspace_walk_matched_regions_unlocked()	15 以下
+__region_insert_to_tree()	15 以下
+vmm_guest_add_region_set_node_attrs()	约 9
+__region_add_get_cleanup_level()	约 7
+__region_add_cleanup_free_host_ram_maps()	约 4
+最终取舍是：
+不包装锁宏；
+锁宏只集中出现在 3 个 helper 中；
+5 个目标函数全部降到 15 以下；
+新增 helper 入参不超过 5；
+不用 goto；
+不用 typedef。
+如果 KW 对 vmm_guest_aspace_walk_matched_regions_unlocked() 或 __region_insert_to_tree() 仍然报超过 15，那就基本可以确定：KW 对锁宏展开的计数比我们推断的还高。那种情况下，在“不包装锁宏”的前提下，只剩两个现实选择：继续把 walker 拆得更细，或者对这类基础设施 helper 做 KW 度量豁免。
