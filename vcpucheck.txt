@@ -1,0 +1,618 @@
+下面是按你指出的问题重新修正后的 最少用例集版本。这版不再使用之前的 VCAST_ISS_WITH_COND() 宏，而是在每条 CV 有效路径用例里显式构造 iss，避免 ISS_CV_MASK 没有生效导致误走 it == 0 return true。
+本函数中 switch default 正常不可达，因为 cond 是 4-bit 条件码，cond >> 1 只可能是 0~7。如覆盖工具显示 default 未覆盖，建议作为 dead code / unreachable 说明。
+以下入参绑定先按单元名 cpu_vcpu_helper 写：
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>>
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>>
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>>
+如果你 VectorCAST 里单元名不同，只替换最前面的单元名前缀即可。
+ 
+⸻
+ 
+一、User Code
+Test Case Header User Code
+#include <string.h>
+ 
+⸻
+ 
+二、
+cpu_vcpu_condition_check
+最少覆盖用例集
+cpu_vcpu_condition_check.001.R.eq_false_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x0U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* Z = 0, EQ 不成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x0 时按 Z 标志判断，Z 未置位时 EQ 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造 iss，使 ISS_CV_MASK 有效且条件码为 0x0。 测试步骤： step1、清零 vcpu 和 regs。 step2、定义局部变量 iss。 step3、设置 iss 包含 ISS_CV_MASK。 step4、设置 iss 的条件码字段为 0x0。 step5、设置 regs.pstate=0。 step6、调用 cpu_vcpu_condition_check。 step7、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：EQ 条件不成立。 其它说明：覆盖 iss & ISS_CV_MASK 为 true、case 0、Z 标志为 false、最终不取反路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.002.R.ne_false_by_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x1U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* Z = 1，EQ 内部为 true；cond=0x1 取反后 NE 为 false */
+regs.pstate = (u64)PSR_ZERO_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x1 时先按 EQ 条件计算，再因条件码最低位为 1 执行取反；Z 置位时 NE 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造 iss，使 ISS_CV_MASK 有效且条件码为 0x1；设置 Z 标志置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、定义局部变量 iss。 step3、设置 iss 包含 ISS_CV_MASK。 step4、设置 iss 的条件码字段为 0x1。 step5、设置 regs.pstate=PSR_ZERO_MASK。 step6、调用 cpu_vcpu_condition_check。 step7、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：NE 条件不成立。 其它说明：覆盖 case 0 中 Z 标志为 true，以及最终取反路径为 true。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.003.R.cs_false_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x2U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* C = 0，CS 不成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x2 时按 C 标志判断，C 未置位时 CS 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造 iss，使条件码为 0x2。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x2。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：CS 条件不成立。 其它说明：覆盖 case 1 中 C 标志为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.004.R.cc_false_by_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x3U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* C = 1，CS 内部为 true；cond=0x3 取反后 CC 为 false */
+regs.pstate = (u64)PSR_CARRY_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x3 时按 C 标志判断后取反，C 置位时 CC 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x3；设置 C 标志置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x3。 step3、设置 regs.pstate=PSR_CARRY_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：CC 条件不成立。 其它说明：覆盖 case 1 中 C 标志为 true，以及最终取反路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.005.R.mi_false_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x4U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 0，MI 不成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x4 时按 N 标志判断，N 未置位时 MI 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x4。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x4。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：MI 条件不成立。 其它说明：覆盖 case 2 中 N 标志为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.006.R.pl_false_by_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x5U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 1，MI 内部为 true；cond=0x5 取反后 PL 为 false */
+regs.pstate = (u64)PSR_NEGATIVE_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x5 时按 N 标志判断后取反，N 置位时 PL 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x5；设置 N 标志置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x5。 step3、设置 regs.pstate=PSR_NEGATIVE_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：PL 条件不成立。 其它说明：覆盖 case 2 中 N 标志为 true，以及最终取反路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.007.R.vs_false_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x6U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* V = 0，VS 不成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x6 时按 V 标志判断，V 未置位时 VS 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x6。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x6。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：VS 条件不成立。 其它说明：覆盖 case 3 中 V 标志为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.008.R.vc_false_by_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x7U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* V = 1，VS 内部为 true；cond=0x7 取反后 VC 为 false */
+regs.pstate = (u64)PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x7 时按 V 标志判断后取反，V 置位时 VC 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x7；设置 V 标志置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x7。 step3、设置 regs.pstate=PSR_OVERFLOW_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：VC 条件不成立。 其它说明：覆盖 case 3 中 V 标志为 true，以及最终取反路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.009.R.hi_true_it_path
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * iss 不设置 ISS_CV_MASK，走 Thumb IT state 路径。
+ * IT state = 0x80，cond = 0x80 >> 4 = 0x8。
+ * C = 1, Z = 0，HI 成立。
+ */
+regs.pstate = (((u64)0x80U) << 8) | (u64)PSR_CARRY_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = 0U;
+期望值
+return = 1
+注释
+测试目的：验证 ISS_CV_MASK 无效且 IT state 非 0 时，函数从 IT state 中提取条件码并完成条件判断。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；设置 IT state 为 0x80，使提取出的条件码为 0x8；设置 C 置位且 Z 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、设置 regs.pstate 的 IT state 为 0x80。 step3、设置 regs.pstate 包含 PSR_CARRY_MASK。 step4、设置 iss=0。 step5、调用 cpu_vcpu_condition_check。 step6、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：IT state 非 0，HI 条件成立。 其它说明：覆盖 iss & ISS_CV_MASK 为 false、it == 0 为 false、cond = it >> 4、case 4 中 C && !Z 为 true。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.010.R.hi_false_c_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x8U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* C = 0，HI 不成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0x8 时，C 未置位时 HI 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x8；设置 C 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x8。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：HI 条件不成立，C clear。 其它说明：覆盖 case 4 中 C 条件为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.011.R.hi_false_z_set_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x9U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/*
+ * C = 1, Z = 1。
+ * HI 内部为 false，cond=0x9 取反后返回 true。
+ */
+regs.pstate = (u64)PSR_CARRY_MASK | (u64)PSR_ZERO_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0x9 时，对 HI 条件结果取反；当 C 置位但 Z 也置位时，HI 不成立，LS 成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0x9；设置 C 和 Z 均置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x9。 step3、设置 regs.pstate=PSR_CARRY_MASK | PSR_ZERO_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：LS 条件成立。 其它说明：覆盖 case 4 中 C 为 true、!Z 为 false，以及最终取反路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.012.R.ge_true_n_v_set_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xAU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 1, V = 1，GE 成立 */
+regs.pstate = (u64)PSR_NEGATIVE_MASK | (u64)PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xA 时，N 置位且 V 置位时 GE 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xA；设置 N 和 V 均置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xA。 step3、设置 regs.pstate=PSR_NEGATIVE_MASK | PSR_OVERFLOW_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GE 条件成立，N/V 同为 1。 其它说明：覆盖 case 5 中 N 为 true、V 为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.013.R.ge_false_n_set_v_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xAU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 1, V = 0，GE 不成立 */
+regs.pstate = (u64)PSR_NEGATIVE_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0xA 时，N 置位但 V 未置位时 GE 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xA；设置 N 置位、V 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xA。 step3、设置 regs.pstate=PSR_NEGATIVE_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GE 条件不成立，N/V 不一致。 其它说明：覆盖 case 5 中 N 为 true、V 为 false 的路径。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.014.R.ge_true_n_clear_v_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xAU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 0, V = 0，GE 成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xA 时，N 未置位且 V 未置位时 GE 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xA；设置 N 和 V 均未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xA。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GE 条件成立，N/V 同为 0。 其它说明：覆盖 case 5 中 N 为 false、V 为 false 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.015.R.lt_true_n_clear_v_set_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xBU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/*
+ * N = 0, V = 1。
+ * GE 内部为 false，cond=0xB 取反后 LT 为 true。
+ */
+regs.pstate = (u64)PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xB 时，对 GE 条件结果取反；当 N 未置位但 V 置位时，LT 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xB；设置 N 未置位、V 置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xB。 step3、设置 regs.pstate=PSR_OVERFLOW_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：LT 条件成立。 其它说明：覆盖 case 5 中 N 为 false、V 为 true，以及最终取反路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.016.R.gt_true_n_v_set_z_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xCU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 1, V = 1, Z = 0，GT 成立 */
+regs.pstate = (u64)PSR_NEGATIVE_MASK | (u64)PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xC 时，N/V 一致且 Z 未置位时 GT 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xC；设置 N 和 V 均置位，Z 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xC。 step3、设置 regs.pstate=PSR_NEGATIVE_MASK | PSR_OVERFLOW_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GT 条件成立，N/V 同为 1 且 Z clear。 其它说明：覆盖 case 6 中 N 为 true、V 为 true，以及 ret && !Z 为 true 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.017.R.gt_false_n_set_v_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xCU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 1, V = 0，GT 不成立 */
+regs.pstate = (u64)PSR_NEGATIVE_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0xC 时，N 置位但 V 未置位，GT 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xC；设置 N 置位、V 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xC。 step3、设置 regs.pstate=PSR_NEGATIVE_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GT 条件不成立，N/V 不一致。 其它说明：覆盖 case 6 中 N 为 true、V 为 false，以及 ret && !Z 的第一操作数为 false。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.018.R.gt_true_n_clear_v_clear_z_clear_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xCU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 0, V = 0, Z = 0，GT 成立 */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xC 时，N/V 同为 0 且 Z 未置位时 GT 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xC；设置 N、V、Z 均未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xC。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GT 条件成立，N/V 同为 0 且 Z clear。 其它说明：覆盖 case 6 中 N 为 false、V 为 false，以及 ret && !Z 为 true。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.019.R.gt_false_n_clear_v_set_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xCU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/* N = 0, V = 1，GT 不成立 */
+regs.pstate = (u64)PSR_OVERFLOW_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 0
+注释
+测试目的：验证 cond=0xC 时，N 未置位但 V 置位时 GT 条件不成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xC；设置 V 置位，N 未置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xC。 step3、设置 regs.pstate=PSR_OVERFLOW_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：GT 条件不成立，N/V 不一致。 其它说明：覆盖 case 6 中 N 为 false、V 为 true，以及 ret && !Z 的第一操作数为 false。 通过准则：函数返回 FALSE，即 0。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.020.R.le_true_z_set_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xDU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/*
+ * N = 0, V = 0, Z = 1。
+ * GT 内部因 Z=1 变 false，cond=0xD 取反后 LE 为 true。
+ */
+regs.pstate = (u64)PSR_ZERO_MASK;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xD 时，对 GT 条件结果取反；当 Z 置位导致 GT 不成立时，LE 条件成立。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xD；设置 Z 标志置位。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xD。 step3、设置 regs.pstate=PSR_ZERO_MASK。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：LE 条件成立，Z set。 其它说明：覆盖 case 6 中 ret && !Z 的第二操作数 !Z 为 false，以及最终取反路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.021.R.cond_f_no_invert_cv
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xFU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = iss;
+期望值
+return = 1
+注释
+测试目的：验证 cond=0xF 时进入 case 7 后不执行最终取反。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造条件码 0xF。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xF。 step3、设置 regs.pstate=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：条件码 0xF。 其它说明：覆盖 case 7；同时覆盖最终判断中 cond & 0x1 为 true，但 cond != 0xF 为 false 的路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+cpu_vcpu_condition_check.022.R.it_zero_unconditional
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * iss 不设置 ISS_CV_MASK，且 IT state 为 0。
+ * 函数应直接 return true。
+ */
+regs.pstate = 0U;
+
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_condition_check.iss>> = 0U;
+期望值
+return = 1
+注释
+测试目的：验证 ISS_CV_MASK 无效且 IT state 为 0 时，函数按无条件执行处理并直接返回 true。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；设置 iss=0 且 regs.pstate 中 IT state 为 0。 测试步骤： step1、清零 vcpu 和 regs。 step2、设置 regs.pstate=0。 step3、设置 iss=0。 step4、调用 cpu_vcpu_condition_check。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：cpu_vcpu_condition_check。 等价列表：Thumb IT state 为 0，无条件执行。 其它说明：覆盖 iss & ISS_CV_MASK 为 false、it == 0 为 true 的提前返回路径。 通过准则：函数返回 TRUE，即 1。
+ 
+⸻
+ 
+三、覆盖说明
+这 22 条用例覆盖以下路径：
+1. ISS_CV_MASK 有效路径。
+2. ISS_CV_MASK 无效路径。
+3. IT state 为 0 的提前返回。
+4. IT state 非 0 并提取 cond 的路径。
+5. switch case 0 ~ case 7。
+6. case 4 中 C && !Z 的三种关键组合：
+   C=false
+   C=true, Z=false
+   C=true, Z=true
+7. case 5 中 N/V 的四种组合：
+   N=1,V=1
+   N=1,V=0
+   N=0,V=0
+   N=0,V=1
+8. case 6 中 N/V 的四种组合，并覆盖 Z 对 GT 的影响。
+9. 最终取反条件：
+   cond bit0 = 0
+   cond bit0 = 1 且 cond != 0xF
+   cond bit0 = 1 且 cond == 0xF
+switch default 不可达，原因是 cond 只能是 4-bit 条件码 0x0~0xF，所以 cond >> 1 只能是 0~7。如果工具要求说明，可标记为 dead code / unreachable。
