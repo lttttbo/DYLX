@@ -1,0 +1,1242 @@
+已更正：本文件单元名为 cpu_vcpu_emulate。下面的 VectorCAST 参数绑定统一使用：
+<<cpu_vcpu_emulate.函数名.参数名>>
+本批包含：
+cpu_vcpu_emulate_mcr_mrc_cp15
+cpu_vcpu_emulate_mcr_mrc_cp14
+vcpu_advance_pc
+cpu_vcpu_emulate_load
+按决策覆盖和条件覆盖计算，建议的最少用例数为：
+CP15：5 条
+CP14：5 条
+vcpu_advance_pc：ARM64 配置下 3 条
+cpu_vcpu_emulate_load：10 条
+其中 cpu_vcpu_emulate_load 的 switch default 是否不可达，需要结合 ISS_ABORT_SAS_MASK 的实际定义最终确认。若该字段是标准 2-bit SAS 字段，则 sas 只能为 0～3，default 属于不可达代码。
+ 
+⸻
+ 
+一、公共 User Code
+1. Test Case Header User Code
+#include <string.h>
+ 
+⸻
+ 
+2. User Global / Data
+不要重复定义上一批已经存在的变量。
+/* CP15 read/write 控制和记录 */
+unsigned int vcast_cp15_read_ret;
+unsigned int vcast_cp15_write_ret;
+unsigned int vcast_cp15_read_data;
+unsigned int vcast_cp15_read_call;
+unsigned int vcast_cp15_write_call;
+unsigned int vcast_cp15_last_opc1;
+unsigned int vcast_cp15_last_opc2;
+unsigned int vcast_cp15_last_crn;
+unsigned int vcast_cp15_last_crm;
+unsigned int vcast_cp15_last_data;
+
+/* CP14 read/write 控制和记录 */
+unsigned int vcast_cp14_read_ret;
+unsigned int vcast_cp14_write_ret;
+unsigned int vcast_cp14_read_data;
+unsigned int vcast_cp14_read_call;
+unsigned int vcast_cp14_write_call;
+unsigned int vcast_cp14_last_opc1;
+unsigned int vcast_cp14_last_opc2;
+unsigned int vcast_cp14_last_crn;
+unsigned int vcast_cp14_last_crm;
+unsigned int vcast_cp14_last_data;
+
+/* 通用寄存器读写控制和记录 */
+unsigned long long vcast_reg64_read_value;
+unsigned int vcast_reg64_read_call;
+unsigned int vcast_reg64_read_rt;
+
+unsigned int vcast_reg64_write_call;
+unsigned int vcast_reg64_write_rt;
+unsigned long long vcast_reg64_write_value;
+
+/*
+ * cpu_vcpu_update_itstate 的调用记录。
+ * 如果上一批已定义 vcast_wfi_update_itstate_call，
+ * 可直接复用，不要重复定义。
+ */
+unsigned int vcast_wfi_update_itstate_call;
+void *vcast_wfi_update_itstate_vcpu;
+
+/* load 的设备读取控制和记录 */
+int vcast_load_read_rc;
+unsigned int vcast_load_read_call;
+unsigned long long vcast_load_read_value;
+unsigned long long vcast_load_last_ipa;
+unsigned int vcast_load_last_size;
+int vcast_load_last_endian;
+ 
+⸻
+ 
+3. Test Case Init
+vcast_cp15_read_ret = 1U;
+vcast_cp15_write_ret = 1U;
+vcast_cp15_read_data = 0U;
+vcast_cp15_read_call = 0U;
+vcast_cp15_write_call = 0U;
+vcast_cp15_last_opc1 = 0U;
+vcast_cp15_last_opc2 = 0U;
+vcast_cp15_last_crn = 0U;
+vcast_cp15_last_crm = 0U;
+vcast_cp15_last_data = 0U;
+
+vcast_cp14_read_ret = 1U;
+vcast_cp14_write_ret = 1U;
+vcast_cp14_read_data = 0U;
+vcast_cp14_read_call = 0U;
+vcast_cp14_write_call = 0U;
+vcast_cp14_last_opc1 = 0U;
+vcast_cp14_last_opc2 = 0U;
+vcast_cp14_last_crn = 0U;
+vcast_cp14_last_crm = 0U;
+vcast_cp14_last_data = 0U;
+
+vcast_reg64_read_value = 0ULL;
+vcast_reg64_read_call = 0U;
+vcast_reg64_read_rt = 0U;
+
+vcast_reg64_write_call = 0U;
+vcast_reg64_write_rt = 0U;
+vcast_reg64_write_value = 0ULL;
+
+vcast_wfi_update_itstate_call = 0U;
+vcast_wfi_update_itstate_vcpu = 0;
+
+vcast_load_read_rc = 0;
+vcast_load_read_call = 0U;
+vcast_load_read_value = 0ULL;
+vcast_load_last_ipa = 0ULL;
+vcast_load_last_size = 0U;
+vcast_load_last_endian = 0;
+ 
+⸻
+ 
+二、Stub User Code
+1. 
+cpu_vcpu_cp15_read
+**改写目的：**控制 CP15 MRC 成功和失败，并向被测函数提供可控读取值。
+vcast_cp15_read_call++;
+
+vcast_cp15_last_opc1 = p->opc1;
+vcast_cp15_last_opc2 = p->opc2;
+vcast_cp15_last_crn = p->CRn;
+vcast_cp15_last_crm = p->CRm;
+
+p->data = vcast_cp15_read_data;
+
+return vcast_cp15_read_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+2. 
+cpu_vcpu_cp15_write
+**改写目的：**控制 CP15 MCR 成功和失败，并记录解码参数及写入数据。
+vcast_cp15_write_call++;
+
+vcast_cp15_last_opc1 = p->opc1;
+vcast_cp15_last_opc2 = p->opc2;
+vcast_cp15_last_crn = p->CRn;
+vcast_cp15_last_crm = p->CRm;
+vcast_cp15_last_data = p->data;
+
+return vcast_cp15_write_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+3. 
+cpu_vcpu_cp14_read
+vcast_cp14_read_call++;
+
+vcast_cp14_last_opc1 = p->opc1;
+vcast_cp14_last_opc2 = p->opc2;
+vcast_cp14_last_crn = p->CRn;
+vcast_cp14_last_crm = p->CRm;
+
+p->data = vcast_cp14_read_data;
+
+return vcast_cp14_read_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+4. 
+cpu_vcpu_cp14_write
+vcast_cp14_write_call++;
+
+vcast_cp14_last_opc1 = p->opc1;
+vcast_cp14_last_opc2 = p->opc2;
+vcast_cp14_last_crn = p->CRn;
+vcast_cp14_last_crm = p->CRm;
+vcast_cp14_last_data = p->data;
+
+return vcast_cp14_write_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+5. 
+cpu_vcpu_reg64_read
+**改写目的：**为 MCR 提供可控源寄存器值。
+vcast_reg64_read_call++;
+vcast_reg64_read_rt = reg;
+
+return vcast_reg64_read_value;
+如果 VectorCAST 中寄存器编号参数不叫 reg，替换成实际参数名。
+ 
+⸻
+ 
+6. 
+cpu_vcpu_reg64_write
+**改写目的：**记录 MRC 和 load 写入的目标寄存器和值。
+vcast_reg64_write_call++;
+vcast_reg64_write_rt = reg;
+vcast_reg64_write_value = val;
+
+return;
+如果参数名不是 reg、val，按实际参数名替换。
+ 
+⸻
+ 
+7. 
+cpu_vcpu_update_itstate
+vcast_wfi_update_itstate_call++;
+vcast_wfi_update_itstate_vcpu = (void *)vcpu;
+
+return;
+ 
+⸻
+ 
+8. 
+vmm_devemu_emulate_read
+**改写目的：**为 load 指令提供不同宽度的可控读取数据，并记录 IPA、读取宽度和端序。
+以下假定参数名为 ipa、dst、len、endian；按 VectorCAST 实际参数名替换。
+vcast_load_read_call++;
+vcast_load_last_ipa = (unsigned long long)ipa;
+vcast_load_last_size = len;
+vcast_load_last_endian = endian;
+
+if (vcast_load_read_rc != VMM_OK) {
+    return vcast_load_read_rc;
+}
+
+switch (len) {
+case 1U:
+    *(u8 *)dst = (u8)vcast_load_read_value;
+    break;
+case 2U:
+    *(u16 *)dst = (u16)vcast_load_read_value;
+    break;
+case 4U:
+    *(u32 *)dst = (u32)vcast_load_read_value;
+    break;
+case 8U:
+    *(u64 *)dst = (u64)vcast_load_read_value;
+    break;
+default:
+    break;
+}
+
+return VMM_OK;
+ 
+⸻
+ 
+9. 
+arm_sign_extend
+如果该函数没有作为真实依赖加入当前环境，可使用下面的等价 stub。
+if (len == 8U) {
+    return (u32)(s32)(signed char)(u8)imm;
+}
+
+if (len == 16U) {
+    return (u32)(s32)(short)(u16)imm;
+}
+
+return imm;
+ 
+⸻
+ 
+关于 inline helper
+上述方案假定以下函数是可 stub 的普通外部函数：
+cpu_vcpu_cp15_read
+cpu_vcpu_cp15_write
+cpu_vcpu_cp14_read
+cpu_vcpu_cp14_write
+cpu_vcpu_reg64_read
+cpu_vcpu_reg64_write
+如果 cpu_vcpu_reg64_read/write 在当前工程中是 static inline，普通 stub 不会生效。届时需要提供这两个函数的真实实现，以便改为构造 arch_regs_t 的真实寄存器字段。
+ 
+⸻
+ 
+三、
+cpu_vcpu_emulate_mcr_mrc_cp15
+1. 
+cpu_vcpu_emulate_mcr_mrc_cp15.001.R.condition_false_thumb_il0
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cond=EQ，Z=0，使条件判断为 false */
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x0U << ISS_COND_SHIFT) & ISS_COND_MASK);
+
+regs.pc = 0x1000ULL;
+regs.pstate = (u64)PSR_THUMB_ENABLED;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x1002
+
+vcast_cp15_read_call = 0
+vcast_cp15_write_call = 0
+vcast_reg64_read_call = 0
+vcast_reg64_write_call = 0
+vcast_wfi_update_itstate_call = 1
+注释
+测试目的：验证指令条件不满足时，不执行 CP15 读写，仅按 16-bit 指令长度更新 PC，并在 Thumb 模式下更新 ITSTATE。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器；设置条件码为 EQ，Z 标志未置位；设置 Thumb 模式和 il=0。 测试步骤： step1、清零 vcpu 和 regs。 step2、显式构造 iss，设置 ISS_CV_MASK 和条件码 0x0。 step3、设置 regs.pstate=PSR_THUMB_ENABLED。 step4、设置 regs.pc=0x1000。 step5、调用 cpu_vcpu_emulate_mcr_mrc_cp15。 step6、观察返回值、PC 和外部函数调用记录。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15。 等价列表：条件不满足、16-bit Thumb 指令。 其它说明：覆盖条件检查为 false、rc==VMM_OK 为 true、il=false 和 Thumb 更新路径。 通过准则：函数返回 0；PC 更新为 0x1002；CP15 和通用寄存器读写均未调用；ITSTATE 更新一次。
+ 
+⸻
+ 
+2. 
+cpu_vcpu_emulate_mcr_mrc_cp15.002.R.mrc_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)ISS_MCR_MRC_DIR_MASK;
+iss |= (u32)(((u32)3U << ISS_MCR_MRC_OPC2_SHIFT) &
+             ISS_MCR_MRC_OPC2_MASK);
+iss |= (u32)(((u32)2U << ISS_MCR_MRC_OPC1_SHIFT) &
+             ISS_MCR_MRC_OPC1_MASK);
+iss |= (u32)(((u32)7U << ISS_MCR_MRC_CRN_SHIFT) &
+             ISS_MCR_MRC_CRN_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+iss |= (u32)(((u32)4U << ISS_MCR_MRC_CRM_SHIFT) &
+             ISS_MCR_MRC_CRM_MASK);
+
+regs.pc = 0x2000ULL;
+regs.pstate = 0U;
+
+vcast_cp15_read_ret = 1U;
+vcast_cp15_read_data = 0xA5A5A5A5U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x2004
+
+vcast_cp15_read_call = 1
+vcast_cp15_write_call = 0
+
+vcast_cp15_last_opc2 = 3
+vcast_cp15_last_opc1 = 2
+vcast_cp15_last_crn = 7
+vcast_cp15_last_crm = 4
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 5
+vcast_reg64_write_value = 0xA5A5A5A5
+
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证 CP15 MRC 指令读取成功时，正确解码协处理器参数，将读取数据写入目标通用寄存器，并按 32-bit 指令长度更新 PC。 用例类别：基于需求的测试 预置条件：设置条件码为 AL；设置 DIR 为 MRC；设置 CP15 read 返回成功并提供数据 0xA5A5A5A5。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造包含 AL 条件码、MRC 方向和各 CP 参数的 iss。 step3、设置 Rt=5。 step4、设置 CP15 read 返回成功。 step5、设置 il=1。 step6、调用被测函数。 step7、观察返回值、PC、CP15 参数和目标寄存器写入记录。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15。 等价列表：CP15 MRC 读取成功。 其它说明：覆盖 DIR 为 true、CP15 read 成功、rc==VMM_OK 为 true、寄存器写入、il=true 和非 Thumb 路径。 通过准则：函数返回 0；PC 更新为 0x2004；CP15 参数解码正确；寄存器 5 写入 0xA5A5A5A5。
+ 
+⸻
+ 
+3. 
+cpu_vcpu_emulate_mcr_mrc_cp15.003.FI.mrc_read_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)ISS_MCR_MRC_DIR_MASK;
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+
+regs.pc = 0x3000ULL;
+
+vcast_cp15_read_ret = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> = iss;
+期望值
+return = -1
+regs.pc = 0x3000
+
+vcast_cp15_read_call = 1
+vcast_reg64_write_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：通过故障注入验证 CP15 MRC 读取失败时返回 VMM_EFAIL，不写目标寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置条件码为 AL、DIR 为 MRC，并设置 CP15 read 返回 false。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 AL 条件码和 MRC 方向的 iss。 step3、设置初始 PC 为 0x3000。 step4、设置 vcast_cp15_read_ret=0。 step5、调用被测函数。 step6、观察返回值、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15。 等价列表：CP15 MRC 读取失败。 其它说明：覆盖 CP15 read 失败、内部 rc==VMM_OK 为 false，以及函数末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -1；PC 保持 0x3000；目标寄存器未写入；ITSTATE 未更新。
+ 
+⸻
+ 
+4. 
+cpu_vcpu_emulate_mcr_mrc_cp15.004.R.mcr_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)(((u32)1U << ISS_MCR_MRC_OPC2_SHIFT) &
+             ISS_MCR_MRC_OPC2_MASK);
+iss |= (u32)(((u32)2U << ISS_MCR_MRC_OPC1_SHIFT) &
+             ISS_MCR_MRC_OPC1_MASK);
+iss |= (u32)(((u32)6U << ISS_MCR_MRC_CRN_SHIFT) &
+             ISS_MCR_MRC_CRN_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+iss |= (u32)(((u32)3U << ISS_MCR_MRC_CRM_SHIFT) &
+             ISS_MCR_MRC_CRM_MASK);
+
+regs.pc = 0x4000ULL;
+
+vcast_reg64_read_value = 0x1122334455667788ULL;
+vcast_cp15_write_ret = 1U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x4004
+
+vcast_reg64_read_call = 1
+vcast_reg64_read_rt = 5
+
+vcast_cp15_write_call = 1
+vcast_cp15_last_opc2 = 1
+vcast_cp15_last_opc1 = 2
+vcast_cp15_last_crn = 6
+vcast_cp15_last_crm = 3
+vcast_cp15_last_data = 0x55667788
+注释
+测试目的：验证 CP15 MCR 指令写入成功时，从目标通用寄存器读取数据，截取低 32 位写入 CP15，并更新 PC。 用例类别：基于需求的测试 预置条件：设置条件码为 AL、DIR 为 MCR；设置通用寄存器读取值为 0x1122334455667788；设置 CP15 write 成功。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 MCR 参数和 Rt=5。 step3、设置通用寄存器读取值。 step4、设置 CP15 write 返回成功。 step5、调用被测函数。 step6、观察返回值、PC、寄存器读取记录和 CP15 写入记录。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15。 等价列表：CP15 MCR 写入成功。 其它说明：p.data 类型为 u32，因此只保留源寄存器值低 32 位 0x55667788。 通过准则：函数返回 0；PC 更新为 0x4004；读取寄存器 5；CP15 write 收到 0x55667788。
+ 
+⸻
+ 
+5. 
+cpu_vcpu_emulate_mcr_mrc_cp15.005.FI.mcr_write_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+
+regs.pc = 0x5000ULL;
+
+vcast_reg64_read_value = 0x12345678ULL;
+vcast_cp15_write_ret = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp15.iss>> = iss;
+期望值
+return = -1
+regs.pc = 0x5000
+
+vcast_reg64_read_call = 1
+vcast_cp15_write_call = 1
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：通过故障注入验证 CP15 MCR 写入失败时返回 VMM_EFAIL，且不更新 PC 和 ITSTATE。 用例类别：故障注入测试 预置条件：设置条件码为 AL、DIR 为 MCR；设置通用寄存器读取成功；设置 CP15 write 返回 false。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 MCR 方向的 iss。 step3、设置初始 PC 为 0x5000。 step4、设置源寄存器值。 step5、设置 CP15 write 返回失败。 step6、调用被测函数。 step7、观察返回值、PC 和调用记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp15。 等价列表：CP15 MCR 写入失败。 其它说明：覆盖 CP15 write 失败以及函数末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -1；PC 保持 0x5000；通用寄存器读取和 CP15 write 各调用一次；ITSTATE 未更新。
+ 
+⸻
+ 
+四、
+cpu_vcpu_emulate_mcr_mrc_cp14
+CP14 的控制流与 CP15 相同，但调用的是独立的 CP14 read/write 接口，因此仍需要 5 条独立用例。
+1. 
+cpu_vcpu_emulate_mcr_mrc_cp14.001.R.condition_false_thumb_il0
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x0U << ISS_COND_SHIFT) & ISS_COND_MASK);
+
+regs.pc = 0x1100ULL;
+regs.pstate = (u64)PSR_THUMB_ENABLED;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x1102
+vcast_cp14_read_call = 0
+vcast_cp14_write_call = 0
+vcast_wfi_update_itstate_call = 1
+注释
+测试目的：验证条件不满足时，不执行 CP14 读写，仅更新 16-bit 指令 PC，并在 Thumb 模式下更新 ITSTATE。 用例类别：基于需求的测试 预置条件：设置 EQ 条件且 Z 未置位；设置 Thumb 模式和 il=0。 测试步骤： step1、清零 VCPU 和寄存器。 step2、显式构造 EQ 条件码。 step3、设置 PC 和 Thumb 标志。 step4、调用被测函数。 step5、观察返回值、PC 和调用记录。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14。 等价列表：条件不满足、16-bit Thumb 指令。 其它说明：覆盖条件检查 false、正常 PC 更新和 Thumb ITSTATE 更新。 通过准则：函数返回 0；PC 为 0x1102；CP14 read/write 未调用；ITSTATE 更新一次。
+ 
+⸻
+ 
+2. 
+cpu_vcpu_emulate_mcr_mrc_cp14.002.R.mrc_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)ISS_MCR_MRC_DIR_MASK;
+iss |= (u32)(((u32)3U << ISS_MCR_MRC_OPC2_SHIFT) &
+             ISS_MCR_MRC_OPC2_MASK);
+iss |= (u32)(((u32)2U << ISS_MCR_MRC_OPC1_SHIFT) &
+             ISS_MCR_MRC_OPC1_MASK);
+iss |= (u32)(((u32)7U << ISS_MCR_MRC_CRN_SHIFT) &
+             ISS_MCR_MRC_CRN_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+iss |= (u32)(((u32)4U << ISS_MCR_MRC_CRM_SHIFT) &
+             ISS_MCR_MRC_CRM_MASK);
+
+regs.pc = 0x2200ULL;
+
+vcast_cp14_read_ret = 1U;
+vcast_cp14_read_data = 0x5A5A5A5AU;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x2204
+
+vcast_cp14_read_call = 1
+vcast_cp14_last_opc2 = 3
+vcast_cp14_last_opc1 = 2
+vcast_cp14_last_crn = 7
+vcast_cp14_last_crm = 4
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 5
+vcast_reg64_write_value = 0x5A5A5A5A
+注释
+测试目的：验证 CP14 MRC 读取成功时，正确解码参数，将读取数据写入目标通用寄存器并更新 PC。 用例类别：基于需求的测试 预置条件：设置 AL 条件、MRC 方向、CP14 参数和读取数据。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造完整 MRC iss。 step3、设置 CP14 read 返回成功和读取数据。 step4、调用被测函数。 step5、观察返回值、PC、参数解码和寄存器写入。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14。 等价列表：CP14 MRC 读取成功。 其它说明：覆盖 CP14 read 成功、目标寄存器写入、32-bit PC 更新和非 Thumb 路径。 通过准则：函数返回 0；PC 为 0x2204；参数解码正确；寄存器 5 写入 0x5A5A5A5A。
+ 
+⸻
+ 
+3. 
+cpu_vcpu_emulate_mcr_mrc_cp14.003.FI.mrc_read_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)ISS_MCR_MRC_DIR_MASK;
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+
+regs.pc = 0x3300ULL;
+vcast_cp14_read_ret = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> = iss;
+期望值
+return = -1
+regs.pc = 0x3300
+vcast_cp14_read_call = 1
+vcast_reg64_write_call = 0
+注释
+测试目的：通过故障注入验证 CP14 MRC 读取失败时返回 VMM_EFAIL，不写目标寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置 AL 条件、MRC 方向，并设置 CP14 read 返回 false。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 MRC iss。 step3、设置初始 PC。 step4、设置 CP14 read 失败。 step5、调用被测函数。 step6、观察返回值、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14。 等价列表：CP14 MRC 读取失败。 其它说明：覆盖 CP14 read 失败、if (!rc) 为 false和末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -1；PC 不变；目标寄存器未写入。
+ 
+⸻
+ 
+4. 
+cpu_vcpu_emulate_mcr_mrc_cp14.004.R.mcr_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)(((u32)1U << ISS_MCR_MRC_OPC2_SHIFT) &
+             ISS_MCR_MRC_OPC2_MASK);
+iss |= (u32)(((u32)2U << ISS_MCR_MRC_OPC1_SHIFT) &
+             ISS_MCR_MRC_OPC1_MASK);
+iss |= (u32)(((u32)6U << ISS_MCR_MRC_CRN_SHIFT) &
+             ISS_MCR_MRC_CRN_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+iss |= (u32)(((u32)3U << ISS_MCR_MRC_CRM_SHIFT) &
+             ISS_MCR_MRC_CRM_MASK);
+
+regs.pc = 0x4400ULL;
+
+vcast_reg64_read_value = 0x8877665544332211ULL;
+vcast_cp14_write_ret = 1U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x4404
+
+vcast_reg64_read_call = 1
+vcast_reg64_read_rt = 5
+
+vcast_cp14_write_call = 1
+vcast_cp14_last_data = 0x44332211
+注释
+测试目的：验证 CP14 MCR 写入成功时，从目标通用寄存器读取数据，将低 32 位写入 CP14，并更新 PC。 用例类别：基于需求的测试 预置条件：设置 AL 条件、MCR 方向；设置源寄存器值；设置 CP14 write 成功。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 MCR 参数。 step3、设置源寄存器值。 step4、设置 CP14 write 成功。 step5、调用被测函数。 step6、观察返回值、PC、寄存器读取和 CP14 写入数据。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14。 等价列表：CP14 MCR 写入成功。 其它说明：p.data 只保留源值低 32 位 0x44332211。 通过准则：函数返回 0；PC 为 0x4404；读取寄存器 5；CP14 写入数据为 0x44332211。
+ 
+⸻
+ 
+5. 
+cpu_vcpu_emulate_mcr_mrc_cp14.005.FI.mcr_write_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << ISS_COND_SHIFT) & ISS_COND_MASK);
+iss |= (u32)(((u32)5U << ISS_MCR_MRC_RT_SHIFT) &
+             ISS_MCR_MRC_RT_MASK);
+
+regs.pc = 0x5500ULL;
+
+vcast_reg64_read_value = 0x12345678ULL;
+vcast_cp14_write_ret = 0U;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_mcr_mrc_cp14.iss>> = iss;
+期望值
+return = -1
+regs.pc = 0x5500
+vcast_reg64_read_call = 1
+vcast_cp14_write_call = 1
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：通过故障注入验证 CP14 MCR 写入失败时返回 VMM_EFAIL，不更新 PC 和 ITSTATE。 用例类别：故障注入测试 预置条件：设置 AL 条件、MCR 方向、源寄存器值，并设置 CP14 write 返回 false。 测试步骤： step1、清零 VCPU 和寄存器。 step2、构造 MCR iss。 step3、设置初始 PC 和源寄存器值。 step4、设置 CP14 write 失败。 step5、调用被测函数。 step6、观察返回值、PC 和调用记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_mcr_mrc_cp14。 等价列表：CP14 MCR 写入失败。 其它说明：覆盖 CP14 write 失败和末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -1；PC 不变；寄存器读取和 CP14 write 各调用一次；ITSTATE 未更新。
+ 
+⸻
+ 
+五、
+vcpu_advance_pc
+该函数只有在：
+CONFIG_TEE
+开启时存在。
+在 CONFIG_ARM64 配置下建议 3 条用例；非 ARM64 配置下第 1 条对应代码不存在。
+1. 
+vcpu_advance_pc.001.R.aarch64_always_plus4
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* 不设置 PSR_MODE32，表示 AArch64 guest */
+regs.pstate = 0U;
+regs.pc = 0x1000ULL;
+
+<<cpu_vcpu_emulate.vcpu_advance_pc.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.vcpu_advance_pc.regs>> = &regs;
+<<cpu_vcpu_emulate.vcpu_advance_pc.il>> = 0U;
+期望值
+regs.pc = 0x1004
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证 AArch64 guest 无论 IL 值为何，PC 都固定增加 4，且直接返回，不更新 ITSTATE。 用例类别：基于需求的测试 预置条件：开启 CONFIG_TEE 和 CONFIG_ARM64；构造非 MODE32 寄存器状态。 测试步骤： step1、清零 VCPU 和寄存器。 step2、设置 regs.pstate=0。 step3、设置 PC 为 0x1000，IL 为 0。 step4、调用 vcpu_advance_pc。 step5、观察 PC 和 ITSTATE 更新记录。 用例来源：需求分析。 追溯ID：vcpu_advance_pc。 等价列表：AArch64 guest。 其它说明：覆盖 !(regs->pstate & PSR_MODE32) 为 true 的提前返回路径，并证明 AArch64 不依赖 IL。 通过准则：PC 更新为 0x1004；ITSTATE 未更新。
+ 
+⸻
+ 
+2. 
+vcpu_advance_pc.002.R.aarch32_il1_arm
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x2000ULL;
+
+<<cpu_vcpu_emulate.vcpu_advance_pc.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.vcpu_advance_pc.regs>> = &regs;
+<<cpu_vcpu_emulate.vcpu_advance_pc.il>> = 1U;
+期望值
+regs.pc = 0x2004
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证 AArch32 ARM 状态且 IL 为 1 时，PC 增加 4，不更新 Thumb ITSTATE。 用例类别：基于需求的测试 预置条件：开启 CONFIG_TEE；设置 MODE32，不设置 Thumb 标志；设置 IL 为 1。 测试步骤： step1、清零 VCPU 和寄存器。 step2、设置 regs.pstate=PSR_MODE32。 step3、设置 PC 为 0x2000。 step4、设置 IL 为 1。 step5、调用 vcpu_advance_pc。 step6、观察 PC 和 ITSTATE 更新记录。 用例来源：需求分析。 追溯ID：vcpu_advance_pc。 等价列表：AArch32 ARM 32-bit 指令。 其它说明：覆盖 MODE32 路径、il=true 和 Thumb 条件为 false。 通过准则：PC 更新为 0x2004；ITSTATE 未更新。
+ 
+⸻
+ 
+3. 
+vcpu_advance_pc.003.R.aarch32_thumb_il0
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pstate = (u64)PSR_MODE32 | (u64)PSR_THUMB_ENABLED;
+regs.pc = 0x3000ULL;
+
+<<cpu_vcpu_emulate.vcpu_advance_pc.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.vcpu_advance_pc.regs>> = &regs;
+<<cpu_vcpu_emulate.vcpu_advance_pc.il>> = 0U;
+期望值
+regs.pc = 0x3002
+vcast_wfi_update_itstate_call = 1
+注释
+测试目的：验证 AArch32 Thumb 状态且 IL 为 0 时，PC 增加 2，并调用 ITSTATE 更新函数。 用例类别：基于需求的测试 预置条件：开启 CONFIG_TEE；设置 MODE32 和 Thumb 标志；设置 IL 为 0。 测试步骤： step1、清零 VCPU 和寄存器。 step2、设置 MODE32 和 Thumb 标志。 step3、设置 PC 为 0x3000。 step4、设置 IL 为 0。 step5、调用 vcpu_advance_pc。 step6、观察 PC 和 ITSTATE 更新记录。 用例来源：需求分析。 追溯ID：vcpu_advance_pc。 等价列表：AArch32 Thumb 16-bit 指令。 其它说明：覆盖 il=false 和 Thumb ITSTATE 更新条件为 true。 通过准则：PC 更新为 0x3002；ITSTATE 更新一次。
+ 
+⸻
+ 
+六、
+cpu_vcpu_emulate_load
+最少用例覆盖矩阵
+用例	SAS	SSE	读取结果	架构/端序
+001	0	0	成功	AArch32 LE
+002	0	1	成功	AArch32 BE、Thumb
+003	0	0	失败	AArch64 LE
+004	1	0	成功	AArch64 BE
+005	1	1	成功	AArch32 LE
+006	1	0	失败	AArch32 LE
+007	2	1	成功	AArch32 LE
+008	2	0	失败	AArch32 LE
+009	3	0	成功	AArch64 LE
+010	3	0	失败	AArch64 LE
+ 
+⸻
+ 
+1. 
+cpu_vcpu_emulate_load.001.R.sas0_unsigned_a32_le
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)0U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)0U << ISS_ABORT_SSE_SHIFT) & ISS_ABORT_SSE_MASK);
+iss |= (u32)(((u32)3U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x1000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x7AULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x100000ULL;
+期望值
+return = 0
+regs.pc = 0x1004
+
+vcast_load_read_call = 1
+vcast_load_last_ipa = 0x100000
+vcast_load_last_size = 1
+vcast_load_last_endian = VMM_DEVEMU_LITTLE_ENDIAN
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 3
+vcast_reg64_write_value = 0x7A
+
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证 AArch32 little-endian 下 8-bit 无符号 load 成功时，将读取值零扩展写入目标寄存器，并按 32-bit 指令长度更新 PC。 用例类别：基于需求的测试 预置条件：设置 MODE32、非 BE、SAS=0、SSE=0、SRT=3；设备读取成功并返回 0x7A。 测试步骤： step1、清零 VCPU、ARM private 和寄存器。 step2、设置 vcpu.arch_priv。 step3、构造 SAS=0、SSE=0、SRT=3 的 iss。 step4、设置 AArch32 little-endian。 step5、设置设备读取数据。 step6、调用被测函数。 step7、观察返回值、端序、读取宽度、寄存器写入和 PC。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：8-bit 无符号读取成功、AArch32 LE。 其它说明：覆盖 MODE32 true、BE false、SAS0、SSE false、读取成功、IL true和非 Thumb。 通过准则：函数返回 0；读取宽度为 1；寄存器 3 写入 0x7A；PC 为 0x1004。
+ 
+⸻
+ 
+2. 
+cpu_vcpu_emulate_load.002.R.sas0_signed_a32_be_thumb
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)0U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)1U << ISS_ABORT_SSE_SHIFT) & ISS_ABORT_SSE_MASK);
+iss |= (u32)(((u32)4U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32 |
+              (u64)CPSR_BE_ENABLED |
+              (u64)PSR_THUMB_ENABLED;
+regs.pc = 0x2000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x80ULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x200000ULL;
+期望值
+return = 0
+regs.pc = 0x2002
+
+vcast_load_last_size = 1
+vcast_load_last_endian = VMM_DEVEMU_BIG_ENDIAN
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 4
+vcast_reg64_write_value = 0x00000000FFFFFF80
+
+vcast_wfi_update_itstate_call = 1
+注释
+测试目的：验证 AArch32 big-endian 下 8-bit signed load 成功时，数据符号扩展到 32 位后写入目标寄存器，并更新 16-bit Thumb 指令的 PC 和 ITSTATE。 用例类别：基于需求的测试 预置条件：设置 MODE32、BE 和 Thumb；设置 SAS=0、SSE=1、SRT=4；设备返回 0x80。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 signed 8-bit load 的 iss。 step3、设置 AArch32 BE 和 Thumb。 step4、设置设备读取数据 0x80。 step5、调用被测函数。 step6、观察端序、写入值、PC 和 ITSTATE 调用。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：8-bit signed 读取成功、AArch32 BE、Thumb。 其它说明：arm_sign_extend(0x80,8,32) 结果为 0xFFFFFF80，传给 u64 参数时零扩展为 0x00000000FFFFFF80。 通过准则：函数返回 0；寄存器 4 写入 0x00000000FFFFFF80；PC 为 0x2002；ITSTATE 更新一次。
+ 
+⸻
+ 
+3. 
+cpu_vcpu_emulate_load.003.FI.sas0_read_fail_a64_le
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+priv.sysregs.sctlr_el1 = 0ULL;
+
+iss = 0U;
+iss |= (u32)(((u32)0U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)3U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = 0U;
+regs.pc = 0x3000ULL;
+
+vcast_load_read_rc = -9;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x300000ULL;
+期望值
+return = -9
+regs.pc = 0x3000
+
+vcast_load_last_size = 1
+vcast_load_last_endian = VMM_DEVEMU_LITTLE_ENDIAN
+vcast_reg64_write_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：通过故障注入验证 AArch64 little-endian 下 8-bit 设备读取失败时，函数返回设备错误码，不写寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置非 MODE32、SCTLR EE 未置位、SAS=0，并设置设备读取返回 -9。 测试步骤： step1、清零对象并设置 arch_priv。 step2、设置 AArch64 little-endian。 step3、构造 SAS=0 的 iss。 step4、设置设备读取失败。 step5、调用被测函数。 step6、观察返回值、端序、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_load。 等价列表：8-bit 读取失败、AArch64 LE。 其它说明：覆盖 MODE32 false、AArch64 EE false、SAS0 读取失败和末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -9；PC 不变；目标寄存器未写入。
+ 
+⸻
+ 
+4. 
+cpu_vcpu_emulate_load.004.R.sas1_unsigned_a64_be
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+priv.sysregs.sctlr_el1 = (u64)SCTLR_ELx_EE_MASK;
+
+iss = 0U;
+iss |= (u32)(((u32)1U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)0U << ISS_ABORT_SSE_SHIFT) & ISS_ABORT_SSE_MASK);
+iss |= (u32)(((u32)6U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = 0U;
+regs.pc = 0x4000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x1234ULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x400000ULL;
+期望值
+return = 0
+regs.pc = 0x4004
+
+vcast_load_last_size = 2
+vcast_load_last_endian = VMM_DEVEMU_BIG_ENDIAN
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 6
+vcast_reg64_write_value = 0x1234
+注释
+测试目的：验证 AArch64 big-endian 下 16-bit 无符号 load 成功时，数据写入目标寄存器并更新 PC。 用例类别：基于需求的测试 预置条件：设置非 MODE32、SCTLR EE 置位、SAS=1、SSE=0、SRT=6；设备返回 0x1234。 测试步骤： step1、清零对象并设置 arch_priv。 step2、在 sctlr_el1 中设置 EE 位。 step3、构造 16-bit unsigned load 的 iss。 step4、设置设备读取成功。 step5、调用被测函数。 step6、观察端序、读取宽度、寄存器写入和 PC。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：16-bit 无符号读取成功、AArch64 BE。 其它说明：覆盖 AArch64 EE true、SAS1、SSE false和读取成功。 通过准则：函数返回 0；读取宽度为 2；寄存器 6 写入 0x1234；PC 为 0x4004。
+ 
+⸻
+ 
+5. 
+cpu_vcpu_emulate_load.005.R.sas1_signed
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)1U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)1U << ISS_ABORT_SSE_SHIFT) & ISS_ABORT_SSE_MASK);
+iss |= (u32)(((u32)7U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x5000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x8001ULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x500000ULL;
+期望值
+return = 0
+regs.pc = 0x5004
+
+vcast_load_last_size = 2
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 7
+vcast_reg64_write_value = 0x00000000FFFF8001
+注释
+测试目的：验证 16-bit signed load 成功时，读取数据符号扩展到 32 位后写入目标寄存器。 用例类别：基于需求的测试 预置条件：设置 AArch32 little-endian、SAS=1、SSE=1、SRT=7；设备返回 0x8001。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 16-bit signed load 的 iss。 step3、设置设备返回 0x8001。 step4、调用被测函数。 step5、观察寄存器写入值和 PC。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：16-bit signed 读取成功。 其它说明：符号扩展结果为 0xFFFF8001，传递给 64 位写接口时表现为 0x00000000FFFF8001。 通过准则：函数返回 0；寄存器 7 写入 0x00000000FFFF8001；PC 为 0x5004。
+ 
+⸻
+ 
+6. 
+cpu_vcpu_emulate_load.006.FI.sas1_read_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)1U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)8U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x6000ULL;
+
+vcast_load_read_rc = -9;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x600000ULL;
+期望值
+return = -9
+regs.pc = 0x6000
+vcast_load_last_size = 2
+vcast_reg64_write_call = 0
+注释
+测试目的：通过故障注入验证 16-bit 设备读取失败时返回设备错误码，不写目标寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置 SAS=1，并设置设备读取返回 -9。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 SAS=1 的 iss。 step3、设置初始 PC。 step4、设置设备读取失败。 step5、调用被测函数。 step6、观察返回值、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_load。 等价列表：16-bit 读取失败。 其它说明：覆盖 case1 中 rc==VMM_OK 为 false。 通过准则：函数返回 -9；PC 不变；目标寄存器未写入。
+ 
+⸻
+ 
+7. 
+cpu_vcpu_emulate_load.007.R.sas2_success_sse_forced_zero
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)2U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+
+/* 故意设置 SSE=1，源码会因 SAS=2 强制改为 0 */
+iss |= (u32)(((u32)1U << ISS_ABORT_SSE_SHIFT) & ISS_ABORT_SSE_MASK);
+iss |= (u32)(((u32)9U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x7000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x89ABCDEFULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x700000ULL;
+期望值
+return = 0
+regs.pc = 0x7004
+
+vcast_load_last_size = 4
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 9
+vcast_reg64_write_value = 0x89ABCDEF
+注释
+测试目的：验证 32-bit load 成功路径，并验证当 SAS=2 时源码强制清除 SSE，不进行符号扩展。 用例类别：基于需求的测试 预置条件：设置 SAS=2、ISS 中 SSE=1、SRT=9；设备返回 0x89ABCDEF。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 SAS=2 且 SSE=1 的 iss。 step3、设置设备读取成功。 step4、调用被测函数。 step5、观察读取宽度、寄存器写入和 PC。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：32-bit 读取成功、SSE 被强制清零。 其它说明：覆盖三元表达式 sas==2 为 true；无论 ISS 中 SSE 为何，32-bit load 都直接写入 data32。 通过准则：函数返回 0；读取宽度为 4；寄存器 9 写入 0x89ABCDEF；PC 为 0x7004。
+ 
+⸻
+ 
+8. 
+cpu_vcpu_emulate_load.008.FI.sas2_read_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+
+iss = 0U;
+iss |= (u32)(((u32)2U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)9U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = (u64)PSR_MODE32;
+regs.pc = 0x8000ULL;
+
+vcast_load_read_rc = -9;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x800000ULL;
+期望值
+return = -9
+regs.pc = 0x8000
+vcast_load_last_size = 4
+vcast_reg64_write_call = 0
+注释
+测试目的：通过故障注入验证 32-bit 设备读取失败时，函数返回设备错误码，不写寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置 SAS=2，并设置设备读取返回 -9。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 SAS=2 的 iss。 step3、设置初始 PC。 step4、设置设备读取失败。 step5、调用被测函数。 step6、观察返回值、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_load。 等价列表：32-bit 读取失败。 其它说明：覆盖 case2 中 rc==VMM_OK 为 false。 通过准则：函数返回 -9；PC 不变；目标寄存器未写入。
+ 
+⸻
+ 
+9. 
+cpu_vcpu_emulate_load.009.R.sas3_success
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+priv.sysregs.sctlr_el1 = 0ULL;
+
+iss = 0U;
+iss |= (u32)(((u32)3U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)10U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = 0U;
+regs.pc = 0x9000ULL;
+
+vcast_load_read_rc = VMM_OK;
+vcast_load_read_value = 0x1122334455667788ULL;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 1U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0x900000ULL;
+期望值
+return = 0
+regs.pc = 0x9004
+
+vcast_load_last_size = 8
+vcast_load_last_endian = VMM_DEVEMU_LITTLE_ENDIAN
+
+vcast_reg64_write_call = 1
+vcast_reg64_write_rt = 10
+vcast_reg64_write_value = 0x1122334455667788
+注释
+测试目的：验证 AArch64 little-endian 下 64-bit load 成功时，将完整 64 位数据写入目标寄存器并更新 PC。 用例类别：基于需求的测试 预置条件：设置非 MODE32、SCTLR EE 未置位、SAS=3、SRT=10；设备返回完整 64 位数据。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 SAS=3 的 iss。 step3、设置 AArch64 little-endian。 step4、设置设备读取数据。 step5、调用被测函数。 step6、观察读取宽度、寄存器写入值和 PC。 用例来源：需求分析。 追溯ID：cpu_vcpu_emulate_load。 等价列表：64-bit 读取成功。 其它说明：覆盖 case3 的读取成功和完整 64 位寄存器写入路径。 通过准则：函数返回 0；读取宽度为 8；寄存器 10 写入 0x1122334455667788；PC 为 0x9004。
+ 
+⸻
+ 
+10. 
+cpu_vcpu_emulate_load.010.FI.sas3_read_fail
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct arm_priv priv;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&priv, 0, sizeof(priv));
+memset(&regs, 0, sizeof(regs));
+
+vcpu.arch_priv = &priv;
+priv.sysregs.sctlr_el1 = 0ULL;
+
+iss = 0U;
+iss |= (u32)(((u32)3U << ISS_ABORT_SAS_SHIFT) & ISS_ABORT_SAS_MASK);
+iss |= (u32)(((u32)10U << ISS_ABORT_SRT_SHIFT) & ISS_ABORT_SRT_MASK);
+
+regs.pstate = 0U;
+regs.pc = 0xA000ULL;
+
+vcast_load_read_rc = -9;
+
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.vcpu>> = &vcpu;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.regs>> = &regs;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.il>> = 0U;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.iss>> = iss;
+<<cpu_vcpu_emulate.cpu_vcpu_emulate_load.ipa>> = 0xA00000ULL;
+期望值
+return = -9
+regs.pc = 0xA000
+vcast_load_last_size = 8
+vcast_reg64_write_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：通过故障注入验证 64-bit 设备读取失败时，函数返回设备错误码，不写目标寄存器且不更新 PC。 用例类别：故障注入测试 预置条件：设置 AArch64 little-endian、SAS=3，并设置设备读取返回 -9。 测试步骤： step1、清零对象并设置 arch_priv。 step2、构造 SAS=3 的 iss。 step3、设置初始 PC。 step4、设置设备读取失败。 step5、调用被测函数。 step6、观察返回值、PC 和寄存器写入记录。 用例来源：故障注入。 追溯ID：cpu_vcpu_emulate_load。 等价列表：64-bit 读取失败。 其它说明：覆盖 case3 中 rc==VMM_OK 为 false，以及函数末尾 rc==VMM_OK 为 false。 通过准则：函数返回 -9；PC 不变；目标寄存器未写入；ITSTATE 未更新。
+ 
+⸻
+ 
+七、不可达代码说明
+cpu_vcpu_emulate_load 中：
+default:
+    rc = VMM_EFAIL;
+    break;
+是否不可达取决于：
+ISS_ABORT_SAS_MASK
+ISS_ABORT_SAS_SHIFT
+若定义为标准 2-bit SAS 字段，则：
+sas = (iss & ISS_ABORT_SAS_MASK) >> ISS_ABORT_SAS_SHIFT;
+只能得到：
+0、1、2、3
+因此 default 不可达，可作为 dead code / unreachable 说明。
+ 
+若需要最终确认，请提供：
+ISS_ABORT_SAS_MASK
+ISS_ABORT_SAS_SHIFT
+的实际定义。
