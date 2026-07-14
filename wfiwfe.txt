@@ -1,0 +1,284 @@
+下面给 cpu_vcpu_emulate_wfi_wfe 的完整单元测试构造。该函数可以用 4 条用例 覆盖主要可达分支。
+以下入参绑定先按单元名 cpu_vcpu_helper 写：
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.vcpu>>
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.regs>>
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.il>>
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.iss>>
+如果你 VectorCAST 里的单元名前缀不同，只替换最前面的单元名即可。
+ 
+⸻
+ 
+一、User Code
+1. Test Case Header User Code
+#include <string.h>
+ 
+⸻
+ 
+2. User Global / Data
+这些变量用于控制和观察外部依赖调用。
+unsigned int vcast_wfi_ready_count_ret;
+unsigned int vcast_wfi_ready_count_call;
+
+unsigned int vcast_wfi_yield_call;
+
+unsigned int vcast_wfi_wait_call;
+void *vcast_wfi_wait_vcpu;
+unsigned long long vcast_wfi_wait_timeout;
+
+unsigned int vcast_wfi_update_itstate_call;
+void *vcast_wfi_update_itstate_vcpu;
+ 
+⸻
+ 
+3. Test Case Init
+每条用例默认初始化：
+vcast_wfi_ready_count_ret = 0U;
+vcast_wfi_ready_count_call = 0U;
+
+vcast_wfi_yield_call = 0U;
+
+vcast_wfi_wait_call = 0U;
+vcast_wfi_wait_vcpu = 0;
+vcast_wfi_wait_timeout = 0ULL;
+
+vcast_wfi_update_itstate_call = 0U;
+vcast_wfi_update_itstate_vcpu = 0;
+ 
+⸻
+ 
+4. Stub：
+vmm_scheduler_current_ready_vcpu_count
+改写目的： 隔离真实调度器 ready 队列状态，通过变量控制当前 ready VCPU 数量，覆盖 vcpu_ready_count <= 1 和 > 1 两类路径。
+vcast_wfi_ready_count_call++;
+return vcast_wfi_ready_count_ret;
+ 
+⸻
+ 
+5. Stub：
+vmm_scheduler_yield
+改写目的： 隔离真实调度让出行为，仅记录 WFE 路径是否调用 yield。
+vcast_wfi_yield_call++;
+return;
+ 
+⸻
+ 
+6. Stub：
+vmm_vcpu_irq_wait_timeout
+改写目的： 隔离真实等待中断行为，仅记录 WFI 路径是否调用 wait timeout 以及入参。
+vcast_wfi_wait_call++;
+vcast_wfi_wait_vcpu = (void *)vcpu;
+vcast_wfi_wait_timeout = (unsigned long long)timeout;
+return;
+如果 VectorCAST 生成的参数名不是 vcpu / timeout，按实际参数名替换。
+ 
+⸻
+ 
+7. Stub：
+cpu_vcpu_update_itstate
+改写目的： 隔离 ITSTATE 更新实现，仅记录 Thumb 模式下是否调用更新函数。
+vcast_wfi_update_itstate_call++;
+vcast_wfi_update_itstate_vcpu = (void *)vcpu;
+return;
+如果 VectorCAST 生成的参数名不是 vcpu，按实际参数名替换。
+ 
+⸻
+ 
+二、覆盖前提说明
+源码中这段：
+#ifndef CONFIG_WFE_WFI_IDLE_MODE
+    vcpu_ready_count = vmm_scheduler_current_ready_vcpu_count();
+    if (vcpu_ready_count <= 1) {
+        return VMM_OK;
+    }
+#endif
+如果你的当前构建 没有定义 CONFIG_WFE_WFI_IDLE_MODE，下面第 2 条用例用于覆盖 vcpu_ready_count <= 1 的提前返回路径。
+如果你的当前构建 定义了 CONFIG_WFE_WFI_IDLE_MODE，这段代码不会编译进来，第 2 条用例对应分支不可测，应作为配置裁剪说明。
+ 
+⸻
+ 
+三、测试用例
+ 
+⸻
+ 
+cpu_vcpu_emulate_wfi_wfe.001.R.condition_false_next_16bit
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * 显式构造 ISS：
+ * ISS_CV_MASK 有效，cond = 0x0，即 EQ。
+ */
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0x0U << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+/*
+ * Z = 0，所以 EQ 条件不成立。
+ * cpu_vcpu_condition_check 返回 false。
+ */
+regs.pstate = 0U;
+regs.pc = 0x1000ULL;
+
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.il>> = 0U;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x1002
+
+vcast_wfi_ready_count_call = 0
+vcast_wfi_yield_call = 0
+vcast_wfi_wait_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证指令条件不满足时，函数不执行 WFI/WFE 行为，仅推进到下一条 16-bit 指令。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；显式构造 iss，使条件码为 EQ；设置 Z 标志未置位；设置 il=0。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0x0。 step3、设置 regs.pstate=0，使 EQ 条件不成立。 step4、设置 regs.pc=0x1000。 step5、设置 il=0。 step6、调用 cpu_vcpu_emulate_wfi_wfe。 step7、观察返回值、regs.pc 和各外部依赖调用次数。 用例来源：需求分析。 追踪ID：cpu_vcpu_emulate_wfi_wfe。 等价列表：条件不满足，16-bit 指令长度。 其它说明：覆盖 cpu_vcpu_condition_check(...) 返回 false、il ? 4 : 2 中 il=false、Thumb ITSTATE 更新条件为 false 的路径。 通过准则：函数返回 VMM_OK=0；regs.pc=0x1002；ready count、yield、wait 和 update itstate 均未调用。
+ 
+⸻
+ 
+cpu_vcpu_emulate_wfi_wfe.002.R.ready_count_le_1_early_return
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * 显式构造 ISS：
+ * ISS_CV_MASK 有效，cond = 0xE，即 AL。
+ */
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+regs.pstate = 0U;
+regs.pc = 0x2000ULL;
+
+/*
+ * ready count <= 1，触发提前返回。
+ */
+vcast_wfi_ready_count_ret = 1U;
+
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.il>> = 1U;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x2000
+
+vcast_wfi_ready_count_call = 1
+vcast_wfi_yield_call = 0
+vcast_wfi_wait_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证条件满足但当前 ready VCPU 数量小于等于 1 时，函数直接返回，不执行 yield、wait、PC 更新和 ITSTATE 更新。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；设置条件码为 AL；设置 ready VCPU 数量为 1。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xE。 step3、设置 regs.pc=0x2000。 step4、设置 vcast_wfi_ready_count_ret=1。 step5、设置 il=1。 step6、调用 cpu_vcpu_emulate_wfi_wfe。 step7、观察返回值、regs.pc 和外部依赖调用次数。 用例来源：需求分析。 追踪ID：cpu_vcpu_emulate_wfi_wfe。 等价列表：条件满足，ready count 小于等于 1。 其它说明：仅在未定义 CONFIG_WFE_WFI_IDLE_MODE 时覆盖该路径；覆盖 vcpu_ready_count <= 1 为 true 的提前返回路径。 通过准则：函数返回 VMM_OK=0；regs.pc 保持 0x2000；ready count 调用一次；yield、wait 和 update itstate 均未调用。
+ 
+⸻
+ 
+cpu_vcpu_emulate_wfi_wfe.003.R.wfe_yield_next_32bit
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * ISS_CV_MASK 有效，cond = 0xE，即 AL。
+ * 同时设置 ISS_WFI_WFE_TI_MASK，表示 WFE trapped。
+ */
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+iss |= (u32)ISS_WFI_WFE_TI_MASK;
+
+regs.pstate = 0U;
+regs.pc = 0x3000ULL;
+
+/*
+ * ready count > 1，继续执行 WFE/WFI 行为。
+ */
+vcast_wfi_ready_count_ret = 2U;
+
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.il>> = 1U;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x3004
+
+vcast_wfi_ready_count_call = 1
+vcast_wfi_yield_call = 1
+vcast_wfi_wait_call = 0
+vcast_wfi_update_itstate_call = 0
+注释
+测试目的：验证条件满足、ready VCPU 数量大于 1 且当前陷入为 WFE 时，函数调用 scheduler yield，并推进到下一条 32-bit 指令。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；设置条件码为 AL；设置 ISS_WFI_WFE_TI_MASK；设置 ready VCPU 数量为 2；设置 il=1。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xE。 step3、设置 iss 包含 ISS_WFI_WFE_TI_MASK。 step4、设置 regs.pc=0x3000。 step5、设置 vcast_wfi_ready_count_ret=2。 step6、设置 il=1。 step7、调用 cpu_vcpu_emulate_wfi_wfe。 step8、观察返回值、regs.pc、ready count 调用次数、yield 调用次数和 wait 调用次数。 用例来源：需求分析。 追踪ID：cpu_vcpu_emulate_wfi_wfe。 等价列表：WFE trapped，ready count 大于 1，32-bit 指令长度。 其它说明：覆盖 vcpu_ready_count <= 1 为 false、iss & ISS_WFI_WFE_TI_MASK 为 true、il=true、Thumb ITSTATE 更新条件为 false。 通过准则：函数返回 VMM_OK=0；regs.pc=0x3004；ready count 调用一次；yield 调用一次；wait 未调用。
+ 
+⸻
+ 
+cpu_vcpu_emulate_wfi_wfe.004.R.wfi_wait_thumb_update_next_16bit
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static u32 iss;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * ISS_CV_MASK 有效，cond = 0xE，即 AL。
+ * 不设置 ISS_WFI_WFE_TI_MASK，表示 WFI 路径。
+ */
+iss = 0U;
+iss |= (u32)ISS_CV_MASK;
+iss |= (u32)(((u32)0xEU << (u32)ISS_COND_SHIFT) & (u32)ISS_COND_MASK);
+
+regs.pstate = (u64)PSR_THUMB_ENABLED;
+regs.pc = 0x4000ULL;
+
+/*
+ * ready count > 1，继续执行 WFI 行为。
+ */
+vcast_wfi_ready_count_ret = 2U;
+
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.vcpu>> = &vcpu;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.regs>> = &regs;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.il>> = 0U;
+<<cpu_vcpu_helper.cpu_vcpu_emulate_wfi_wfe.iss>> = iss;
+期望值
+return = 0
+regs.pc = 0x4002
+
+vcast_wfi_ready_count_call = 1
+vcast_wfi_yield_call = 0
+vcast_wfi_wait_call = 1
+vcast_wfi_wait_vcpu = &vcpu
+vcast_wfi_wait_timeout = 0
+vcast_wfi_update_itstate_call = 1
+vcast_wfi_update_itstate_vcpu = &vcpu
+注释
+测试目的：验证条件满足、ready VCPU 数量大于 1 且当前陷入为 WFI 时，函数调用 IRQ wait timeout；在 Thumb 模式下推进到下一条 16-bit 指令并更新 ITSTATE。 用例类别：基于需求的测试 预置条件：构造有效 vcpu 和 regs；设置条件码为 AL；不设置 ISS_WFI_WFE_TI_MASK；设置 ready VCPU 数量为 2；设置 PSR_THUMB_ENABLED；设置 il=0。 测试步骤： step1、清零 vcpu 和 regs。 step2、构造 iss，设置 ISS_CV_MASK 和条件码 0xE。 step3、不设置 ISS_WFI_WFE_TI_MASK。 step4、设置 regs.pstate=PSR_THUMB_ENABLED。 step5、设置 regs.pc=0x4000。 step6、设置 vcast_wfi_ready_count_ret=2。 step7、设置 il=0。 step8、调用 cpu_vcpu_emulate_wfi_wfe。 step9、观察返回值、regs.pc、wait 调用记录和 ITSTATE 更新记录。 用例来源：需求分析。 追踪ID：cpu_vcpu_emulate_wfi_wfe。 等价列表：WFI trapped，ready count 大于 1，Thumb 模式，16-bit 指令长度。 其它说明：覆盖 iss & ISS_WFI_WFE_TI_MASK 为 false、vmm_vcpu_irq_wait_timeout(vcpu, 0) 调用路径、il=false、regs->pstate & PSR_THUMB_ENABLED 为 true，以及 cpu_vcpu_update_itstate 调用路径。 通过准则：函数返回 VMM_OK=0；regs.pc=0x4002；wait 调用一次且 timeout 为 0；ITSTATE 更新调用一次；yield 未调用。
+ 
+⸻
+ 
+四、配置差异说明
+如果当前工程定义了：
+CONFIG_WFE_WFI_IDLE_MODE
+则下面代码不会参与编译：
+vcpu_ready_count = vmm_scheduler_current_ready_vcpu_count();
+if (vcpu_ready_count <= 1) {
+    return VMM_OK;
+}
+这种情况下：
+cpu_vcpu_emulate_wfi_wfe.002.R.ready_count_le_1_early_return
+对应分支属于配置裁剪，不应要求覆盖。其余 3 条仍然适用。
