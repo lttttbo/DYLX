@@ -1,0 +1,894 @@
+明白，按以下原则重新构造：
+	•	当前单元为 emulate_arm.c，参数路径使用 <<emulate_arm...>>。
+	•	不新增 User Global。
+	•	不新增指令构造宏。
+	•	指令在每条测试的 Begin User Code 中直接按位构造。
+	•	不对 cpu_vcpu_reg_read/write、arm_unpredictable、IRQ 注入等中间调用打点。
+	•	不验证中间寄存器写入值和内存访问地址，只验证能区分控制流的函数返回值和 regs.pc。
+	•	arm_inst_strd_i 只补图中缺失的 add=false 和 index=false 路径。
+	•	arm_inst_ldrd_r、arm_inst_strd_r 按条件覆盖完整给出。
+一、最精简的公共 Stub
+不需要新增控制变量。按不同测试用例，直接在 VectorCAST 的 Stub 配置中设置返回值。
+vmm_printf
+    返回 0
+
+cpu_vcpu_halt
+    空实现
+
+vmm_vcpu_irq_assert
+    空实现
+
+cpu_vcpu_reg_read
+    所有调用返回 0
+
+cpu_vcpu_reg_write
+    空实现
+cpu_vcpu_mem_read 和 cpu_vcpu_mem_write 的返回序列在每条用例中单独说明。
+Test Case User Code 中继续使用已有的 memset 声明，不新增 Unit Prefix 宏。
+ 
+⸻
+ 
+二、
+arm_inst_ldrd_r
+完整条件覆盖需要 14 条用例。
+arm_inst_ldrd_r.001
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=3, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (3U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 Rt 为奇数时，函数将指令判定为不可预测并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 Rt=3。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x1000。 step3、构造目标寄存器为奇数的指令。 step4、调用 arm_inst_ldrd_r。 step5、观察函数返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：非法奇数目标寄存器。 其它说明：覆盖 Rt & 1 为 true 的提前返回路径。 通过准则：函数返回 VMM_EFAIL，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldrd_r.002
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=0, U=1, W=1, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 P=0 且 W=1 的非法指令编码返回失败。 用例类别：接口测试 预置条件：设置 Rt 为偶数，设置 P=0、W=1。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 P=0、W=1 的指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：非法 P/W 组合。 其它说明：覆盖 !P 为 true且 W 为 true的路径。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldrd_r.003
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=14, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (14U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 Rt=14 时函数返回不可预测指令错误。 用例类别：接口测试 预置条件：设置 Rt=14，其余寄存器字段不冲突。 测试步骤： step1、清零测试对象。 step2、构造 Rt=14 的指令。 step3、调用被测函数。 step4、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：非法目标寄存器对。 其它说明：覆盖寄存器合法性复合条件中的 Rt==14。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldrd_r.004
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=15 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 Rm=15 时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rm=15。 测试步骤： step1、清零测试对象。 step2、构造偏移寄存器为 15 的指令。 step3、调用被测函数。 step4、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：非法偏移寄存器。 其它说明：覆盖 Rt==14 为 false、Rm==15 为 true。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldrd_r.005
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=2 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (2U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 Rm 与 Rt 相同时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rm=2。 测试步骤： step1、清零测试对象。 step2、构造 Rm==Rt 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：偏移寄存器与第一个目标寄存器重叠。 其它说明：覆盖 Rm==Rt 为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_ldrd_r.006
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=3 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (3U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证 Rm 与 Rt+1 相同时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rm=3。 测试步骤： step1、清零测试对象。 step2、构造 Rm==Rt+1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：偏移寄存器与第二目标寄存器重叠。 其它说明：覆盖寄存器合法性复合条件的最后一个子条件。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_ldrd_r.007
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=15, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (15U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证开启写回且 Rn=15 时函数返回失败。 用例类别：接口测试 预置条件：设置 P=1、W=1、Rn=15。 测试步骤： step1、清零测试对象。 step2、构造开启写回且基址为 PC 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：写回基址为 PC。 其它说明：覆盖 wback=true 和 Rn==15。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_ldrd_r.008
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=2, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (2U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证写回基址寄存器与 Rt 相同时函数返回失败。 用例类别：接口测试 预置条件：设置 Rn=Rt=2 并开启写回。 测试步骤： step1、清零测试对象。 step2、构造写回基址与第一个目标寄存器重叠的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：写回基址与 Rt 重叠。 其它说明：覆盖 Rn==15 为 false、Rn==Rt 为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_ldrd_r.009
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=3, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (3U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证写回基址寄存器与 Rt+1 相同时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rn=3 并开启写回。 测试步骤： step1、清零测试对象。 step2、构造写回基址与第二目标寄存器重叠的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_ldrd_r。 等价列表：写回基址与 Rt+1 重叠。 其它说明：覆盖写回合法性判断中的最后一个子条件。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_ldrd_r.010
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+regs.pstate = 0ULL;
+
+/*
+ * cond=0x0(EQ), P=1, U=1, W=0, Rn=15, Rt=2, Rm=4。
+ * Z=0，因此条件不通过。
+ */
+inst = (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (15U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+Stub 配置
+cpu_vcpu_mem_read：不会调用
+注释
+测试目的：验证指令条件不满足时不执行内存读取，但仍推进 PC。 用例类别：基于需求的测试 预置条件：设置 EQ 条件，Z 标志未置位；设置 wback=false。 测试步骤： step1、清零测试对象。 step2、设置初始 PC 和 PSTATE。 step3、构造条件不通过的指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldrd_r。 等价列表：条件执行失败。 其它说明：覆盖 wback=false 和条件判断为 false。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_ldrd_r.011
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=0, U=0, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_read：第 1 次返回 VMM_EFAIL
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入验证第一次内存读取失败时立即返回错误。 用例类别：故障注入测试 预置条件：设置 P=0、U=0、W=0，并使第一次内存读取失败。 测试步骤： step1、清零测试对象。 step2、构造后索引减法指令。 step3、设置第一次内存读取返回 VMM_EFAIL。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_ldrd_r。 等价列表：第一次内存读取失败。 其它说明：同时覆盖 index=false、add=false 和 wback=true。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldrd_r.012
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_read：
+    第 1 次返回 VMM_OK
+    第 2 次返回 VMM_EFAIL
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入验证第一次读取成功、第二次读取失败时返回错误。 用例类别：故障注入测试 预置条件：设置前索引加法；配置第二次内存读取失败。 测试步骤： step1、清零测试对象。 step2、构造 P=1、U=1、W=0 的指令。 step3、设置两次内存读取的返回序列。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_ldrd_r。 等价列表：第二次内存读取失败。 其它说明：覆盖 index=true、add=true、第一次读取成功和第二次读取失败。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldrd_r.013
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=1, U=0, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_read：两次均返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证前索引减法、不写回的正常执行路径。 用例类别：基于需求的测试 预置条件：设置 P=1、U=0、W=0，并使两次内存读取成功。 测试步骤： step1、清零测试对象。 step2、构造前索引减法指令。 step3、设置两次内存读取均成功。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldrd_r。 等价列表：前索引减法成功且不写回。 其它说明：覆盖第二次读取成功和最终 wback=false。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_ldrd_r.014
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/* cond=0xE, P=0, U=1, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_ldrd_r.inst>> = inst;
+<<emulate_arm.arm_inst_ldrd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_ldrd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_read：两次均返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证后索引加法并写回的正常执行路径。 用例类别：基于需求的测试 预置条件：设置 P=0、U=1、W=0，并使两次内存读取成功。 测试步骤： step1、清零测试对象。 step2、构造后索引加法指令。 step3、设置两次内存读取均成功。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldrd_r。 等价列表：后索引加法成功并写回。 其它说明：覆盖 index=false、add=true 和最终 wback=true。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+三、
+arm_inst_strd_r
+完整条件覆盖需要 12 条用例。
+arm_inst_strd_r.001
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=3, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (3U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2000
+注释
+测试目的：验证 Rt 为奇数时函数注入未定义指令异常，并按照源码返回成功但不推进 PC。 用例类别：接口测试 预置条件：设置 Rt=3。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造奇数 Rt 的 STRD register 指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：奇数目标寄存器编码。 其它说明：本用例不验证 IRQ 调用，只依据返回值和 PC 判断控制流。 通过准则：函数返回 VMM_OK，PC 保持 0x2000。
+ 
+⸻
+ 
+arm_inst_strd_r.002
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=0, U=1, W=1, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证 P=0 且 W=1 的非法指令编码返回失败。 用例类别：接口测试 预置条件：设置 Rt 为偶数，设置 P=0、W=1。 测试步骤： step1、清零测试对象。 step2、构造非法 P/W 组合。 step3、调用被测函数。 step4、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：非法 P/W 组合。 其它说明：覆盖 !P && W 为 true。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_strd_r.003
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=14, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (14U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证 Rt=14 时函数返回不可预测指令错误。 用例类别：接口测试 预置条件：设置 Rt=14。 测试步骤： step1、清零测试对象。 step2、构造 Rt 为 14 的指令。 step3、调用被测函数。 step4、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：非法目标寄存器对。 其它说明：覆盖 Rt==14 为 true。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_strd_r.004
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=15 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (15U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证 Rm=15 时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rm=15。 测试步骤： step1、清零测试对象。 step2、构造偏移寄存器为 15 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：非法偏移寄存器。 其它说明：覆盖 Rt==14 为 false、Rm==15 为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_strd_r.005
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=15, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (15U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证开启写回且 Rn=15 时函数返回失败。 用例类别：接口测试 预置条件：设置 P=1、W=1、Rn=15。 测试步骤： step1、清零测试对象。 step2、构造写回基址为 PC 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：写回基址为 PC。 其它说明：覆盖 wback=true 和 Rn==15。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_strd_r.006
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=2, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (2U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证写回基址与第一个源寄存器 Rt 重叠时函数返回失败。 用例类别：接口测试 预置条件：设置 Rn=Rt=2 并开启写回。 测试步骤： step1、清零测试对象。 step2、构造写回基址与 Rt 重叠的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：写回基址与 Rt 重叠。 其它说明：覆盖 Rn==Rt 为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_strd_r.007
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=1, Rn=3, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_W_START) |
+       (3U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证写回基址与第二个源寄存器 Rt+1 重叠时函数返回失败。 用例类别：接口测试 预置条件：设置 Rt=2、Rn=3 并开启写回。 测试步骤： step1、清零测试对象。 step2、构造写回基址与 Rt+1 重叠的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_inst_strd_r。 等价列表：写回基址与 Rt+1 重叠。 其它说明：覆盖写回合法性复合条件中的最后一个子条件。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_inst_strd_r.008
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+regs.pstate = 0ULL;
+
+/* cond=0x0(EQ), P=1, U=1, W=0, Rn=15, Rt=2, Rm=4 */
+inst = (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (15U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证指令条件不满足时不执行内存写入，但正常推进 PC。 用例类别：基于需求的测试 预置条件：设置 EQ 条件且 Z 标志未置位；设置 wback=false。 测试步骤： step1、清零测试对象。 step2、设置初始 PC 和 PSTATE。 step3、构造条件不通过的指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_strd_r。 等价列表：条件执行失败。 其它说明：覆盖 wback=false 和条件判断为 false。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+arm_inst_strd_r.009
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=0, U=0, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_write：第 1 次返回 VMM_EFAIL
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：通过故障注入验证第一次内存写入失败时立即返回错误。 用例类别：故障注入测试 预置条件：设置后索引减法，并使第一次内存写入失败。 测试步骤： step1、清零测试对象。 step2、构造 P=0、U=0、W=0 的指令。 step3、设置第一次内存写入返回 VMM_EFAIL。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_strd_r。 等价列表：第一次内存写入失败。 其它说明：同时覆盖 index=false、add=false 和 wback=true。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_strd_r.010
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=1, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_write：
+    第 1 次返回 VMM_OK
+    第 2 次返回 VMM_EFAIL
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：通过故障注入验证第一次写入成功、第二次写入失败时返回错误。 用例类别：故障注入测试 预置条件：设置前索引加法；第二次内存写入返回失败。 测试步骤： step1、清零测试对象。 step2、构造 P=1、U=1、W=0 的指令。 step3、设置两次内存写入返回序列。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_strd_r。 等价列表：第二次内存写入失败。 其它说明：覆盖 index=true、add=true、第一次写入成功和第二次写入失败。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_strd_r.011
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=1, U=0, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_P_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_write：两次均返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证前索引减法且不写回的正常执行路径。 用例类别：基于需求的测试 预置条件：设置 P=1、U=0、W=0，并使两次内存写入成功。 测试步骤： step1、清零测试对象。 step2、构造前索引减法指令。 step3、设置两次内存写入均成功。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_strd_r。 等价列表：前索引减法成功且不写回。 其它说明：覆盖第二次写入成功和最终 wback=false。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+arm_inst_strd_r.012
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* cond=0xE, P=0, U=1, W=0, Rn=1, Rt=2, Rm=4 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_U_START) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START) |
+       (4U << ARM_INST_LDRSTR_RM_START);
+
+<<emulate_arm.arm_inst_strd_r.inst>> = inst;
+<<emulate_arm.arm_inst_strd_r.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_r.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_write：两次均返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证后索引加法并写回的正常执行路径。 用例类别：基于需求的测试 预置条件：设置 P=0、U=1、W=0，并使两次内存写入成功。 测试步骤： step1、清零测试对象。 step2、构造后索引加法指令。 step3、设置两次内存写入均成功。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_strd_r。 等价列表：后索引加法成功并写回。 其它说明：覆盖 index=false、add=true 和最终 wback=true。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+四、
+arm_inst_strd_i
+补充用例
+从截图看，尚未覆盖的是：
+add = !!U;                         /* false */
+add ? address + imm32
+    : address - imm32;             /* false 分支 */
+
+index ? offset_addr
+      : address;                   /* false 分支 */
+一条 P=0、U=0、W=0 且条件成立的成功用例即可同时覆盖。
+arm_inst_strd_i.add_false_index_false
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x3000ULL;
+
+/*
+ * cond = 0xE
+ * P = 0  -> index=false
+ * U = 0  -> add=false
+ * W = 0  -> P/W 编码合法，wback=true
+ * Rn = 1
+ * Rt = 2
+ * imm4H = 0
+ * imm4L = 0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDRSTR_RN_START) |
+       (2U << ARM_INST_LDRSTR_RT_START);
+
+<<emulate_arm.arm_inst_strd_i.inst>> = inst;
+<<emulate_arm.arm_inst_strd_i.regs>> = &regs;
+<<emulate_arm.arm_inst_strd_i.vcpu>> = &vcpu;
+Stub 配置
+cpu_vcpu_reg_read：所有调用返回 0
+cpu_vcpu_mem_write：两次均返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x3004
+注释
+测试目的：验证立即数形式 STRD 在 U=0、P=0 时，执行减法地址计算并使用后索引访问方式完成指令。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 P=0、U=0、W=0、Rn=1、Rt=2；两次内存写入均返回成功。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x3000。 step3、构造 P=0、U=0 的立即数 STRD 指令。 step4、设置两次内存写入均返回 VMM_OK。 step5、调用 arm_inst_strd_i。 step6、观察函数返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_strd_i。 等价列表：后索引减法成功并写回。 其它说明：本用例同时覆盖 add=!!U 为 false、地址加减三元表达式的减法分支、index=!!P 为 false，以及地址选择三元表达式的原基址分支。 通过准则：函数返回 VMM_OK，PC 更新为 0x3004。
