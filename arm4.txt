@@ -1,0 +1,301 @@
+当前单元为 emulate_arm.c，VectorCAST 参数路径统一使用：
+<<emulate_arm.函数名.参数名>>
+这组函数包含大量并列的 case 标签。按照前面覆盖报告的表现，VectorCAST 会把各个显式 case 作为独立 switch 结果。因此不能只选择每组中的一个代表值，否则可能出现分支体已执行、部分 case 标签仍未覆盖的情况。
+为保证每条用例均有独立注释，本批先给：
+arm_dataproc_nonzero_op
+arm_dataproc_extra_unprivileged
+下一批依次处理：
+arm_dataproc_extra_op2_1011
+arm_dataproc_extra_op2_1101
+arm_dataproc_extra_op2_1111
+arm_instgrp_dataproc
+ 
+⸻
+ 
+一、最精简 User Code
+Test Case Header User Code
+已有时不重复添加。
+#include <string.h>
+Stub 配置原则
+不新增 User Global，不记录中间函数调用次数。
+arm_unpredictable
+保持空实现，避免不可预测指令处理产生 halt、panic 或打印副作用：
+return;
+被分派的指令函数
+所有被分派函数默认设置返回：
+return VMM_EFAIL;
+每条成功分派用例中，只把目标函数设置为：
+return VMM_OK;
+这样：
+	•	正确进入目标函数时，被测函数返回 VMM_OK；
+	•	误入其他函数或未进入目标函数时，返回值不会满足期望；
+	•	不需要增加任何调用打点变量。
+ 
+⸻
+ 
+二、
+arm_dataproc_nonzero_op
+该函数需要 5 条用例：
+op1=0x10
+op1=0x14
+op1=0x12
+op1=0x16
+default
+ 
+⸻
+ 
+arm_dataproc_nonzero_op.001.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_nonzero_op.inst>> = 0U;
+<<emulate_arm.arm_dataproc_nonzero_op.regs>> = &regs;
+<<emulate_arm.arm_dataproc_nonzero_op.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_nonzero_op.op1>> = 0x10U;
+Stub Processing
+arm_inst_movw_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x10 时，函数将指令分派至 arm_inst_movw_i，并返回 MOVW 指令处理结果。 用例类别：基于需求的测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op1=0x10；设置 arm_inst_movw_i 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x10。 step4、设置 arm_inst_movw_i Stub 返回 VMM_OK。 step5、调用 arm_dataproc_nonzero_op。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_dataproc_nonzero_op。 等价列表：MOVW immediate 指令分派。 其它说明：覆盖 switch(op1) 的 case 0x10。被测函数仅负责分派，因此不验证 MOVW 内部寄存器处理结果。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_dataproc_nonzero_op.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_nonzero_op.inst>> = 0U;
+<<emulate_arm.arm_dataproc_nonzero_op.regs>> = &regs;
+<<emulate_arm.arm_dataproc_nonzero_op.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_nonzero_op.op1>> = 0x14U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x14 对应尚未实现的 MOVT 指令时，函数执行不可预测指令处理，并保持失败返回值。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op1=0x14；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x14。 step4、调用 arm_dataproc_nonzero_op。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_nonzero_op。 等价列表：未实现的 MOVT 指令编码。 其它说明：覆盖 switch(op1) 的 case 0x14。该分支没有修改初始值 rc=VMM_EFAIL。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_dataproc_nonzero_op.003.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_nonzero_op.inst>> = 0U;
+<<emulate_arm.arm_dataproc_nonzero_op.regs>> = &regs;
+<<emulate_arm.arm_dataproc_nonzero_op.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_nonzero_op.op1>> = 0x12U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x12 对应尚未实现的 MSR immediate/hints 指令时，函数执行不可预测指令处理并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op1=0x12；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x12。 step4、调用 arm_dataproc_nonzero_op。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_nonzero_op。 等价列表：未实现的 MSR immediate/hints 编码 0x12。 其它说明：覆盖共享分支中的第一个显式标签 case 0x12。即使其与 case 0x16 共用分支体，仍需单独执行该 case 标签。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_dataproc_nonzero_op.004.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_nonzero_op.inst>> = 0U;
+<<emulate_arm.arm_dataproc_nonzero_op.regs>> = &regs;
+<<emulate_arm.arm_dataproc_nonzero_op.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_nonzero_op.op1>> = 0x16U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x16 对应尚未实现的 MSR immediate/hints 指令时，函数执行不可预测指令处理并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op1=0x16；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x16。 step4、调用 arm_dataproc_nonzero_op。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_nonzero_op。 等价列表：未实现的 MSR immediate/hints 编码 0x16。 其它说明：覆盖共享分支中的第二个显式标签 case 0x16。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_dataproc_nonzero_op.005.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_nonzero_op.inst>> = 0U;
+<<emulate_arm.arm_dataproc_nonzero_op.regs>> = &regs;
+<<emulate_arm.arm_dataproc_nonzero_op.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_nonzero_op.op1>> = 0x00U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1 不属于已列出的非零 data-processing 编码时，函数进入 default 分支并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op1=0x00；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x00。 step4、调用 arm_dataproc_nonzero_op。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_nonzero_op。 等价列表：未支持的 data-processing immediate 编码。 其它说明：覆盖 switch(op1) 的 default 分支。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+三、
+arm_dataproc_extra_unprivileged
+该函数需要 7 条用例：
+op2=0xB，op1 bit0=1
+op2=0xB，op1 bit0=0
+op2=0xD，op1 bit0=1
+op2=0xD，op1 bit0=0
+op2=0xF，op1 bit0=1
+op2=0xF，op1 bit0=0
+op2=default
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.001.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x01U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0BU;
+Stub Processing
+arm_inst_ldrht：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB 且 op1 最低位为 1 时，函数将指令分派至 LDRHT 处理函数。 用例类别：基于需求的测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xB、op1=0x01；设置 arm_inst_ldrht 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x01、op2=0x0B。 step4、设置 arm_inst_ldrht Stub 返回 VMM_OK。 step5、调用 arm_dataproc_extra_unprivileged。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：LDRHT 指令分派。 其它说明：覆盖 case 0xB 和其中 (op1 & 1) != 0 为 true 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.002.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x00U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0BU;
+Stub Processing
+arm_inst_strht：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB 且 op1 最低位为 0 时，函数将指令分派至 STRHT 处理函数。 用例类别：基于需求的测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xB、op1=0x00；设置 arm_inst_strht 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x00、op2=0x0B。 step4、设置 arm_inst_strht Stub 返回 VMM_OK。 step5、调用 arm_dataproc_extra_unprivileged。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：STRHT 指令分派。 其它说明：覆盖 case 0xB 和其中 (op1 & 1) != 0 为 false 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.003.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x01U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0DU;
+Stub Processing
+arm_inst_ldrsbt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xD 且 op1 最低位为 1 时，函数将指令分派至 LDRSBT 处理函数。 用例类别：基于需求的测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xD、op1=0x01；设置 arm_inst_ldrsbt 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x01、op2=0x0D。 step4、设置 arm_inst_ldrsbt Stub 返回 VMM_OK。 step5、调用 arm_dataproc_extra_unprivileged。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：LDRSBT 指令分派。 其它说明：覆盖 case 0xD 和其中 op1 最低位为 1 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.004.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x00U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0DU;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op2=0xD 且 op1 最低位为 0 时，该编码不属于已支持的 LDRSBT 指令，函数执行不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xD、op1=0x00；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x00、op2=0x0D。 step4、调用 arm_dataproc_extra_unprivileged。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：不支持的 op2=0xD、op1 bit0=0 编码。 其它说明：覆盖 case 0xD 中 (op1 & 1) != 0 为 false 的路径。该路径不修改初始失败返回值。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.005.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x01U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0FU;
+Stub Processing
+arm_inst_ldrsht：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xF 且 op1 最低位为 1 时，函数将指令分派至 LDRSHT 处理函数。 用例类别：基于需求的测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xF、op1=0x01；设置 arm_inst_ldrsht 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x01、op2=0x0F。 step4、设置 arm_inst_ldrsht Stub 返回 VMM_OK。 step5、调用 arm_dataproc_extra_unprivileged。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：LDRSHT 指令分派。 其它说明：覆盖 case 0xF 中 op1 最低位为 1 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.006.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x00U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x0FU;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op2=0xF 且 op1 最低位为 0 时，该编码不属于已支持的 LDRSHT 指令，函数执行不可预测处理并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0xF、op1=0x00；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x00、op2=0x0F。 step4、调用 arm_dataproc_extra_unprivileged。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：不支持的 op2=0xF、op1 bit0=0 编码。 其它说明：覆盖 case 0xF 中 (op1 & 1) != 0 为 false 的路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_dataproc_extra_unprivileged.007.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_dataproc_extra_unprivileged.inst>> = 0U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.regs>> = &regs;
+<<emulate_arm.arm_dataproc_extra_unprivileged.vcpu>> = &vcpu;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op1>> = 0x01U;
+<<emulate_arm.arm_dataproc_extra_unprivileged.op2>> = 0x00U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op2 不属于 0xB、0xD、0xF 时，函数进入 default 分支并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置 op2=0x00；arm_unpredictable 为空 Stub。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、设置 op1=0x01、op2=0x00。 step4、调用 arm_dataproc_extra_unprivileged。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追踪ID：arm_dataproc_extra_unprivileged。 等价列表：不支持的 unprivileged extra load/store op2 编码。 其它说明：覆盖 switch(op2) 的 default 分支。 通过准则：函数返回 VMM_EFAIL。
