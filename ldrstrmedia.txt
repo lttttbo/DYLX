@@ -1,0 +1,872 @@
+当前文件仍为 emulate_arm.c。这组代码较大，按覆盖结构拆分提供。
+本批先完成：
+arm_instgrp_ldrstr：A=0 的 immediate 分支，32 个 op1 标签
+arm_instgrp_media：完整覆盖
+下一批继续：
+arm_instgrp_ldrstr：A=1、B=0 的 register 分支及 A=1、B=1 非法路径
+arm_inst_ldm
+公共配置
+不需要新增 User Global、Unit Prefix 或打点变量。
+每条用例中，仅将对应目标叶子函数 Stub 为：
+VMM_OK
+其他叶子函数保持默认返回：
+VMM_EFAIL
+arm_unpredictable 使用空实现：
+return;
+arm_instgrp_ldrstr 的 op1 是 5-bit 字段，取值范围为 0x00～0x1F。源码已经列出全部 32 个取值，所以两个 switch(op1) 的 default 从该函数入口不可达。
+ 
+⸻
+ 
+一、
+arm_instgrp_ldrstr
+：immediate 分支
+本批所有用例均不设置：
+ARM_INST_LDRSTR_A_MASK
+因此进入：
+if (!(inst & ARM_INST_LDRSTR_A_MASK))
+ 
+⸻
+ 
+arm_instgrp_ldrstr.001.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x00 */
+inst = ((0x00U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x00 时，函数通过 case 0B00000 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 arm_inst_str_i 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 A=0、op1=0x00 的指令。 step3、调用 arm_instgrp_ldrstr。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 编码 op1=0x00。 其它说明：覆盖 STR immediate 分组中的显式 case 0B00000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.002.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x01，Rn=15 */
+inst = ((0x01U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((15U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_l：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x01、Rn=15 时，函数通过 case 0B00001 分派 LDR literal 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=15；设置 arm_inst_ldr_l 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x01、Rn=15 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR literal 编码。 其它说明：覆盖 case 0B00001 和内部 rn == 0xF 为 true 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.003.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x02 */
+inst = ((0x02U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x02 时，函数通过 case 0B00010 分派 STRT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strt 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x02 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRT 编码 op1=0x02。 其它说明：覆盖显式 case 0B00010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.004.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x03 */
+inst = ((0x03U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x03 时，函数通过 case 0B00011 分派 LDRT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_ldrt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x03 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRT 编码 op1=0x03。 其它说明：覆盖显式 case 0B00011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.005.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x04 */
+inst = ((0x04U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x04 时，函数通过 case 0B00100 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x04 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 编码 op1=0x04。 其它说明：覆盖显式 case 0B00100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.006.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x05，Rn=15 */
+inst = ((0x05U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((15U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_l：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x05、Rn=15 时，函数通过 case 0B00101 分派 LDRB literal 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=15；设置 arm_inst_ldrb_l 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x05、Rn=15 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB literal 编码。 其它说明：覆盖 case 0B00101 和内部 rn == 0xF 为 true。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x06 */
+inst = ((0x06U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strbt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x06 时，函数通过 case 0B00110 分派 STRBT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strbt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x06 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRBT 编码 op1=0x06。 其它说明：覆盖显式 case 0B00110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.008.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x07 */
+inst = ((0x07U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrbt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x07 时，函数通过 case 0B00111 分派 LDRBT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_ldrbt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x07 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRBT 编码 op1=0x07。 其它说明：覆盖显式 case 0B00111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.009.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x08 */
+inst = ((0x08U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x08 时，通过 case 0B01000 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_str_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x08 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 别名编码 op1=0x08。 其它说明：补充覆盖 STR immediate 分组中的显式 case 0B01000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.010.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x09，Rn=1 */
+inst = ((0x09U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x09、Rn!=15 时，通过 case 0B01001 分派 LDR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1；设置 arm_inst_ldr_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x09、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR immediate 编码。 其它说明：覆盖 case 0B01001 和内部 rn == 0xF 为 false。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.011.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0A */
+inst = ((0x0AU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0A 时，通过 case 0B01010 分派 STRT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0A 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRT 别名编码 op1=0x0A。 其它说明：补充覆盖显式 case 0B01010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.012.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0B */
+inst = ((0x0BU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0B 时，通过 case 0B01011 分派 LDRT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_ldrt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0B 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRT 别名编码 op1=0x0B。 其它说明：补充覆盖显式 case 0B01011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.013.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0C */
+inst = ((0x0CU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0C 时，通过 case 0B01100 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0C 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 别名编码 op1=0x0C。 其它说明：覆盖显式 case 0B01100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.014.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0D，Rn=1 */
+inst = ((0x0DU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0D、Rn!=15 时，通过 case 0B01101 分派 LDRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1；设置 arm_inst_ldrb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0D、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB immediate 编码。 其它说明：覆盖 case 0B01101 和内部 literal 判断为 false。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.015.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0E */
+inst = ((0x0EU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strbt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0E 时，通过 case 0B01110 分派 STRBT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strbt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0E 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRBT 别名编码 op1=0x0E。 其它说明：补充覆盖显式 case 0B01110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.016.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x0F */
+inst = ((0x0FU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrbt：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x0F 时，通过 case 0B01111 分派 LDRBT 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_ldrbt 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0F 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRBT 别名编码 op1=0x0F。 其它说明：补充覆盖显式 case 0B01111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.017.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x10 */
+inst = ((0x10U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x10 时，通过 case 0B10000 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_str_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x10 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 别名编码 op1=0x10。 其它说明：覆盖显式 case 0B10000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.018.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x11，Rn=1 */
+inst = ((0x11U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x11、Rn!=15 时，通过 case 0B10001 分派 LDR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1 和目标函数成功返回。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x11、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR immediate 别名编码 op1=0x11。 其它说明：覆盖显式 case 0B10001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.019.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x12 */
+inst = ((0x12U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x12 时，通过 case 0B10010 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_str_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x12 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 别名编码 op1=0x12。 其它说明：覆盖显式 case 0B10010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.020.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x13，Rn=1 */
+inst = ((0x13U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x13、Rn=1 时，通过 case 0B10011 分派 LDR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn!=15；设置 arm_inst_ldr_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x13、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR immediate 别名编码 op1=0x13。 其它说明：覆盖显式 case 0B10011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.021.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x14 */
+inst = ((0x14U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x14 时，通过 case 0B10100 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x14 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 别名编码 op1=0x14。 其它说明：覆盖显式 case 0B10100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.022.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x15，Rn=1 */
+inst = ((0x15U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x15、Rn!=15 时，通过 case 0B10101 分派 LDRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1 和 arm_inst_ldrb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x15、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB immediate 别名编码 op1=0x15。 其它说明：覆盖显式 case 0B10101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.023.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x16 */
+inst = ((0x16U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x16 时，通过 case 0B10110 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x16 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 别名编码 op1=0x16。 其它说明：覆盖显式 case 0B10110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.024.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x17，Rn=1 */
+inst = ((0x17U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x17、Rn=1 时，通过 case 0B10111 分派 LDRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn!=15 和目标函数成功返回。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x17、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB immediate 别名编码 op1=0x17。 其它说明：覆盖显式 case 0B10111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.025.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x18 */
+inst = ((0x18U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x18 时，通过 case 0B11000 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_str_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x18 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 别名编码 op1=0x18。 其它说明：覆盖显式 case 0B11000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.026.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x19，Rn=1 */
+inst = ((0x19U << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x19、Rn!=15 时，通过 case 0B11001 分派 LDR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1；设置 arm_inst_ldr_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x19、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR immediate 别名编码 op1=0x19。 其它说明：覆盖显式 case 0B11001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.027.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1A */
+inst = ((0x1AU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_str_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1A 时，通过 case 0B11010 分派 STR immediate 指令。 用例类别：基于需求的测试 预置条件：设置目标叶子函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1A 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STR immediate 别名编码 op1=0x1A。 其它说明：覆盖 STR immediate 分组最后一个显式标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.028.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1B，Rn=1 */
+inst = ((0x1BU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldr_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1B、Rn=1 时，通过 case 0B11011 分派 LDR immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn!=15 和目标函数成功返回。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1B、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDR immediate 别名编码 op1=0x1B。 其它说明：覆盖 LDR immediate/literal 分组最后一个显式标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.029.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1C */
+inst = ((0x1CU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1C 时，通过 case 0B11100 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_strb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1C 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 别名编码 op1=0x1C。 其它说明：覆盖显式 case 0B11100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.030.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1D，Rn=1 */
+inst = ((0x1DU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1D、Rn=1 时，通过 case 0B11101 分派 LDRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn!=15；设置 arm_inst_ldrb_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1D、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB immediate 别名编码 op1=0x1D。 其它说明：覆盖显式 case 0B11101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.031.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1E */
+inst = ((0x1EU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1E 时，通过 case 0B11110 分派 STRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1E 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：STRB immediate 别名编码 op1=0x1E。 其它说明：覆盖 STRB immediate 分组最后一个显式标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_ldrstr.032.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* A=0，op1=0x1F，Rn=1 */
+inst = ((0x1FU << ARM_INST_LDRSTR_OP1_SHIFT) &
+        ARM_INST_LDRSTR_OP1_MASK);
+inst |= ((1U << ARM_INST_LDRSTR_RN_SHIFT) &
+         ARM_INST_LDRSTR_RN_MASK);
+
+<<emulate_arm.arm_instgrp_ldrstr.inst>> = inst;
+<<emulate_arm.arm_instgrp_ldrstr.regs>> = &regs;
+<<emulate_arm.arm_instgrp_ldrstr.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrb_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 A=0、op1=0x1F、Rn!=15 时，通过 case 0B11111 分派 LDRB immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=1；设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1F、Rn=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_ldrstr。 等价列表：LDRB immediate 别名编码 op1=0x1F。 其它说明：覆盖 immediate 分支最后一个显式 case 标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+二、
+arm_instgrp_media
+arm_instgrp_media.001.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+<<emulate_arm.arm_instgrp_media.inst>> = 0U;
+<<emulate_arm.arm_instgrp_media.regs>> = &regs;
+<<emulate_arm.arm_instgrp_media.vcpu>> = &vcpu;
+Stub Processing
+arm_unpredictable：空实现
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 media 指令组当前未实现时，函数执行不可预测指令处理并返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象；将 arm_unpredictable 置为空实现。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置 inst=0。 step3、调用 arm_instgrp_media。 step4、观察函数返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_media。 等价列表：当前未支持的 media 指令组。 其它说明：该函数无判断分支，仅执行不可预测处理并返回 VMM_EFAIL。 通过准则：函数返回 VMM_EFAIL。
