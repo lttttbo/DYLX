@@ -1,0 +1,607 @@
+你这组覆盖报告说明：原来的 32 条用例覆盖了每一类分派功能，但 VectorCAST 还把同一分支前面的每个 case 标签分别统计。因此每组只有第一个 case 变绿，其余别名编码仍显示为红色。
+一、需要补充和不能补充的范围
+对于每个 op2=0xB / 0xD / 0xF 的内层 switch(op1)：
+	•	一共列出 32 个 op1。
+	•	原 32 条用例已经覆盖每组第一个值：0x00、0x01、0x04、0x05。
+	•	有 8 个值从 arm_instgrp_dataproc 入口不可达： 0x02、0x03、0x06、0x07、
+	•	0x0A、0x0B、0x0E、0x0F 因为它们满足： ((op1 & 0x10) == 0) && ((op1 & 0x02) != 0) 会提前进入： arm_dataproc_extra_unprivileged(...) 不可能进入截图中的普通 switch(op2)。 
+因此每个 op2 还需要补 20 条可达的 case 标签，三个 op2 共补 60 条。
+另外截图中：
+default:
+    break;
+以及内层 switch 后的：
+break;
+也不可达。原因是 op1 是 5 位字段，只可能为 0～31，而内层 switch 已经完整列出了全部 32 个值；每个有效 case 又直接 return。这些行不能通过合法输入覆盖，应作为不可达代码说明。
+同步原语判断中还缺一个组合：
+(op1 & 0x10) != 0    /* true */
+op2 == 0x9           /* false */
+将在别名补充用例后作为第 61 条补充用例。
+按现有 32 条继续编号：
+033～052：op2=0xB 的 20 个可达别名
+053～072：op2=0xD 的 20 个可达别名
+073～092：op2=0xF 的 20 个可达别名
+093：同步原语第二条件 false
+本批先给出 033～052。
+ 
+⸻
+ 
+二、本批不需要增加 User Code
+继续沿用原来 32 条用例的 Stub 设置即可：
+	•	本用例对应的目标指令函数返回 VMM_OK。
+	•	不需要记录目标函数是否被调用。
+	•	不需要构造寄存器值、内存数据或 PC。
+	•	不增加指令构造宏。
+	•	inst 在每条 Begin User Code 中直接计算。
+ 
+⸻
+ 
+三、补充 
+op2=0xB
+的 20 条用例
+arm_instgrp_dataproc.033.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x08，op2=0xB */
+inst = 0U;
+inst |= ((0x08U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op=0、op2=0xB、op1=0x08 时，函数通过 case 0B01000 分派 STRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效 VCPU 和寄存器对象；设置 arm_inst_strh_r 返回 VMM_OK。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、构造 op1=0x08、op2=0xB 的指令。 step3、调用 arm_instgrp_dataproc。 step4、观察函数返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH register 别名编码 op1=0x08。 其它说明：本用例专门覆盖截图中未执行的 case 0B01000；op1 的 bit4 和 bit1 均为 0，因此不会进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.034.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x10，op2=0xB */
+inst = 0U;
+inst |= ((0x10U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x10 时，通过 case 0B10000 分派 STRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_strh_r 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x10、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH register 别名编码 op1=0x10。 其它说明：本用例覆盖 case 0B10000；由于 op1 bit4 为 1，不进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.035.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x12，op2=0xB */
+inst = 0U;
+inst |= ((0x12U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x12 时，通过 case 0B10010 分派 STRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 STRH register 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x12、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH register 别名编码 op1=0x12。 其它说明：本用例覆盖 case 0B10010；虽然 bit1 为 1，但 bit4 也为 1，因此 unprivileged 条件不成立。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.036.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x18，op2=0xB */
+inst = 0U;
+inst |= ((0x18U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x18 时，通过 case 0B11000 分派 STRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_strh_r 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x18、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH register 别名编码 op1=0x18。 其它说明：本用例覆盖 case 0B11000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.037.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1A，op2=0xB */
+inst = 0U;
+inst |= ((0x1AU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1A 时，通过 case 0B11010 分派 STRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 STRH register 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1A、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH register 别名编码 op1=0x1A。 其它说明：本用例覆盖 case 0B11010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.038.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x09，op2=0xB */
+inst = 0U;
+inst |= ((0x09U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x09 时，通过 case 0B01001 分派 LDRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_ldrh_r 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x09、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH register 别名编码 op1=0x09。 其它说明：本用例覆盖 case 0B01001；op1 bit1 为 0，不进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.039.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x11，op2=0xB */
+inst = 0U;
+inst |= ((0x11U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x11 时，通过 case 0B10001 分派 LDRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 LDRH register 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x11、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH register 别名编码 op1=0x11。 其它说明：本用例覆盖 case 0B10001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.040.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x13，op2=0xB */
+inst = 0U;
+inst |= ((0x13U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x13 时，通过 case 0B10011 分派 LDRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_ldrh_r 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x13、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH register 别名编码 op1=0x13。 其它说明：本用例覆盖 case 0B10011；bit4 为 1，因此不会进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.041.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x19，op2=0xB */
+inst = 0U;
+inst |= ((0x19U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x19 时，通过 case 0B11001 分派 LDRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 LDRH register 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x19、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH register 别名编码 op1=0x19。 其它说明：本用例覆盖 case 0B11001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.042.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1B，op2=0xB */
+inst = 0U;
+inst |= ((0x1BU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_r：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1B 时，通过 case 0B11011 分派 LDRH register 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_ldrh_r 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1B、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH register 别名编码 op1=0x1B。 其它说明：本用例覆盖 case 0B11011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.043.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x0C，op2=0xB */
+inst = 0U;
+inst |= ((0x0CU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x0C 时，通过 case 0B01100 分派 STRH immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_strh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0C、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH immediate 别名编码 op1=0x0C。 其它说明：本用例覆盖 case 0B01100；bit1 为 0，不进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.044.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x14，op2=0xB */
+inst = 0U;
+inst |= ((0x14U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x14 时，通过 case 0B10100 分派 STRH immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 STRH immediate 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x14、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH immediate 别名编码 op1=0x14。 其它说明：本用例覆盖 case 0B10100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.045.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x16，op2=0xB */
+inst = 0U;
+inst |= ((0x16U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x16 时，通过 case 0B10110 分派 STRH immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_strh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x16、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH immediate 别名编码 op1=0x16。 其它说明：本用例覆盖 case 0B10110；bit4 为 1，因此不会进入 unprivileged 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.046.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1C，op2=0xB */
+inst = 0U;
+inst |= ((0x1CU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1C 时，通过 case 0B11100 分派 STRH immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 STRH immediate 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1C、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH immediate 别名编码 op1=0x1C。 其它说明：本用例覆盖 case 0B11100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.047.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1E，op2=0xB */
+inst = 0U;
+inst |= ((0x1EU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_strh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1E 时，通过 case 0B11110 分派 STRH immediate 指令。 用例类别：基于需求的测试 预置条件：构造有效入参；设置 arm_inst_strh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1E、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：STRH immediate 别名编码 op1=0x1E。 其它说明：本用例覆盖 case 0B11110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.048.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * op=0，op1=0x0D，op2=0xB。
+ * Rn 保持为 0，选择 LDRH immediate。
+ */
+inst = 0U;
+inst |= ((0x0DU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x0D 时，通过 case 0B01101 进入 LDRH immediate 分派。 用例类别：基于需求的测试 预置条件：设置 Rn=0；设置 arm_inst_ldrh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x0D、op2=0xB、Rn=0 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH immediate 别名编码 op1=0x0D。 其它说明：本用例专门覆盖 case 0B01101；Rn==0xF 的真假分支已由原 32 条用例覆盖，本补充用例只需选择其中一个合法结果。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.049.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x15，op2=0xB，Rn=0 */
+inst = 0U;
+inst |= ((0x15U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x15 时，通过 case 0B10101 分派 LDRH immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=0；设置 LDRH immediate 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x15、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH immediate 别名编码 op1=0x15。 其它说明：本用例覆盖 case 0B10101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.050.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x17，op2=0xB，Rn=0 */
+inst = 0U;
+inst |= ((0x17U << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x17 时，通过 case 0B10111 分派 LDRH immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=0；设置 arm_inst_ldrh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x17、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH immediate 别名编码 op1=0x17。 其它说明：本用例覆盖 case 0B10111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.051.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1D，op2=0xB，Rn=0 */
+inst = 0U;
+inst |= ((0x1DU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1D 时，通过 case 0B11101 分派 LDRH immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=0；设置 LDRH immediate 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1D、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH immediate 别名编码 op1=0x1D。 其它说明：本用例覆盖 case 0B11101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_dataproc.052.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* op=0，op1=0x1F，op2=0xB，Rn=0 */
+inst = 0U;
+inst |= ((0x1FU << ARM_INST_DATAPROC_OP1_SHIFT) &
+         ARM_INST_DATAPROC_OP1_MASK);
+inst |= ((0x0BU << ARM_INST_DATAPROC_OP2_SHIFT) &
+         ARM_INST_DATAPROC_OP2_MASK);
+
+<<emulate_arm.arm_instgrp_dataproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_dataproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_dataproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_ldrh_i：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op2=0xB、op1=0x1F 时，通过 case 0B11111 分派 LDRH immediate 指令。 用例类别：基于需求的测试 预置条件：设置 Rn=0；设置 arm_inst_ldrh_i 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x1F、op2=0xB 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追踪ID：arm_instgrp_dataproc。 等价列表：LDRH immediate 别名编码 op1=0x1F。 其它说明：本用例覆盖 case 0B11111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+完成本批后，op2=0xB 中所有从原函数入口可达的 case 标签都会覆盖。仍保持红色的：
+op1=0x02、0x03、0x06、0x07、
+op1=0x0A、0x0B、0x0E、0x0F
+属于被外层 unprivileged 判断截走的不可达标签，不能通过增加 arm_instgrp_dataproc 输入覆盖。下一批从 arm_instgrp_dataproc.053.R 开始补 op2=0xD。
