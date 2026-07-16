@@ -1,0 +1,349 @@
+基于你提供的源码，以及目前的用例集合：
+原 32 条用例
++ op2=0xB 的 20 条补充用例
++ op2=0xD 的 20 条补充用例
++ op2=0xF 的 20 条补充用例
++ 同步原语复合条件补充用例 1 条
+也就是补到：
+arm_instgrp_dataproc.093.IN
+从静态控制流分析看，通过 arm_instgrp_dataproc() 入口可达的语句、判断结果和显式 case 标签都已经有对应测试场景。
+这个结论针对 VectorCAST 常见的语句覆盖、分支覆盖、条件覆盖及 case 标签覆盖，不表示穷举所有 32 位指令编码组合。最终仍应以全部用例重新执行后的最新覆盖报告为准。
+剩余仍可能显示为红色的代码，主要分为以下三类。
+ 
+⸻
+ 
+一、被外层分派条件截断的 24 个 case 标签
+1. 外层分派条件
+op=0 时，程序先执行：
+if (((op1 & (u32)0B10000) == (u32)0) &&
+    ((op1 & (u32)0B00010) != (u32)0)) {
+        rc = arm_dataproc_extra_unprivileged(inst, regs,
+                                              vcpu, op1, op2);
+} else {
+        switch (op2) {
+        case 0B1011:
+                ...
+        case 0B1101:
+                ...
+        case 0B1111:
+                ...
+        }
+}
+设：
+A = ((op1 & 0x10) == 0)
+B = ((op1 & 0x02) != 0)
+只有当：
+A=true 且 B=true
+时，程序进入 unprivileged 分支。
+ 
+这意味着：
+op1 的 bit4 = 0
+op1 的 bit1 = 1
+所有符合这一约束的 5 位 op1 值为：
+二进制     十六进制
+00010      0x02
+00011      0x03
+00110      0x06
+00111      0x07
+01010      0x0A
+01011      0x0B
+01110      0x0E
+01111      0x0F
+可以概括为：
+op1 = 0b0xx1x
+其中 bit3、bit2、bit0 可以任意变化，因此一共是 8 个值。
+2. 为什么这 8 个值无法进入普通 extra load/store switch
+要进入下面的普通 extra load/store 分支：
+else {
+    switch (op2) {
+    ...
+    }
+}
+必须满足外层条件的否定：
+A=false 或 B=false
+也就是：
+bit4=1 或 bit1=0
+但上述 8 个值固定满足：
+bit4=0 且 bit1=1
+二者互相矛盾。因此，不存在任何一个 32 位 inst，能够既解码出这 8 个 op1 值，又绕过 unprivileged 分支进入普通 switch(op2)。
+这不是测试数据没有构造正确，而是控制流本身不允许。
+ 
+⸻
+ 
+3. 
+op2=0xB
+中不可达的 8 个标签
+在普通 op2=0xB 的内层 switch(op1) 中，以下标签无法从 arm_instgrp_dataproc() 入口到达：
+op1	内层代码所标识的路径	实际从顶层进入的路径
+0x02	STRH register	unprivileged，op1 bit0=0，进入 STRHT
+0x03	LDRH register	unprivileged，op1 bit0=1，进入 LDRHT
+0x06	STRH immediate	unprivileged，进入 STRHT
+0x07	LDRH literal/immediate	unprivileged，进入 LDRHT
+0x0A	STRH register	unprivileged，进入 STRHT
+0x0B	LDRH register	unprivileged，进入 LDRHT
+0x0E	STRH immediate	unprivileged，进入 STRHT
+0x0F	LDRH literal/immediate	unprivileged，进入 LDRHT
+所以这些内层标签即使存在于源码中，也被外层分支遮蔽。
+ 
+⸻
+ 
+4. 
+op2=0xD
+中不可达的 8 个标签
+op1	内层代码所标识的路径	实际从顶层进入的路径
+0x02	LDRD register	unprivileged，bit0=0，该组合执行不可预测处理
+0x03	LDRSB register	unprivileged，bit0=1，进入 LDRSBT
+0x06	LDRD literal/immediate	unprivileged，bit0=0，执行不可预测处理
+0x07	LDRSB literal/immediate	unprivileged，bit0=1，进入 LDRSBT
+0x0A	LDRD register	unprivileged，bit0=0，执行不可预测处理
+0x0B	LDRSB register	unprivileged，bit0=1，进入 LDRSBT
+0x0E	LDRD literal/immediate	unprivileged，bit0=0，执行不可预测处理
+0x0F	LDRSB literal/immediate	unprivileged，bit0=1，进入 LDRSBT
+ 
+⸻
+ 
+5. 
+op2=0xF
+中不可达的 8 个标签
+op1	内层代码所标识的路径	实际从顶层进入的路径
+0x02	STRD register	unprivileged，bit0=0，执行不可预测处理
+0x03	LDRSH register	unprivileged，bit0=1，进入 LDRSHT
+0x06	STRD immediate	unprivileged，bit0=0，执行不可预测处理
+0x07	LDRSH literal/immediate	unprivileged，bit0=1，进入 LDRSHT
+0x0A	STRD register	unprivileged，bit0=0，执行不可预测处理
+0x0B	LDRSH register	unprivileged，bit0=1，进入 LDRSHT
+0x0E	STRD immediate	unprivileged，bit0=0，执行不可预测处理
+0x0F	LDRSH literal/immediate	unprivileged，bit0=1，进入 LDRSHT
+因此，一共是：
+8 个 op1 值 × 3 个 op2 分组 = 24 个不可达 case 标签
+需要特别说明：这些标签不是绝对无法执行。若直接把拆分后的辅助函数作为 UUT，例如直接调用：
+arm_dataproc_extra_op2_1111(..., op1=0x02)
+则能够进入相应 case。
+ 
+但是，从当前被测入口：
+arm_instgrp_dataproc()
+无法进入，这类路径应称为：
+从当前 UUT 入口不可达
+或
+受调用者前置条件约束的不可行路径
+ 
+⸻
+ 
+二、三个内层 
+switch(op1)
+的 default 分支不可达
+三个普通 extra load/store 分支分别包含：
+switch (op1) {
+    ...
+    default:
+        break;
+}
+这些 default 从 arm_instgrp_dataproc() 入口无法到达。
+1. 
+op1
+的取值范围被限制为 5 位
+源码中：
+op1 = ARM_INST_DECODE(inst,
+                      ARM_INST_DATAPROC_OP1_MASK,
+                      ARM_INST_DATAPROC_OP1_SHIFT);
+对应宏为：
+#define ARM_INST_DATAPROC_OP1_MASK  0x01F00000
+#define ARM_INST_DATAPROC_OP1_SHIFT 20
+所以：
+op1 = (inst & 0x01F00000) >> 20;
+掩码只保留 5 个 bit，因此：
+0 <= op1 <= 31
+也就是：
+op1 ∈ [0x00, 0x1F]
+2. 内层 switch 已经枚举了全部 32 个值
+每个内层 switch 把 op1 分成四组。
+xx0x0
+0x00、0x02、0x08、0x0A、
+0x10、0x12、0x18、0x1A
+xx0x1
+0x01、0x03、0x09、0x0B、
+0x11、0x13、0x19、0x1B
+xx1x0
+0x04、0x06、0x0C、0x0E、
+0x14、0x16、0x1C、0x1E
+xx1x1
+0x05、0x07、0x0D、0x0F、
+0x15、0x17、0x1D、0x1F
+四组的并集正好是：
+0x00～0x1F
+没有遗漏任何可能的 5 位值。
+ 
+因此，要进入：
+default:
+必须满足：
+op1 不在 0x00～0x1F
+但解码逻辑又保证：
+op1 一定在 0x00～0x1F
+两者矛盾，所以 default 不可达。
+ 
+同样需要区分：如果直接测试拆分辅助函数，并人为传入：
+op1 = 0x20
+则可以进入 default。但这个值不可能由原函数中的 5 位指令字段解码产生，因此不属于从原函数入口可行的场景。
+ 
+⸻
+ 
+三、位于无条件 
+return
+之后的 
+break
+不可达
+截图中还能看到一些类似代码：
+if (Rn == 0xF) {
+    return arm_inst_ldrh_l(inst, regs, vcpu);
+} else {
+    return arm_inst_ldrh_i(inst, regs, vcpu);
+}
+
+break;
+这里的：
+break;
+无法执行。
+ 
+原因是 if/else 已经穷尽所有判断结果：
+Rn == 0xF
+Rn != 0xF
+无论进入哪个分支，都会执行 return：
+return arm_inst_ldrh_l(...);
+或：
+return arm_inst_ldrh_i(...);
+一旦执行 return，控制流立即离开整个函数，不可能再执行后面的 break。
+ 
+这类不可达与输入值无关，不存在任何测试输入能够绕过两个 return。
+ 
+同样的结构出现在：
+LDRH literal/immediate
+LDRD literal/immediate
+LDRSB literal/immediate
+LDRSH literal/immediate
+对应的分支末尾 break 都属于死代码。
+ 
+⸻
+ 
+四、内层 switch 之后的外层 break 不可达
+原函数中还存在类似结构：
+case 0B1011:
+    switch (op1) {
+        case ...:
+            return arm_inst_strh_r(...);
+
+        case ...:
+            return arm_inst_ldrh_r(...);
+
+        case ...:
+            return arm_inst_strh_i(...);
+
+        case ...:
+            if (Rn == 0xF) {
+                return arm_inst_ldrh_l(...);
+            } else {
+                return arm_inst_ldrh_i(...);
+            }
+
+        default:
+            break;
+    }
+
+    break;
+要执行最外面的：
+break;
+必须先从内层 switch 正常退出。
+但内层 switch 的情况是：
+	1.	op1 的所有可能值 0x00～0x1F 都有 case；
+	2.	每个正常 case 最终都会 return；
+	3.	内层 default 又因为取值范围完整而不可达。
+所以内层 switch 不存在能够正常落到末尾的路径，外层的：
+break;
+自然也无法执行。
+ 
+同样的结论适用于：
+op2=0xB
+op2=0xD
+op2=0xF
+三个外层 case 后面的 break。
+ 
+⸻
+ 
+五、哪些 default 是可达的，不能全部统一标为不可达
+需要注意，只有普通 extra load/store 中的内层：
+switch (op1)
+default 不可达。
+下面两个 default 是可达的，并且原 32 条或补充用例已经覆盖。
+1. 外层 
+switch(op2)
+的 default
+switch (op2) {
+case 0xB:
+case 0xD:
+case 0xF:
+default:
+    arm_unpredictable(...);
+    break;
+}
+因为 op2 是 4 位字段，可以取：
+0x0～0xF
+除了 0xB、0xD、0xF 外还有很多其他值，因此这个 default 可达。
+ 
+arm_instgrp_dataproc.093.IN 使用：
+op2=0
+已经覆盖该路径。
+2. synchronization primitives 的 default
+if (((op1 & 0x10) != 0) && (op2 == 0x9)) {
+    switch (op1) {
+    case 0x18:
+        /* STREX */
+        ...
+    case 0x19:
+        /* LDREX */
+        ...
+    default:
+        arm_unpredictable(...);
+        break;
+    }
+}
+在同步原语条件成立时，op1 可以是：
+0x10～0x1F
+除了：
+0x18、0x19
+外，其他值都能进入 default，例如：
+op1=0x10、op2=0x9
+该 default 属于可达路径，原 32 条中的 synchronization default 用例应已覆盖。
+ 
+⸻
+ 
+六、当前可达性覆盖结论
+从 arm_instgrp_dataproc() 入口分析，目前用例已经覆盖：
+控制流	覆盖状态
+op != 0	true/false 均有用例
+nonzero-op 的所有 case/default	已覆盖
+unprivileged 外层条件	true/false 均已覆盖
+unprivileged 的 op2=0xB/0xD/0xF/default	已覆盖
+unprivileged 中 op1 bit0 true/false	已覆盖
+普通 op2=0xB 的全部可达 case 标签	已补充
+普通 op2=0xD 的全部可达 case 标签	已补充
+普通 op2=0xF 的全部可达 case 标签	已补充
+Rn==15 literal 分支	已覆盖
+Rn!=15 immediate 分支	已覆盖
+synchronization 判断第一个条件 false	已覆盖
+synchronization 判断第一个 true、第二个 false	093.IN 覆盖
+synchronization 判断两个条件均 true	已覆盖
+STREX	已覆盖
+LDREX	已覆盖
+synchronization switch default	已覆盖
+剩余合理的红色项应只有：
+24 个被 unprivileged 路由遮蔽的普通 case 标签
+3 个穷举 switch(op1) 的 default
+位于无条件 return 后的 break
+无法从内层 switch 落出的外层 break
+ 
+⸻
+ 
+七、可用于覆盖分析报告的不可行路径说明
+可以将以下内容用于覆盖关闭说明：
+arm_instgrp_dataproc 首先依据 op1[4] 与 op1[1] 对 unprivileged extra load/store 指令进行分派。当 op1[4]=0 且 op1[1]=1 时，控制流无条件进入 arm_dataproc_extra_unprivileged，不会进入后续普通 extra load/store 的 switch(op2)。因此 op1=0x02、0x03、0x06、0x07、0x0A、0x0B、0x0E、0x0F 对应的普通 op2=0xB、0xD、0xF 内层 case 标签，从 arm_instgrp_dataproc 入口不可达。
+同时，op1 由 5 位指令字段解码，取值范围固定为 0x00～0x1F。三个内层 switch(op1) 已完整枚举全部 32 个值，因此其 default 分支不可达。各正常 case 最终均执行 return，故位于 return 之后以及内层 switch 之后的 break 也不可达。
+如果最新覆盖报告中仍有除此之外的红色路径，则说明相应补充用例没有实际执行、目标 Stub 没有生效，或者覆盖数据尚未重新合并，而不是当前静态分析中列出的不可行路径。
