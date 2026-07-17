@@ -1,0 +1,925 @@
+下面继续 arm_instgrp_coproc 的下一部分，覆盖 Advanced SIMD/VFP 分支中的：
+op1 = 0x20 ～ 0x3F
+正式编号接续上一批：
+arm_instgrp_coproc.033.IN ～ arm_instgrp_coproc.046.IN
+arm_instgrp_coproc.047.R  ～ arm_instgrp_coproc.064.R
+其中：
+	•	op1=0x20～0x2D：未实现的 VFP/SIMD 路径，最终返回 VMM_EFAIL；
+	•	op1=0x2E：满足 OP=1、cpro=10，分派 arm_inst_mcrx；
+	•	op1=0x2F：满足 OP=1、cpro=10，分派 arm_inst_mrcx；
+	•	op1=0x30～0x3F：全部分派 arm_inst_svc。
+本批不新增 User Code 或调用打点。
+公共 Stub：
+arm_unpredictable：空实现
+arm_inst_mcrx：对应成功用例返回 VMM_OK
+arm_inst_mrcx：对应成功用例返回 VMM_OK
+arm_inst_svc：对应成功用例返回 VMM_OK
+ 
+⸻
+ 
+一、
+op1=0x20～0x2D
+arm_instgrp_coproc.033.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * cpro = 0xA
+ * op1  = 0x20
+ * OP   = 0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x20U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 cpro=0xA、op1=0x20、OP=0 时，函数进入未实现的 VFP data-processing 路径并返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象；设置 arm_unpredictable 为空实现。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、构造 cpro=0xA、op1=0x20、OP=0 的指令。 step3、调用 arm_instgrp_coproc。 step4、观察函数返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现的 VFP data-processing 编码 op1=0x20。 其它说明：覆盖显式 case 0B100000，并覆盖 inst & ARM_INST_COPROC_OP_MASK 为 false 的路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.034.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * cpro = 0xB
+ * op1  = 0x21
+ * OP   = 1
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x21U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0BU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK) |
+       ARM_INST_COPROC_OP_MASK;
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 OP=1 但 cpro 不等于 10 时，不进入 MCRX/MRCX 特殊分派，最终返回失败。 用例类别：接口测试 预置条件：构造 cpro=0xB、op1=0x21、OP=1 的指令。 测试步骤： step1、清零测试对象。 step2、构造指定指令字段。 step3、调用 arm_instgrp_coproc。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：VFP transfer 编码，非 CP10。 其它说明：覆盖显式 case 0B100001、inst & ARM_INST_COPROC_OP_MASK 为 true，以及 cpro==10 为 false。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.035.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * cpro = 0xA
+ * op1  = 0x22
+ * OP   = 1
+ * op1 & 0xF = 0x2，进入内层 default
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x22U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK) |
+       ARM_INST_COPROC_OP_MASK;
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 OP=1、cpro=10，但 op1 低四位既不是 0xE 也不是 0xF 时，内层 switch 进入 default 并最终返回失败。 用例类别：接口测试 预置条件：构造 cpro=0xA、op1=0x22、OP=1 的指令。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：CP10 transfer 未支持子编码。 其它说明：覆盖显式 case 0B100010、cpro==10 为 true，以及 switch(op1 & 0xF) 的 default。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.036.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x23，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x23U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x23 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造 cpro=0xA、op1=0x23、OP=0 的指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x23。 其它说明：覆盖显式 case 0B100011。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.037.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x24，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x24U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x24 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效测试对象及指定指令。 测试步骤： step1、清零测试对象。 step2、构造 op1=0x24 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x24。 其它说明：覆盖显式 case 0B100100。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.038.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x25，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x25U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x25 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效输入对象及指定指令字段。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x25。 其它说明：覆盖显式 case 0B100101。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.039.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x26，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x26U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x26 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造 cpro=0xA、op1=0x26 的指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x26。 其它说明：覆盖显式 case 0B100110。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.040.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x27，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x27U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x27 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效输入对象和指定指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x27。 其它说明：覆盖显式 case 0B100111。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.041.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x28，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x28U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x28 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效输入和指定编码。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x28。 其它说明：覆盖显式 case 0B101000。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.042.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x29，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x29U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x29 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效测试对象和指定指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x29。 其它说明：覆盖显式 case 0B101001。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.043.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x2A，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2AU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x2A 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造指定协处理器和 op1 字段。 测试步骤： step1、清零输入对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x2A。 其它说明：覆盖显式 case 0B101010。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.044.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x2B，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2BU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x2B 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效输入及指定指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x2B。 其它说明：覆盖显式 case 0B101011。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.045.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x2C，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2CU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x2C 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效测试对象和指定编码。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x2C。 其它说明：覆盖显式 case 0B101100。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+arm_instgrp_coproc.046.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x2D，OP=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2DU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 op1=0x2D 时覆盖对应未实现的 VFP data-processing case 标签。 用例类别：接口测试 预置条件：构造有效输入对象及指定指令。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：接口分析。 追踪ID：arm_instgrp_coproc。 等价列表：未实现编码 op1=0x2D。 其它说明：覆盖显式 case 0B101101。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+二、CP10 特殊 MCRX/MRCX 分派
+arm_instgrp_coproc.047.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * cpro = 0xA
+ * op1  = 0x2E
+ * OP   = 1
+ * op1 & 0xF = 0xE
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2EU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK) |
+       ARM_INST_COPROC_OP_MASK;
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_mcrx：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 cpro=10、OP=1、op1低四位=0xE 时，函数将指令分派至 arm_inst_mcrx。 用例类别：基于需求的测试 预置条件：构造有效输入；设置 arm_inst_mcrx 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 cpro=0xA、op1=0x2E、OP=1 的指令。 step3、调用 arm_instgrp_coproc。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：CP10 MCRX 特殊分派。 其它说明：覆盖显式 case 0B101110 和内层 case 0xE。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.048.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/*
+ * cpro = 0xA
+ * op1  = 0x2F
+ * OP   = 1
+ * op1 & 0xF = 0xF
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x2FU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK) |
+       ARM_INST_COPROC_OP_MASK;
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_mrcx：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 cpro=10、OP=1、op1低四位=0xF 时，函数将指令分派至 arm_inst_mrcx。 用例类别：基于需求的测试 预置条件：构造有效输入；设置 arm_inst_mrcx 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 cpro=0xA、op1=0x2F、OP=1 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：CP10 MRCX 特殊分派。 其它说明：覆盖显式 case 0B101111 和内层 case 0xF。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+三、SVC 分派：
+op1=0x30～0x3F
+以下用例统一配置：
+arm_inst_svc：返回 VMM_OK
+arm_instgrp_coproc.049.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x30 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x30U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x30 时，通过 case 0B110000 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 arm_inst_svc 返回成功。 测试步骤： step1、清零测试对象。 step2、构造 cpro=0xA、op1=0x30 的指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x30。 其它说明：覆盖 SVC 分组中的第一个显式 case 标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.050.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x31 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x31U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x31 时，通过 case 0B110001 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x31。 其它说明：覆盖显式 case 0B110001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.051.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x32 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x32U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x32 时，通过 case 0B110010 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x32。 其它说明：覆盖显式 case 0B110010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.052.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x33 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x33U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x33 时，通过 case 0B110011 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：构造有效对象并设置 SVC Stub 成功返回。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、检查返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x33。 其它说明：覆盖显式 case 0B110011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.053.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x34 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x34U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x34 时，通过 case 0B110100 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x34。 其它说明：覆盖显式 case 0B110100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.054.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x35 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x35U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x35 时，通过 case 0B110101 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：构造有效输入并设置目标函数成功返回。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x35。 其它说明：覆盖显式 case 0B110101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.055.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x36 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x36U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x36 时，通过 case 0B110110 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x36。 其它说明：覆盖显式 case 0B110110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.056.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x37 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x37U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x37 时，通过 case 0B110111 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：构造有效输入并设置 SVC Stub 返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x37。 其它说明：覆盖显式 case 0B110111。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.057.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x38 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x38U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x38 时，通过 case 0B111000 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置目标处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、检查返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x38。 其它说明：覆盖显式 case 0B111000。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.058.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x39 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x39U << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x39 时，通过 case 0B111001 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x39。 其它说明：覆盖显式 case 0B111001。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.059.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3A */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3AU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3A 时，通过 case 0B111010 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3A。 其它说明：覆盖显式 case 0B111010。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.060.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3B */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3BU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3B 时，通过 case 0B111011 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：构造有效输入并设置 SVC Stub 返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、检查返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3B。 其它说明：覆盖显式 case 0B111011。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.061.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3C */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3CU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3C 时，通过 case 0B111100 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3C。 其它说明：覆盖显式 case 0B111100。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.062.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3D */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3DU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3D 时，通过 case 0B111101 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置目标函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指定指令。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3D。 其它说明：覆盖显式 case 0B111101。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.063.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3E */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3EU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3E 时，通过 case 0B111110 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：设置 SVC 处理函数返回成功。 测试步骤： step1、清零测试对象。 step2、构造指令。 step3、调用函数。 step4、检查返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3E。 其它说明：覆盖显式 case 0B111110。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+arm_instgrp_coproc.064.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+/* cpro=0xA，op1=0x3F */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       ((0x3FU << ARM_INST_COPROC_OP1_SHIFT) &
+        ARM_INST_COPROC_OP1_MASK) |
+       ((0x0AU << ARM_INST_COPROC_CPRO_SHIFT) &
+        ARM_INST_COPROC_CPRO_MASK);
+
+<<emulate_arm.arm_instgrp_coproc.inst>> = inst;
+<<emulate_arm.arm_instgrp_coproc.regs>> = &regs;
+<<emulate_arm.arm_instgrp_coproc.vcpu>> = &vcpu;
+Stub Processing
+arm_inst_svc：返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 op1=0x3F 时，通过 case 0B111111 分派 SVC 指令。 用例类别：基于需求的测试 预置条件：构造有效输入；设置 arm_inst_svc 返回 VMM_OK。 测试步骤： step1、清零测试对象。 step2、构造 cpro=0xA、op1=0x3F 的指令。 step3、调用 arm_instgrp_coproc。 step4、观察返回值。 用例来源：需求分析。 追踪ID：arm_instgrp_coproc。 等价列表：SVC 编码 op1=0x3F。 其它说明：覆盖 Advanced SIMD/VFP 内层 switch 最后一个显式 case 标签。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+至此，cpro=0xA/0xB 分支中 op1=0x00～0x3F 的全部显式 case 标签、OP 判断真假、cpro==10 判断真假、内层低四位 switch 的 0xE/0xF/default 均已有对应场景。
+下一部分从：
+arm_instgrp_coproc.065.IN
+开始覆盖通用协处理器分支 cpro!=0xA && cpro!=0xB。
