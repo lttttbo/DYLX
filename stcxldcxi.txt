@@ -1,0 +1,846 @@
+当前仍是 emulate_arm.c。这两个函数控制流基本对称，可以共用一套最精简的协处理器 User Code：
+arm_inst_stcx：9 条
+arm_inst_ldcx_i：9 条
+不增加调用次数打点，不验证中间回调是否执行；通过返回值和 regs.pc 区分路径。下面的回调参数顺序与 cpu_coproc_ldcstc_accept/done/read/write 的函数指针定义一致。 
+ 
+⸻
+ 
+一、两个函数共用的最精简 User Code
+已有同名内容时直接复用，不要重复定义。你之前为 arm_inst_ldcx_l 建立的这套 User Code 也可以继续使用。
+1. User Global / Data
+struct cpu_vcpu_coproc vcast_cp;
+
+/*
+ * ldcstc_accept 的可控返回值：
+ * 0 -> FALSE
+ * 1 -> TRUE
+ */
+unsigned int vcast_cp_accept_ret;
+
+/*
+ * ldcstc_done 的结束下标：
+ * 0 -> 第一次判断即返回 TRUE，循环不执行
+ * 1 -> index=0 时返回 FALSE，循环执行一次；
+ *      index=1 时返回 TRUE，退出循环
+ */
+unsigned int vcast_cp_done_after;
+注意：
+struct cpu_vcpu_coproc vcast_cp;
+只放在 User Global / Data 一次。不要再放到 Test Case Init 或 Begin User Code，否则会重复定义。
+ 
+⸻
+ 
+2. Unit Prefix User Code
+ldcstc_accept
+回调
+**改写目的：**控制协处理器接受或拒绝 STC/LDC 指令。
+static bool vcast_ldcstc_accept(struct vmm_vcpu *vcpu,
+                                arch_regs_t *regs,
+                                u32 D,
+                                u32 CRd,
+                                u32 uopt,
+                                u32 imm8)
+{
+    (void)vcpu;
+    (void)regs;
+    (void)D;
+    (void)CRd;
+    (void)uopt;
+    (void)imm8;
+
+    return vcast_cp_accept_ret ? TRUE : FALSE;
+}
+ldcstc_done
+回调
+**改写目的：**控制传输循环执行零次或一次。本批成功和故障用例统一设置为执行一次。
+static bool vcast_ldcstc_done(struct vmm_vcpu *vcpu,
+                              arch_regs_t *regs,
+                              u32 index,
+                              u32 D,
+                              u32 CRd,
+                              u32 uopt,
+                              u32 imm8)
+{
+    (void)vcpu;
+    (void)regs;
+    (void)D;
+    (void)CRd;
+    (void)uopt;
+    (void)imm8;
+
+    return (index >= vcast_cp_done_after) ? TRUE : FALSE;
+}
+ldcstc_read
+回调
+**改写目的：**为 arm_inst_stcx 提供一个固定待写入内存的数据，不验证数据内容。
+static u32 vcast_ldcstc_read(struct vmm_vcpu *vcpu,
+                             arch_regs_t *regs,
+                             u32 index,
+                             u32 D,
+                             u32 CRd,
+                             u32 uopt,
+                             u32 imm8)
+{
+    (void)vcpu;
+    (void)regs;
+    (void)index;
+    (void)D;
+    (void)CRd;
+    (void)uopt;
+    (void)imm8;
+
+    return 0U;
+}
+ldcstc_write
+回调
+**改写目的：**为 arm_inst_ldcx_i 提供无副作用的协处理器写入接口。
+static void vcast_ldcstc_write(struct vmm_vcpu *vcpu,
+                               arch_regs_t *regs,
+                               u32 index,
+                               u32 D,
+                               u32 CRd,
+                               u32 uopt,
+                               u32 imm8,
+                               u32 data)
+{
+    (void)vcpu;
+    (void)regs;
+    (void)index;
+    (void)D;
+    (void)CRd;
+    (void)uopt;
+    (void)imm8;
+    (void)data;
+}
+ 
+⸻
+ 
+3. Test Case Init
+memset(&vcast_cp, 0, sizeof(vcast_cp));
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 0U;
+ 
+⸻
+ 
+4. 公共 Stub
+cpu_vcpu_coproc_get
+**改写目的：**始终返回可控的协处理器对象，避免依赖真实协处理器表。
+return &vcast_cp;
+arm_unpredictable
+return;
+vmm_vcpu_irq_assert
+return;
+cpu_vcpu_reg_read
+地址值本身不是本批验证目标，统一提供一个有效基址：
+return (u64)0x1000;
+cpu_vcpu_reg_write
+不验证中间寄存器写入：
+return;
+arm_condition_check
+只在条件不成立用例中使用：
+return FALSE;
+正常执行用例的条件码统一设置为 0xE，不会调用该 Stub。
+ 
+⸻
+ 
+二、
+arm_inst_stcx
+VectorCAST 参数路径：
+<<emulate_arm.arm_inst_stcx.inst>>
+<<emulate_arm.arm_inst_stcx.regs>>
+<<emulate_arm.arm_inst_stcx.vcpu>>
+ 
+⸻
+ 
+arm_inst_stcx.001.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond = 0xE
+ * P = 0
+ * U = 1
+ * W = 1
+ * Rn = 15
+ * imm8 = 1
+ *
+ * wback=true，Rn=15。
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_W_START) |
+       (15U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证开启写回且基址寄存器为 R15 时，函数将 STC 指令判定为不可预测并返回失败。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象；设置 Rn=15、W=1。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x1000。 step3、构造 P=0、U=1、W=1、Rn=15 的 STC 指令。 step4、调用 arm_inst_stcx。 step5、观察函数返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_stcx。 等价列表：写回基址寄存器为 PC。 其它说明：覆盖 (Rn==15) && wback 为 true；同时使 uopt 计算中的 P==0 为 true、W==0 为 false。 通过准则：函数返回 VMM_EFAIL，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_stcx.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * accept 指针为空；
+ * done/read 指针有效。
+ */
+vcast_cp.ldcstc_accept = NULL;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+/* cond=0xE，P=1，U=1，W=0，Rn=1，imm8=1 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_P_START) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x1000
+注释
+测试目的：验证协处理器未提供 ldcstc_accept 接口时，函数注入未定义指令异常并提前返回成功码。 用例类别：接口测试 预置条件：设置 ldcstc_accept=NULL，并使 ldcstc_done、ldcstc_read 有效。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调指针。 step3、构造合法 STC 指令。 step4、调用 arm_inst_stcx。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_stcx。 等价列表：缺少 accept 回调接口。 其它说明：覆盖回调指针复合判断中第一个条件 ldcstc_accept==NULL 为 true；P=1 同时覆盖 uopt 第一个条件为 false。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_stcx.003.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = NULL;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+/*
+ * cond=0xE，P=1，U=1，W=0，Rn=15。
+ * Rn==15 为 true，但 wback=false。
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_P_START) |
+       (1U << ARM_INST_STCX_U_START) |
+       (15U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x1000
+注释
+测试目的：验证协处理器未提供 ldcstc_done 接口时，函数执行未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：设置 accept/read 回调有效，设置 done 回调为空；设置 Rn=15 但关闭写回。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、构造 Rn=15、W=0 的合法 STC 指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_stcx。 等价列表：缺少 done 回调接口。 其它说明：覆盖指针复合判断中 accept 非空、done 为空；同时覆盖 Rn==15 为 true、wback 为 false，使前一个复合判断结果为 false。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_stcx.004.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = NULL;
+
+/*
+ * P=0，W=0，U=1：
+ * uopt=true。
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x1000
+注释
+测试目的：验证协处理器未提供 ldcstc_read 接口时，函数进入未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：设置 accept/done 回调有效，设置 read 回调为空；构造 P=0、W=0、U=1 的指令。 测试步骤： step1、清零测试对象。 step2、配置三个协处理器回调指针。 step3、构造 STC 指令。 step4、调用 arm_inst_stcx。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_stcx。 等价列表：缺少 read 回调接口。 其它说明：覆盖回调复合判断中前两个条件为 false、第三个条件为 true；同时覆盖 uopt=true。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_stcx.005.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+regs.pstate = 0ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+/*
+ * cond=0x0（EQ），条件检查 Stub 返回 FALSE。
+ * P=0，U=0，W=0，Rn=1。
+ */
+inst = (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+Stub Processing
+arm_condition_check：返回 FALSE
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证 STC 指令条件不成立时，不执行协处理器数据传输，但仍将 PC 增加 4。 用例类别：基于需求的测试 预置条件：配置全部必需回调；设置条件码为 EQ，并设置条件检查返回 false。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、构造条件不成立的 STC 指令。 step4、调用 arm_inst_stcx。 step5、观察函数返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_stcx。 等价列表：指令条件执行失败。 其它说明：覆盖回调指针复合判断全部为 false、arm_condition_passed 为 false；P=0、W=0、U=0 同时覆盖 uopt 第三个条件为 false。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_stcx.006.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+vcast_cp_accept_ret = 0U;
+
+/* cond=0xE，P=1，U=1，W=0，Rn=1 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_P_START) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x1000
+注释
+测试目的：验证协处理器拒绝 STC 指令时，函数执行未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：配置全部必需回调；设置 ldcstc_accept 返回 false。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、设置 accept 回调返回 false。 step4、构造条件成立的 STC 指令。 step5、调用 arm_inst_stcx。 step6、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_stcx。 等价列表：协处理器拒绝 STC 传输。 其它说明：覆盖 !cp->ldcstc_accept(...) 为 true。该路径在 PC 更新前提前返回。 通过准则：函数返回 VMM_OK，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_stcx.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/*
+ * P=1 -> index=true
+ * U=0 -> add=false
+ * W=0 -> wback=false
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_P_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_write：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证前索引减法、不写回的 STC 指令能够完成一次协处理器数据写内存并正常结束。 用例类别：基于需求的测试 预置条件：配置全部必需回调；设置协处理器接受指令；设置 done 回调使循环执行一次；设置内存写入成功。 测试步骤： step1、清零测试对象。 step2、配置回调及循环控制值。 step3、构造 P=1、U=0、W=0 的 STC 指令。 step4、设置内存写入返回 VMM_OK。 step5、调用 arm_inst_stcx。 step6、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_stcx。 等价列表：前索引减法、一次传输、不写回。 其它说明：覆盖 accept 返回 true、循环条件 true 后再变为 false、add=false、index=true、内存写入成功和最终 wback=false。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_stcx.008.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/*
+ * P=0 -> index=false
+ * U=1 -> add=true
+ * W=0 -> wback=false
+ * 同时 uopt=true
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_write：
+    第1次返回 VMM_EIO
+期望值
+return = VMM_EIO
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入验证 STC 执行数据写内存时发生错误，函数立即返回该错误码。 用例类别：故障注入测试 预置条件：配置全部回调；设置循环执行一次；设置第一次内存写入返回 VMM_EIO。 测试步骤： step1、清零测试对象。 step2、配置回调和循环控制值。 step3、构造 P=0、U=1、W=0 的 STC 指令。 step4、设置内存写入失败。 step5、调用 arm_inst_stcx。 step6、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_stcx。 等价列表：STC 内存写入失败。 其它说明：覆盖 index=false、add=true、uopt=true 和内存写入错误路径；错误发生后不推进 PC。 通过准则：函数返回 VMM_EIO，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_stcx.009.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_read = vcast_ldcstc_read;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/*
+ * P=1
+ * U=1
+ * W=1 -> wback=true
+ * Rn=1
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_STCX_P_START) |
+       (1U << ARM_INST_STCX_U_START) |
+       (1U << ARM_INST_STCX_W_START) |
+       (1U << ARM_INST_STCX_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_stcx.inst>> = inst;
+<<emulate_arm.arm_inst_stcx.regs>> = &regs;
+<<emulate_arm.arm_inst_stcx.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_write：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证前索引加法并开启写回的 STC 指令能够完成一次数据传输、执行基址写回并正常推进 PC。 用例类别：基于需求的测试 预置条件：配置全部回调；设置协处理器接受指令；设置循环执行一次；设置内存写入成功。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调和循环控制值。 step3、构造 P=1、U=1、W=1、Rn=1 的 STC 指令。 step4、设置内存写入成功。 step5、调用 arm_inst_stcx。 step6、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_stcx。 等价列表：前索引加法、一次传输并写回。 其它说明：覆盖 add=true、index=true、内存写入成功和最终 wback=true。不对中间寄存器写回值设置额外打点。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+三、
+arm_inst_ldcx_i
+VectorCAST 参数路径：
+<<emulate_arm.arm_inst_ldcx_i.inst>>
+<<emulate_arm.arm_inst_ldcx_i.regs>>
+<<emulate_arm.arm_inst_ldcx_i.vcpu>>
+ 
+⸻
+ 
+arm_inst_ldcx_i.001.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+/* P=0，U=1，W=1，Rn=15 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_W_START) |
+       (15U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x2000
+注释
+测试目的：验证 LDC immediate 指令开启写回且基址寄存器为 R15 时返回不可预测指令错误。 用例类别：接口测试 预置条件：设置 Rn=15、W=1。 测试步骤： step1、清零测试对象。 step2、设置初始 PC 为 0x2000。 step3、构造写回基址为 R15 的 LDC 指令。 step4、调用 arm_inst_ldcx_i。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldcx_i。 等价列表：写回基址寄存器为 PC。 其它说明：覆盖 (Rn==15) && wback 为 true；同时覆盖 uopt 计算中 W==0 为 false。 通过准则：函数返回 VMM_EFAIL，PC 不变。
+ 
+⸻
+ 
+arm_inst_ldcx_i.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = NULL;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_P_START) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2000
+注释
+测试目的：验证协处理器未提供 ldcstc_accept 接口时，LDC 函数执行未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：设置 accept 回调为空，设置 done/write 回调有效。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、构造合法 LDC 指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldcx_i。 等价列表：缺少 accept 回调接口。 其它说明：覆盖回调指针复合判断中的第一个条件为 true；P=1 覆盖 uopt 第一个条件为 false。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_ldcx_i.003.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = NULL;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+/* Rn=15，W=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_P_START) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (15U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2000
+注释
+测试目的：验证协处理器未提供 ldcstc_done 接口时，函数执行未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：设置 accept/write 回调有效，done 回调为空；设置 Rn=15 但关闭写回。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、构造 Rn=15、W=0 的 LDC 指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldcx_i。 等价列表：缺少 done 回调接口。 其它说明：覆盖 accept 指针非空、done 指针为空；同时覆盖 Rn==15 为 true但 wback 为 false。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_ldcx_i.004.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = NULL;
+
+/* P=0，W=0，U=1，uopt=true */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2000
+注释
+测试目的：验证协处理器未提供 ldcstc_write 接口时，函数进入未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：设置 accept/done 回调有效，write 回调为空；设置 P=0、W=0、U=1。 测试步骤： step1、清零测试对象。 step2、配置回调指针。 step3、构造 LDC 指令。 step4、调用被测函数。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldcx_i。 等价列表：缺少 write 回调接口。 其它说明：覆盖回调复合判断前两个条件为 false、第三个条件为 true；同时覆盖 uopt=true。 通过准则：函数返回 VMM_OK，PC 不推进。
+ 
+⸻
+ 
+arm_inst_ldcx_i.005.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+regs.pstate = 0ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+/* cond=EQ，P=0，U=0，W=0，Rn=1 */
+inst = (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+Stub Processing
+arm_condition_check：返回 FALSE
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证 LDC 指令条件不成立时，不执行内存读取和协处理器写入，但仍推进 PC。 用例类别：基于需求的测试 预置条件：配置全部必需回调；设置条件码为 EQ，并设置条件检查结果为 false。 测试步骤： step1、清零测试对象。 step2、配置协处理器回调。 step3、构造条件不成立的 LDC 指令。 step4、调用 arm_inst_ldcx_i。 step5、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldcx_i。 等价列表：指令条件执行失败。 其它说明：覆盖回调指针复合判断全部为 false、条件判断为 false；P=0、W=0、U=0 覆盖 uopt 第三个条件为 false。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+arm_inst_ldcx_i.006.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 0U;
+
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_P_START) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+期望值
+return = VMM_OK
+regs.pc = 0x2000
+注释
+测试目的：验证协处理器拒绝 LDC 指令时，函数执行未定义指令异常路径并提前返回。 用例类别：接口测试 预置条件：配置全部必需回调；设置 accept 回调返回 false。 测试步骤： step1、清零测试对象。 step2、配置回调。 step3、设置协处理器拒绝指令。 step4、构造条件成立的 LDC 指令。 step5、调用被测函数。 step6、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldcx_i。 等价列表：协处理器拒绝 LDC 传输。 其它说明：覆盖 !cp->ldcstc_accept(...) 为 true；函数在 PC 更新前提前返回。 通过准则：函数返回 VMM_OK，PC 保持 0x2000。
+ 
+⸻
+ 
+arm_inst_ldcx_i.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/* P=1，U=0，W=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_P_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_read：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证前索引减法且不写回的 LDC 指令能够完成一次内存读取和协处理器写入并正常结束。 用例类别：基于需求的测试 预置条件：配置全部回调；设置协处理器接受指令；设置循环执行一次；设置内存读取成功。 测试步骤： step1、清零测试对象。 step2、配置回调和循环控制。 step3、构造 P=1、U=0、W=0 的 LDC 指令。 step4、设置内存读取成功。 step5、调用被测函数。 step6、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldcx_i。 等价列表：前索引减法、一次传输、不写回。 其它说明：覆盖 accept 返回 true、循环执行一次后退出、add=false、index=true、内存读取成功和 wback=false。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+arm_inst_ldcx_i.008.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/* P=0，U=1，W=0 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_read：
+    第1次返回 VMM_EIO
+期望值
+return = VMM_EIO
+regs.pc = 0x2000
+注释
+测试目的：通过故障注入验证 LDC 执行内存读取时发生错误，函数立即返回该错误码。 用例类别：故障注入测试 预置条件：配置全部回调；设置循环执行一次；设置第一次内存读取返回 VMM_EIO。 测试步骤： step1、清零测试对象。 step2、配置回调和循环控制值。 step3、构造 P=0、U=1、W=0 的 LDC 指令。 step4、设置内存读取失败。 step5、调用被测函数。 step6、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_ldcx_i。 等价列表：LDC 内存读取失败。 其它说明：覆盖 index=false、add=true、uopt=true 和内存读取错误路径；错误发生后不推进 PC。 通过准则：函数返回 VMM_EIO，PC 保持 0x2000。
+ 
+⸻
+ 
+arm_inst_ldcx_i.009.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x2000ULL;
+
+vcast_cp.ldcstc_accept = vcast_ldcstc_accept;
+vcast_cp.ldcstc_done = vcast_ldcstc_done;
+vcast_cp.ldcstc_write = vcast_ldcstc_write;
+
+vcast_cp_accept_ret = 1U;
+vcast_cp_done_after = 1U;
+
+/* P=1，U=1，W=1，Rn=1 */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (1U << ARM_INST_LDCX_I_P_START) |
+       (1U << ARM_INST_LDCX_I_U_START) |
+       (1U << ARM_INST_LDCX_I_W_START) |
+       (1U << ARM_INST_LDCX_I_RN_START) |
+       0x01U;
+
+<<emulate_arm.arm_inst_ldcx_i.inst>> = inst;
+<<emulate_arm.arm_inst_ldcx_i.regs>> = &regs;
+<<emulate_arm.arm_inst_ldcx_i.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_mem_read：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证前索引加法并开启写回的 LDC 指令能够完成一次内存读取、协处理器写入和基址写回，并正常推进 PC。 用例类别：基于需求的测试 预置条件：配置全部回调；设置协处理器接受指令；设置循环执行一次；设置内存读取成功。 测试步骤： step1、清零测试对象。 step2、配置回调和循环控制。 step3、构造 P=1、U=1、W=1、Rn=1 的 LDC 指令。 step4、设置内存读取成功。 step5、调用被测函数。 step6、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldcx_i。 等价列表：前索引加法、一次传输并写回。 其它说明：覆盖 add=true、index=true、内存读取成功和最终 wback=true。不增加回调调用或寄存器写回打点。 通过准则：函数返回 VMM_OK，PC 更新为 0x2004。
+ 
+⸻
+ 
+四、覆盖对应关系
+两个函数的覆盖结构相同：
+可达路径	对应用例
+Rn==15 && wback 为 true	001.IN
+Rn!=15 导致前一个复合判断为 false	002.IN 等
+Rn==15、wback=false	003.IN
+accept 指针为空	002.IN
+done 指针为空	003.IN
+read/write 指针为空	004.IN
+三个必需指针均非空	005.R～009.R/FI
+条件不成立	005.R
+accept 返回 false	006.IN
+accept 返回 true	007.R～009.R/FI
+while 循环进入及退出	007.R、009.R
+内存访问成功	007.R、009.R
+内存访问失败	008.FI
+index=true	007.R、009.R
+index=false	008.FI
+add=false	007.R
+add=true	008.FI、009.R
+wback=false	007.R
+wback=true	009.R
+uopt 第一条件 false	002.IN 等
+uopt 第二条件 false	001.IN
+uopt 第三条件 false	005.R
+uopt=true	004.IN、008.FI
