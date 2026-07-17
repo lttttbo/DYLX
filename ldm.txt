@@ -1,0 +1,393 @@
+下面继续 emulate_arm.c 中的：
+arm_inst_ldm
+按“最少用例覆盖全部可达分支”的原则，需要 9 条用例：
+arm_inst_ldm.001.IN ～ arm_inst_ldm.003.IN
+arm_inst_ldm.004.R
+arm_inst_ldm.005.FI ～ arm_inst_ldm.006.FI
+arm_inst_ldm.007.R ～ arm_inst_ldm.009.R
+这 9 条同时覆盖：
+Rn=15 / Rn!=15
+reg_list=0 / reg_list!=0
+wback=true / false
+Rn 位于 reg_list / 不位于 reg_list
+条件成立 / 不成立
+increment / decrement
+before / after
+普通寄存器读取成功 / 失败
+PC 读取成功 / 失败
+reg_list bit15=true / false
+写回 increment / decrement / 不写回
+不需要新增 User Global、指令构造宏或调用打点。
+ 
+⸻
+ 
+一、公共 Stub 配置
+arm_unpredictable
+return;
+cpu_vcpu_reg_read
+正常执行用例中统一返回一个有效基址：
+return (u64)0x1000;
+cpu_vcpu_reg_write
+不需要验证中间寄存器写入，使用空实现：
+return;
+cpu_vcpu_mem_read
+每条用例按文中给出的返回序列配置。
+成功读取普通寄存器数据时，输出任意有效值即可，例如：
+0x12345678
+ 
+⸻
+ 
+二、
+arm_inst_ldm
+arm_inst_ldm.001.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x09：LDMIA，不写回
+ * Rn       = 15
+ * reg_list = R0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x09U << ARM_INST_BRBLK_OP_START) |
+       (15U << ARM_INST_LDMSTM_RN_START) |
+       0x0001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证基址寄存器 Rn=15 时，函数将 LDM 指令判定为不可预测并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置非空寄存器列表；设置基址寄存器为 R15。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x1000。 step3、构造 Rn=15、reg_list=R0 的 LDMIA 指令。 step4、调用 arm_inst_ldm。 step5、观察函数返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldm。 等价列表：非法基址寄存器 R15。 其它说明：覆盖判断 (Rn == 15) || (!reg_list) 中第一个条件为 true 的路径。寄存器列表设置为非空，保证失败原因仅为 Rn=15。 通过准则：函数返回 VMM_EFAIL，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldm.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x09：LDMIA，不写回
+ * Rn       = 4
+ * reg_list = 0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x09U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START);
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证寄存器列表为空时，函数将 LDM 指令判定为不可预测并返回失败。 用例类别：接口测试 预置条件：构造有效的 VCPU 和寄存器对象；设置合法基址寄存器 R4；设置寄存器列表为空。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x1000。 step3、构造 Rn=4、reg_list=0 的 LDMIA 指令。 step4、调用 arm_inst_ldm。 step5、观察函数返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldm。 等价列表：空寄存器列表。 其它说明：覆盖判断 (Rn == 15) || (!reg_list) 中第一个条件为 false、第二个条件为 true 的路径。 通过准则：函数返回 VMM_EFAIL，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldm.003.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x0B：LDMIA，开启写回
+ * Rn       = 4
+ * reg_list = R4
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x0BU << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x0010U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+期望值
+return = VMM_EFAIL
+regs.pc = 0x1000
+注释
+测试目的：验证开启写回且基址寄存器同时位于寄存器列表中时，函数返回不可预测指令错误。 用例类别：接口测试 预置条件：构造有效 VCPU 和寄存器对象；设置 wback=1、Rn=4，并在寄存器列表中设置 R4。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造开启写回且寄存器列表包含 R4 的 LDMIA 指令。 step4、调用 arm_inst_ldm。 step5、观察返回值和 PC。 用例来源：接口分析。 追踪ID：arm_inst_ldm。 等价列表：写回基址寄存器位于加载列表中。 其它说明：覆盖判断 wback && (reg_list & (1 << Rn)) 中两个条件均为 true 的路径。 通过准则：函数返回 VMM_EFAIL，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldm.004.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+regs.pstate = 0ULL;
+
+/*
+ * cond     = 0x0：EQ
+ * Z        = 0，条件不成立
+ * op       = 0x09：LDMIA，不写回
+ * Rn       = 4
+ * reg_list = R0
+ */
+inst = (0x09U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x0001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+arm_condition_check：返回 FALSE
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证指令条件不成立时，函数不执行寄存器加载和内存访问，但仍将 PC 增加 4。 用例类别：基于需求的测试 预置条件：设置 EQ 条件且 Z 标志未置位；设置合法、非空的寄存器列表；关闭写回。 测试步骤： step1、清零 VCPU 和寄存器对象。 step2、设置初始 PC 为 0x1000。 step3、构造条件码为 EQ 的 LDMIA 指令。 step4、设置条件检查结果为 false。 step5、调用 arm_inst_ldm。 step6、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldm。 等价列表：条件执行失败。 其它说明：覆盖 arm_condition_passed 为 false；同时覆盖写回合法性判断中 wback=false 的短路路径。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_ldm.005.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x09：LDMIA
+ *           P=0，U=1，W=0
+ *           increment-after
+ * Rn       = 4
+ * reg_list = R0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x09U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x0001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_reg_read：返回 0x1000
+
+cpu_vcpu_mem_read：
+    第1次返回 VMM_EIO
+期望值
+return = VMM_EIO
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入验证加载普通寄存器时第一次内存读取失败，函数立即返回该错误码。 用例类别：故障注入测试 预置条件：构造合法的 increment-after LDM 指令；寄存器列表仅包含 R0；设置第一次内存读取返回 VMM_EIO。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 P=0、U=1、W=0、reg_list=R0 的指令。 step4、设置基址寄存器读取值为 0x1000。 step5、设置第一次内存读取失败。 step6、调用 arm_inst_ldm。 step7、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_ldm。 等价列表：普通寄存器内存读取失败。 其它说明：覆盖 increment 地址分支、after 地址形式、第二个遍历循环中寄存器位为 true，以及普通寄存器内存读取错误路径。 通过准则：函数返回 VMM_EIO，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldm.006.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x11：LDMDB
+ *           P=1，U=0，W=0
+ *           decrement-before
+ * Rn       = 4
+ * reg_list = PC
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x11U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x8000U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_reg_read：返回 0x1000
+
+cpu_vcpu_mem_read：
+    第1次返回 VMM_EIO
+期望值
+return = VMM_EIO
+regs.pc = 0x1000
+注释
+测试目的：通过故障注入验证寄存器列表包含 PC 时，PC 对应的内存读取失败，函数立即返回该错误码。 用例类别：故障注入测试 预置条件：构造合法的 decrement-before LDM 指令；寄存器列表仅包含 PC；设置 PC 内存读取返回 VMM_EIO。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 P=1、U=0、W=0、reg_list=PC 的指令。 step4、设置基址读取值为 0x1000。 step5、设置 PC 内存读取失败。 step6、调用 arm_inst_ldm。 step7、观察返回值和 PC。 用例来源：故障注入。 追踪ID：arm_inst_ldm。 等价列表：PC 内存读取失败。 其它说明：覆盖 decrement 地址分支、before 地址形式、普通寄存器循环中寄存器位均为 false、reg_list >> 15 为 true，以及 PC 内存读取错误路径。 通过准则：函数返回 VMM_EIO，PC 保持 0x1000。
+ 
+⸻
+ 
+arm_inst_ldm.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x09：LDMIA，不写回
+ * Rn       = 4
+ * reg_list = R0 | PC
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x09U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x8001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_reg_read：返回 0x1000
+
+cpu_vcpu_mem_read：
+    第1次返回 VMM_OK，并通过输出参数写入普通寄存器数据 0x12345678
+    第2次返回 VMM_OK，并通过输出参数向 PC 写入 0x2000
+期望值
+return = VMM_OK
+regs.pc = 0x2004
+注释
+测试目的：验证无写回的 LDMIA 指令能够依次加载普通寄存器和 PC，并在执行结束后将 PC 增加 4。 用例类别：基于需求的测试 预置条件：构造合法的 LDMIA 指令；寄存器列表包含 R0 和 PC；两次内存读取均返回成功。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 reg_list=R0|PC 且不写回的 LDMIA 指令。 step4、设置基址读取值为 0x1000。 step5、设置普通寄存器读取成功。 step6、设置 PC 读取成功并写入 0x2000。 step7、调用 arm_inst_ldm。 step8、观察返回值和最终 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldm。 等价列表：普通寄存器和 PC 加载成功、不写回。 其它说明：覆盖普通寄存器读取成功、PC 读取成功、reg_list >> 15 为 true，以及最终 if (wback) 为 false。 通过准则：函数返回 VMM_OK，最终 PC 为 0x2004。
+ 
+⸻
+ 
+arm_inst_ldm.008.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x1B：LDMIB
+ *           P=1，U=1，W=1
+ *           increment-before，开启写回
+ * Rn       = 4
+ * reg_list = R0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x1BU << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x0001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_reg_read：返回 0x1000
+
+cpu_vcpu_mem_read：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证 increment-before 且开启写回的 LDM 指令正常完成加载，并执行 increment 写回分支。 用例类别：基于需求的测试 预置条件：构造 P=1、U=1、W=1 的合法指令；基址寄存器 R4 不在寄存器列表中；内存读取成功。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 LDMIB 写回指令，寄存器列表仅包含 R0。 step4、设置基址读取值为 0x1000。 step5、设置内存读取成功。 step6、调用 arm_inst_ldm。 step7、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldm。 等价列表：increment-before 加载成功并写回。 其它说明：覆盖写回合法性判断中 wback=true 且基址位不在列表；覆盖 address 计算中的 increment 和 before 组合；覆盖最终 wback=true 及内部 is_xx1xxx=true 的 increment 写回路径；reg_list >> 15 为 false。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+arm_inst_ldm.009.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static arch_regs_t regs;
+static unsigned int inst;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&regs, 0, sizeof(regs));
+
+regs.pc = 0x1000ULL;
+
+/*
+ * cond     = 0xE
+ * op       = 0x03：LDMDA
+ *           P=0，U=0，W=1
+ *           decrement-after，开启写回
+ * Rn       = 4
+ * reg_list = R0
+ */
+inst = (0xEU << ARM_INST_COND_SHIFT) |
+       (0x03U << ARM_INST_BRBLK_OP_START) |
+       (4U << ARM_INST_LDMSTM_RN_START) |
+       0x0001U;
+
+<<emulate_arm.arm_inst_ldm.inst>> = inst;
+<<emulate_arm.arm_inst_ldm.regs>> = &regs;
+<<emulate_arm.arm_inst_ldm.vcpu>> = &vcpu;
+Stub Processing
+cpu_vcpu_reg_read：返回 0x1000
+
+cpu_vcpu_mem_read：
+    第1次返回 VMM_OK
+期望值
+return = VMM_OK
+regs.pc = 0x1004
+注释
+测试目的：验证 decrement-after 且开启写回的 LDM 指令正常完成加载，并执行 decrement 写回分支。 用例类别：基于需求的测试 预置条件：构造 P=0、U=0、W=1 的合法指令；基址寄存器 R4 不在寄存器列表中；内存读取成功。 测试步骤： step1、清零测试对象。 step2、设置初始 PC。 step3、构造 LDMDA 写回指令，寄存器列表仅包含 R0。 step4、设置基址读取值为 0x1000。 step5、设置内存读取成功。 step6、调用 arm_inst_ldm。 step7、观察返回值和 PC。 用例来源：需求分析。 追踪ID：arm_inst_ldm。 等价列表：decrement-after 加载成功并写回。 其它说明：覆盖 address 计算中的 decrement 和 after 组合；覆盖最终 wback=true 及内部 is_xx1xxx=false 的 decrement 写回路径。与 arm_inst_ldm.006.FI 配合，使 decrement 分支中的 before/after 两种取值均被执行。 通过准则：函数返回 VMM_OK，PC 更新为 0x1004。
+ 
+⸻
+ 
+三、覆盖对应关系
+代码路径	对应用例
+Rn==15	001.IN
+Rn!=15 && reg_list==0	002.IN
+wback && Rn在reg_list中	003.IN
+wback=false 的短路路径	004.R、007.R
+条件不成立	004.R
+increment-after	005.FI
+decrement-before	006.FI
+普通寄存器读取失败	005.FI
+PC 读取失败	006.FI
+普通寄存器读取成功	007.R、008.R、009.R
+PC 读取成功	007.R
+reg_list bit15=false	008.R、009.R
+reg_list bit15=true	006.FI、007.R
+不写回	007.R
+increment-before 并写回	008.R
+decrement-after 并写回	009.R
+这 9 条已覆盖 arm_inst_ldm 中全部可达判断结果和错误返回路径。
