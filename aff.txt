@@ -1,0 +1,530 @@
+下面只重新给出 vmm_manager_vcpu_set_affinity 的完整方案。沿用最近确认的原则：
+	•	不调用 vmm_cpumask_set_cpu()。
+	•	不直接构造 cpumask.bits[]。
+	•	vmm_cpumask_test_cpu 直接重定义为变量控制。
+	•	vmm_cpumask_subset/and/weight/equal 是 inline，控制它们展开后调用的 __bitmap_* 子函数。
+	•	不使用 <<vmm_manager.mngr...>> 构造内部变量。
+	•	mngr.vcpu_affinity_mask 通过 Unit Appendix 模拟 vmm_manager_init() 的环境初始化。
+	•	不增加函数调用打点，不检查下层函数调用次数。
+	•		•	共 7 条用例，覆盖全部可达路径。
+ 
+⸻
+ 
+一、需要补充或沿用的 User Code
+已有同名变量或函数时直接复用，不要重复定义。
+1. User Global / Data
+/*
+ * 控制 is_percpu_vcpu() 返回值：
+ * 0 -> 普通 VCPU
+ * 1 -> per-CPU VCPU
+ */
+unsigned int vcast_is_percpu_ret;
+
+/*
+ * 控制重定义后的 vmm_cpumask_test_cpu：
+ * 0 -> 当前 HCPU 不在交集掩码中
+ * 1 -> 当前 HCPU 在交集掩码中
+ */
+unsigned int vcast_cpumask_test_cpu_ret;
+
+/*
+ * 控制 vmm_cpumask_subset 展开后调用的 __bitmap_subset。
+ */
+int vcast_bitmap_subset_ret;
+
+/*
+ * 控制 vmm_cpumask_weight 展开后调用的 __bitmap_weight。
+ * 0 -> 交集为空
+ * 非0 -> 交集非空
+ */
+unsigned int vcast_bitmap_weight_ret;
+
+/*
+ * 控制 vmm_manager_vcpu_get_hcpu 返回值。
+ */
+u32 vcast_get_hcpu_ret;
+
+/*
+ * 控制 vmm_timer_started 返回值。
+ */
+unsigned int vcast_timer_started_ret;
+
+/*
+ * 控制 vmm_manager_vcpu_set_hcpu 返回值。
+ */
+int vcast_set_hcpu_ret;
+
+/*
+ * Unit Appendix 环境初始化函数声明。
+ */
+void vcast_manager_prepare_affinity_store(void);
+ 
+⸻
+ 
+2. Unit Prefix User Code
+重定义 
+vmm_cpumask_test_cpu
+**改写目的：**避免调用真实的 vmm_cpumask_check()、test_bit() 及其运行时依赖，由测试用例直接控制当前 HCPU 是否位于掩码中。
+#include <vmm_cpumask.h>
+
+extern unsigned int vcast_cpumask_test_cpu_ret;
+
+#ifdef vmm_cpumask_test_cpu
+#undef vmm_cpumask_test_cpu
+#endif
+
+#define vmm_cpumask_test_cpu(cpu, cpumask)                       \
+    ((vcast_cpumask_test_cpu_ret != 0U) ? 1 : 0)
+该宏不访问：
+cpu
+cpumask
+因此不会读取 and_mask 的实际位数据。
+ 
+⸻
+ 
+3. Unit Appendix User Code
+mngr 是源文件内部的静态对象，因此该辅助函数应放在 Unit Appendix User Code，不要放在 Prefix。
+/*
+ * 本组所有成功路径都固定使用 vcpu.id=0，
+ * 因此一个元素的存储空间即可满足测试环境需求。
+ */
+static struct vmm_cpumask vcast_affinity_store;
+
+/*
+ * 改写目的：
+ * 模拟 vmm_manager_init() 为 mngr.vcpu_affinity_mask
+ * 分配有效存储，避免成功路径执行 memcpy 时发生空指针访问。
+ *
+ * 该函数只建立被测函数所要求的运行环境，
+ * 不控制任何判断结果。
+ */
+void vcast_manager_prepare_affinity_store(void)
+{
+    memset(&vcast_affinity_store,
+           0,
+           sizeof(vcast_affinity_store));
+
+    mngr.vcpu_affinity_mask = &vcast_affinity_store;
+}
+不要使用：
+<<vmm_manager.mngr.vcpu_affinity_mask>>
+ 
+⸻
+ 
+4. 公共 Test Case Init
+vcast_is_percpu_ret = 0U;
+vcast_cpumask_test_cpu_ret = 1U;
+
+vcast_bitmap_subset_ret = 1;
+vcast_bitmap_weight_ret = 1U;
+
+vcast_get_hcpu_ret = 0U;
+vcast_timer_started_ret = 0U;
+vcast_set_hcpu_ret = VMM_OK;
+
+/*
+ * 每条用例开始前重新准备 manager 内部 affinity 存储。
+ */
+vcast_manager_prepare_affinity_store();
+不需要设置：
+vmm_cpu_count
+因为影响控制流的 bitmap 结果都由 __bitmap_* Stub 控制。
+ 
+⸻
+ 
+二、需要配置的 Stub
+1. 
+is_percpu_vcpu
+return vcast_is_percpu_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+2. 
+__bitmap_subset
+vmm_cpumask_subset() 展开后由该子函数提供结果。
+return vcast_bitmap_subset_ret;
+ 
+⸻
+ 
+3. 
+__bitmap_equal
+真实语义中，本函数只需要在 subset 返回 0 时参与判断。当前合法测试只需要 equal 返回 false：
+return 0;
+不要为了覆盖不可行组合而令：
+subset = 0
+equal = 1
+原因在最后说明。
+ 
+⸻
+ 
+4. 
+__bitmap_and
+vmm_cpumask_and() 的返回值没有被被测函数使用，后续交集是否为空由 __bitmap_weight 控制。
+if (dst) {
+    dst[0] = 0UL;
+}
+
+return 0;
+写入 dst[0]=0 只是保证局部 and_mask 具有确定内容，不表示真实交集结果。
+ 
+⸻
+ 
+5. 
+__bitmap_weight
+return (int)vcast_bitmap_weight_ret;
+ 
+⸻
+ 
+6. 
+vmm_manager_vcpu_get_hcpu
+return vcast_get_hcpu_ret;
+ 
+⸻
+ 
+7. 
+vmm_timer_started
+return vcast_timer_started_ret ? TRUE : FALSE;
+ 
+⸻
+ 
+8. 
+__vmm_manager_good_hcpu
+本组迁移场景统一选择 CPU0：
+return 0U;
+不读取传入的 affinity 掩码。
+ 
+⸻
+ 
+9. 
+vmm_manager_vcpu_set_hcpu
+return vcast_set_hcpu_ret;
+ 
+⸻
+ 
+10. 
+vmm_manager_lock
+空实现，避免依赖未初始化的 mngr.lock：
+return;
+11. 
+vmm_manager_unlock
+return;
+ 
+⸻
+ 
+三、完整测试用例
+vmm_manager_vcpu_set_affinity.001.IN
+Begin User Code
+static struct vmm_cpumask cpu_mask;
+
+memset(&cpu_mask, 0, sizeof(cpu_mask));
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = NULL;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &cpu_mask;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 VCPU 指针为空时，函数在参数检查阶段返回失败。 用例类别：接口测试 预置条件：CPU affinity 掩码参数指向有效对象；VCPU 参数为 NULL。 测试步骤： step1、清零 CPU 掩码对象。 step2、设置 VCPU 入参为 NULL。 step3、调用 vmm_manager_vcpu_set_affinity。 step4、观察函数返回值。 用例来源：接口分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：VCPU 空指针。 其它说明：覆盖参数判断 !vcpu || !cpu_mask 中第一个条件为 true；由于短路求值，第二个条件不执行。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 CPU affinity 掩码指针为空时，函数返回参数错误。 用例类别：接口测试 预置条件：VCPU 参数指向有效对象；CPU 掩码参数为 NULL。 测试步骤： step1、清零 VCPU 对象。 step2、设置 CPU 掩码入参为 NULL。 step3、调用 vmm_manager_vcpu_set_affinity。 step4、观察函数返回值。 用例来源：接口分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：CPU affinity 掩码空指针。 其它说明：覆盖参数判断中第一个条件为 false、第二个条件为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.003.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask old_mask;
+static struct vmm_cpumask new_mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old_mask, 0, sizeof(old_mask));
+memset(&new_mask, 0, sizeof(new_mask));
+memset(&cpu_domains[0], 0, sizeof(cpu_domains[0]));
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+vcpu.id = 0U;
+vcpu.hcpu_domain_id = 0U;
+vcpu.need_check_domain = TRUE;
+vcpu.cpu_affinity = &old_mask;
+
+/*
+ * 普通 VCPU，执行 domain 检查。
+ */
+vcast_is_percpu_ret = 0U;
+
+/*
+ * 模拟请求掩码不是 domain 掩码的子集，
+ * 且两个掩码不相等。
+ */
+vcast_bitmap_subset_ret = 0;
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &new_mask;
+子函数配置
+__bitmap_subset：返回 0
+__bitmap_equal：返回 0
+期望值
+return = VMM_EFAIL
+vcpu.need_check_domain = TRUE
+注释
+测试目的：验证普通 VCPU 请求的 affinity 掩码不满足当前 HCPU domain 限制时，函数拒绝更新并返回失败。 用例类别：接口测试 预置条件：开启 domain 检查；VCPU 为普通 VCPU；控制 __bitmap_subset 和 __bitmap_equal 均返回 false。 测试步骤： step1、清零 VCPU、新旧 affinity 掩码和 domain 0。 step2、初始化 VCPU 调度锁。 step3、设置当前 domain ID 为 0并开启 domain 检查。 step4、设置 is_percpu_vcpu 返回 false。 step5、设置 subset 和 equal 判断均返回 false。 step6、调用 vmm_manager_vcpu_set_affinity。 step7、观察函数返回值。 用例来源：接口分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：请求 affinity 超出当前 domain。 其它说明：覆盖 need_check_domain=true、普通 VCPU、subset 判断失败以及 equal 判断失败的路径；函数在计算新旧 affinity 交集前返回。 通过准则：函数返回 VMM_EFAIL，need_check_domain 保持 true。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.004.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask old_mask;
+static struct vmm_cpumask new_mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old_mask, 0, sizeof(old_mask));
+memset(&new_mask, 0, sizeof(new_mask));
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+vcpu.id = 0U;
+vcpu.need_check_domain = TRUE;
+vcpu.cpu_affinity = &old_mask;
+
+/*
+ * per-CPU VCPU 跳过 domain 限制检查。
+ */
+vcast_is_percpu_ret = 1U;
+
+/*
+ * 模拟新旧 affinity 交集为空。
+ */
+vcast_bitmap_weight_ret = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &new_mask;
+子函数配置
+__bitmap_and：返回 0
+__bitmap_weight：返回 0
+期望值
+return = VMM_EINVALID
+vcpu.need_check_domain = TRUE
+注释
+测试目的：验证新 affinity 与当前 affinity 没有交集时，函数返回无效参数错误。 用例类别：接口测试 预置条件：设置 VCPU 为 per-CPU VCPU以跳过 domain 检查；控制交集权重返回 0。 测试步骤： step1、清零 VCPU 和新旧 affinity 掩码。 step2、初始化调度锁。 step3、设置当前 affinity 指向有效旧掩码。 step4、设置 is_percpu_vcpu 返回 true。 step5、设置 __bitmap_weight 返回 0。 step6、调用被测函数。 step7、观察函数返回值。 用例来源：接口分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：新旧 affinity 无交集。 其它说明：覆盖 domain 复合条件中 need_check_domain=true、!is_percpu_vcpu=false，以及交集权重为 0 的路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.005.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask old_mask;
+static struct vmm_cpumask new_mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old_mask, 0, sizeof(old_mask));
+memset(&new_mask, 0, sizeof(new_mask));
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+vcpu.id = 0U;
+vcpu.need_check_domain = FALSE;
+vcpu.cpu_affinity = &old_mask;
+
+/*
+ * 模拟新旧 affinity 交集非空。
+ */
+vcast_bitmap_weight_ret = 1U;
+
+/*
+ * 当前 HCPU 未知。
+ */
+vcast_get_hcpu_ret = VMM_VCPU_HCPU_UNKNOWN;
+
+/*
+ * timer 已启动，覆盖 manager 加锁路径。
+ */
+vcast_timer_started_ret = 1U;
+
+/*
+ * 注入设置新 HCPU 失败。
+ */
+vcast_set_hcpu_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &new_mask;
+子函数配置
+__bitmap_and：返回 0
+__bitmap_weight：返回 1
+__vmm_manager_good_hcpu：返回 0
+vmm_manager_vcpu_set_hcpu：返回 VMM_EIO
+期望值
+return = VMM_EIO
+vcpu.need_check_domain = FALSE
+注释
+测试目的：通过故障注入验证当前 HCPU 未知、重新选择 HCPU 后设置失败时，函数原样返回下层错误。 用例类别：故障注入测试 预置条件：关闭 domain 检查；新旧 affinity 交集非空；当前 HCPU 为未知；timer 已启动；HCPU 设置接口返回 VMM_EIO。 测试步骤： step1、初始化 VCPU和新旧 affinity 掩码。 step2、关闭 domain 检查并设置当前 affinity。 step3、设置交集权重为非零。 step4、设置当前 HCPU 为未知。 step5、设置 timer 已启动。 step6、注入 HCPU 设置失败。 step7、调用被测函数。 step8、观察返回值和 domain 检查状态。 用例来源：故障注入。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：重新设置 HCPU 失败。 其它说明：覆盖 hcpu==VMM_VCPU_HCPU_UNKNOWN 为 true、timer 已启动、locked=true、manager 解锁以及 rc!=0 的错误返回路径。由于 OR 短路，不执行 vmm_cpumask_test_cpu。 通过准则：函数返回 VMM_EIO，need_check_domain 保持 false。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.006.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask old_mask;
+static struct vmm_cpumask new_mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old_mask, 0, sizeof(old_mask));
+memset(&new_mask, 0, sizeof(new_mask));
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+vcpu.id = 0U;
+vcpu.need_check_domain = FALSE;
+vcpu.cpu_affinity = &old_mask;
+
+/*
+ * 新旧 affinity 交集非空。
+ */
+vcast_bitmap_weight_ret = 1U;
+
+/*
+ * 当前 HCPU 已知，但不在交集掩码中。
+ */
+vcast_get_hcpu_ret = 1U;
+vcast_cpumask_test_cpu_ret = 0U;
+
+/*
+ * timer 未启动，不获取 manager 锁。
+ */
+vcast_timer_started_ret = 0U;
+
+/*
+ * 重新设置 HCPU 成功。
+ */
+vcast_set_hcpu_ret = VMM_OK;
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &new_mask;
+子函数配置
+__bitmap_and：返回 0
+__bitmap_weight：返回 1
+__vmm_manager_good_hcpu：返回 0
+vmm_manager_vcpu_set_hcpu：返回 VMM_OK
+期望值
+return = VMM_OK
+vcpu.need_check_domain = TRUE
+注释
+测试目的：验证当前 HCPU 不在新旧 affinity 交集中、timer 未启动且 HCPU 迁移成功时，函数完成 affinity 更新并恢复 domain 检查。 用例类别：基于需求的测试 预置条件：关闭 domain 检查；交集非空；当前 HCPU 已知但不在交集中；timer 未启动；HCPU 设置成功；manager 内部 affinity 存储已初始化。 测试步骤： step1、清零并初始化 VCPU、新旧 affinity 掩码和调度锁。 step2、设置 vcpu.id=0 并关闭 domain 检查。 step3、设置交集权重为非零。 step4、设置当前 HCPU 为已知值。 step5、设置 vmm_cpumask_test_cpu 返回 false。 step6、设置 timer 未启动并配置 HCPU 设置成功。 step7、调用被测函数。 step8、观察返回值和 need_check_domain。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：需要迁移 HCPU且迁移成功。 其它说明：覆盖 hcpu!=UNKNOWN、当前 HCPU 不在交集、timer_started=false、locked=false、HCPU 设置成功、重新获取调度锁以及最终 need_check_domain=false 转换为 true。 通过准则：函数返回 VMM_OK，need_check_domain 更新为 true。
+ 
+⸻
+ 
+vmm_manager_vcpu_set_affinity.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+static struct vmm_cpumask old_mask;
+static struct vmm_cpumask new_mask;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&old_mask, 0, sizeof(old_mask));
+memset(&new_mask, 0, sizeof(new_mask));
+memset(&cpu_domains[0], 0, sizeof(cpu_domains[0]));
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+vcpu.id = 0U;
+vcpu.hcpu_domain_id = 0U;
+vcpu.need_check_domain = TRUE;
+vcpu.cpu_affinity = &old_mask;
+
+/*
+ * 普通 VCPU，执行 domain 检查。
+ */
+vcast_is_percpu_ret = 0U;
+
+/*
+ * 请求 affinity 满足 domain 子集要求。
+ */
+vcast_bitmap_subset_ret = 1;
+
+/*
+ * 新旧 affinity 交集非空。
+ */
+vcast_bitmap_weight_ret = 1U;
+
+/*
+ * 当前 HCPU 已知且位于交集中。
+ */
+vcast_get_hcpu_ret = 0U;
+vcast_cpumask_test_cpu_ret = 1U;
+
+<<vmm_manager.vmm_manager_vcpu_set_affinity.vcpu>> = &vcpu;
+<<vmm_manager.vmm_manager_vcpu_set_affinity.cpu_mask>> = &new_mask;
+子函数配置
+__bitmap_subset：返回 1
+__bitmap_equal：不调用
+__bitmap_and：返回 0
+__bitmap_weight：返回 1
+期望值
+return = VMM_OK
+vcpu.need_check_domain = TRUE
+注释
+测试目的：验证请求 affinity 满足 domain 限制、交集非空且当前 HCPU 已位于交集中时，无需迁移 HCPU即可完成 affinity 更新。 用例类别：基于需求的测试 预置条件：开启 domain 检查；VCPU 为普通 VCPU；subset 判断返回 true；交集权重非零；当前 HCPU 位于交集中；manager 内部 affinity 存储已初始化。 测试步骤： step1、初始化 VCPU、新旧 affinity 掩码、domain 0和调度锁。 step2、设置当前 domain ID 为 0并开启 domain 检查。 step3、设置 VCPU 为普通 VCPU。 step4、设置 subset 判断返回 true。 step5、设置交集权重为非零。 step6、设置当前 HCPU 已知且 vmm_cpumask_test_cpu 返回 true。 step7、调用被测函数。 step8、观察返回值和 domain 检查状态。 用例来源：需求分析。 追踪ID：vmm_manager_vcpu_set_affinity。 等价列表：无需迁移 HCPU的 affinity 更新。 其它说明：覆盖 domain 检查通过、subset 判断为 true、equal 短路不执行、交集非空、hcpu!=UNKNOWN、当前 HCPU 位于交集中，以及最终 need_check_domain 已为 true的路径。 通过准则：函数返回 VMM_OK，need_check_domain 保持 true。
+ 
+⸻
+ 
+四、覆盖对应关系
+源码路径	对应用例
+vcpu == NULL	.001.IN
+vcpu != NULL && cpu_mask == NULL	.002.IN
+need_check_domain == true	.003.IN、.004.IN、.007.R
+need_check_domain == false	.005.FI、.006.R
+普通 VCPU	.003.IN、.007.R
+per-CPU VCPU	.004.IN
+subset=false、equal=false	.003.IN
+subset=true	.007.R
+affinity 交集为空	.004.IN
+affinity 交集非空	.005.FI、.006.R、.007.R
+当前 HCPU 未知	.005.FI
+当前 HCPU 已知但不在交集中	.006.R
+当前 HCPU 位于交集中	.007.R
+timer 已启动	.005.FI
+timer 未启动	.006.R
+locked=true	.005.FI
+locked=false	.006.R
+HCPU 设置失败	.005.FI
+HCPU 设置成功	.006.R
+不需要迁移 HCPU	.007.R
+need_check_domain=false 恢复为 true	.006.R
+need_check_domain 已为 true	.007.R
+ 
+⸻
+ 
+五、唯一不可行的条件组合
+源码：
+if (!(vmm_cpumask_subset(cpu_mask, domain_mask)) &&
+    !vmm_cpumask_equal(cpu_mask, domain_mask)) {
+若覆盖报告显示下面的条件结果未覆盖：
+subset == false
+equal == true
+这是不可行组合。
+ 
+原因是：
+两个掩码相等
+⇒ 第一个掩码必然是第二个掩码的子集
+所以不存在：
+subset=false 且 equal=true
+的合法 cpumask 结果。
+ 
+本方案只使用符合真实函数契约的组合：
+subset=true
+以及：
+subset=false、equal=false
+不应通过 Stub 人为制造违反 cpumask 数学关系的返回组合。
