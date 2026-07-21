@@ -1,0 +1,800 @@
+下面继续这一批，先完成：
+vmm_manager_guest_vcpu_count
+vmm_manager_guest_vcpu
+vmm_manager_guest_next_vcpu
+vmm_manager_guest_vcpu_iterate
+manager_guest_reset_iter
+guest_reset_user_iter
+vmm_manager_guest_reset
+vmm_manager_guest_reset_timestamp
+本批不新增环境准备函数。Guest 的 VCPU 链表直接在每条 Begin User Code 中使用真实链表对象构造。
+后续排队：
+manager_guest_kick_iter
+vmm_manager_guest_kick
+manager_guest_reset_regs_iter
+vmm_manager_guest_reset_regs
+manager_guest_pause_iter / vmm_manager_guest_pause
+manager_guest_resume_iter / vmm_manager_guest_resume
+manager_guest_halt_iter / vmm_manager_guest_halt
+ 
+⸻
+ 
+一、需要补充或沿用的 User Code
+已有同名变量时直接复用，不要重复定义。
+1. User Global / Data
+/*
+ * 用于精确比较返回的 VCPU 指针。
+ */
+struct vmm_vcpu *vcast_expected_vcpu;
+
+/*
+ * 控制 vmm_manager_vcpu_reset 的返回序列。
+ * vmm_manager_guest_vcpu_iterate 最多使用前两项。
+ */
+int vcast_vcpu_reset_ret_seq[2];
+unsigned int vcast_vcpu_reset_seq_idx;
+
+/*
+ * 测试 guest_reset_user_iter 时，
+ * 控制 Stub 的 vmm_manager_guest_reset 返回值。
+ */
+int vcast_guest_reset_ret;
+
+/*
+ * 测试真实 vmm_manager_guest_reset 时，
+ * 控制其下层遍历和初始化接口。
+ */
+int vcast_guest_vcpu_iterate_ret;
+int vcast_guest_iterate_ret;
+int vcast_arch_guest_init_ret;
+int vcast_guest_aspace_reset_ret;
+
+/*
+ * 已在此前用例中定义过时直接复用。
+ */
+u64 vcast_timer_timestamp_ret;
+2. 公共 Test Case Init
+vcast_expected_vcpu = NULL;
+
+vcast_vcpu_reset_ret_seq[0] = VMM_OK;
+vcast_vcpu_reset_ret_seq[1] = VMM_OK;
+vcast_vcpu_reset_seq_idx = 0U;
+
+vcast_guest_reset_ret = VMM_OK;
+
+vcast_guest_vcpu_iterate_ret = VMM_OK;
+vcast_guest_iterate_ret = VMM_OK;
+vcast_arch_guest_init_ret = VMM_OK;
+vcast_guest_aspace_reset_ret = VMM_OK;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+ 
+⸻
+ 
+二、Stub User Code
+根据当前被测函数分别启用。测试某函数本身时，取消该函数的 Stub。
+vmm_manager_vcpu_reset
+unsigned int idx;
+int ret;
+
+idx = vcast_vcpu_reset_seq_idx;
+
+if (idx > 1U) {
+    idx = 1U;
+}
+
+ret = vcast_vcpu_reset_ret_seq[idx];
+
+if (vcast_vcpu_reset_seq_idx < 2U) {
+    vcast_vcpu_reset_seq_idx++;
+}
+
+return ret;
+该序列下标只用于提供不同返回值，不作为调用次数检查项。
+vmm_waitqueue_forced_remove
+return;
+vmm_manager_guest_reset
+仅测试 guest_reset_user_iter 时启用：
+return vcast_guest_reset_ret;
+vmm_manager_guest_vcpu_iterate
+仅测试真实 vmm_manager_guest_reset 及后续包装函数时启用：
+return vcast_guest_vcpu_iterate_ret;
+vmm_manager_guest_iterate
+仅测试真实 vmm_manager_guest_reset 的 serverVM 路径时启用：
+return vcast_guest_iterate_ret;
+arch_guest_init
+return vcast_arch_guest_init_ret;
+vmm_guest_aspace_reset
+return vcast_guest_aspace_reset_ret;
+vmm_timer_timestamp
+return vcast_timer_timestamp_ret;
+vmm_u_ioreq_unregister_backend_all
+return;
+日志相关函数不影响返回结果。若测试环境不能输出日志，可将其底层日志接口置为空实现，不需要打点。
+ 
+⸻
+ 
+三、
+vmm_manager_guest_vcpu_count
+最少需要 2 条用例。
+vmm_manager_guest_vcpu_count.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_vcpu_count.guest>> =
+    NULL;
+期望值
+return = 0
+注释
+测试目的：验证 Guest 指针为空时，函数返回 VCPU 数量 0。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 guest=NULL。 step2、调用 vmm_manager_guest_vcpu_count。 step3、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_vcpu_count。 等价列表：Guest 空指针。 其它说明：覆盖函数入口空指针判断为 true 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu_count.002.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+guest.vcpu_count = 3U;
+
+<<vmm_manager.vmm_manager_guest_vcpu_count.guest>> =
+    &guest;
+期望值
+return = 3
+注释
+测试目的：验证 Guest 指针有效时，函数返回 Guest 当前保存的 VCPU 数量。 用例类别：基于需求的测试 预置条件：Guest 对象有效；vcpu_count=3。 测试步骤： step1、清零 Guest 对象。 step2、设置 Guest VCPU 数量为 3。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_vcpu_count。 等价列表：有效 Guest 的 VCPU 数量查询。 其它说明：覆盖空指针判断为 false 和成员返回路径。 通过准则：函数返回 3。
+ 
+⸻
+ 
+四、
+vmm_manager_guest_vcpu
+最少需要 3 条用例。
+vmm_manager_guest_vcpu.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_vcpu.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_guest_vcpu.subid>> =
+    0U;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest 指针为空时，函数立即返回 NULL。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 guest=NULL。 step2、设置查询子编号为 0。 step3、调用 vmm_manager_guest_vcpu。 step4、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_vcpu。 等价列表：Guest 空指针。 其它说明：覆盖入口空指针检查，不访问 Guest VCPU 链表。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu.002.IN
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+vcpu0.subid = 1U;
+vcpu1.subid = 2U;
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+list_add_tail(&vcpu1.head, &guest.vcpu_list);
+
+<<vmm_manager.vmm_manager_guest_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_vcpu.subid>> =
+    3U;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest VCPU 链表中不存在指定子编号时，函数遍历完整个链表并返回 NULL。 用例类别：接口测试 预置条件：Guest 链表包含子编号 1和 2的两个 VCPU；查询子编号为 3。 测试步骤： step1、初始化 Guest VCPU 锁和链表。 step2、向链表加入两个 VCPU。 step3、设置两个 VCPU 的子编号分别为 1和 2。 step4、查询子编号 3。 step5、调用被测函数。 step6、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_vcpu。 等价列表：VCPU 子编号不存在。 其它说明：覆盖链表循环进入、子编号比较为 false、循环自然结束以及 found=false 后将返回指针置为 NULL 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu.003.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+vcpu0.subid = 1U;
+vcpu1.subid = 2U;
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+list_add_tail(&vcpu1.head, &guest.vcpu_list);
+
+vcast_expected_vcpu = &vcpu1;
+
+<<vmm_manager.vmm_manager_guest_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_vcpu.subid>> =
+    2U;
+期望值
+return = vcast_expected_vcpu
+注释
+测试目的：验证 Guest VCPU 链表中存在指定子编号时，函数返回匹配的 VCPU 地址。 用例类别：基于需求的测试 预置条件：Guest 链表包含子编号 1和 2的两个 VCPU；查询子编号为 2。 测试步骤： step1、初始化 Guest 及两个 VCPU 链表节点。 step2、按顺序将两个 VCPU 加入 Guest 链表。 step3、设置预期返回指针为第二个 VCPU。 step4、调用 vmm_manager_guest_vcpu 查询子编号 2。 step5、比较返回指针。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_vcpu。 等价列表：按子编号查找 VCPU 成功。 其它说明：覆盖比较为 false后继续遍历、比较为 true、设置 found=true 和 break 提前退出循环的路径。 通过准则：函数返回 vcast_expected_vcpu。
+ 
+⸻
+ 
+五、
+vmm_manager_guest_next_vcpu
+最少需要 5 条用例。
+vmm_manager_guest_next_vcpu.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_next_vcpu.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.current_vcpu>> =
+    NULL;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest 指针为空时，函数立即返回 NULL。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 Guest 和当前 VCPU 指针为 NULL。 step2、调用 vmm_manager_guest_next_vcpu。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_next_vcpu。 等价列表：Guest 空指针。 其它说明：覆盖 g==NULL 的提前返回路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_next_vcpu.002.IN
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.current_vcpu>> =
+    NULL;
+期望值
+return = NULL
+注释
+测试目的：验证当前 VCPU 为空且 Guest VCPU 链表为空时，函数返回 NULL。 用例类别：接口测试 预置条件：Guest 指针有效；当前 VCPU 为 NULL；Guest VCPU 链表为空。 测试步骤： step1、初始化 Guest 锁和空链表。 step2、设置当前 VCPU 为 NULL。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_next_vcpu。 等价列表：空 VCPU 链表的首次查询。 其它说明：覆盖 !current_vcpu 为 true，以及 !list_empty 为 false 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_next_vcpu.003.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+INIT_LIST_HEAD(&vcpu0.head);
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+
+vcast_expected_vcpu = &vcpu0;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.current_vcpu>> =
+    NULL;
+期望值
+return = vcast_expected_vcpu
+注释
+测试目的：验证当前 VCPU 为空且 Guest 链表非空时，函数返回链表中的第一个 VCPU。 用例类别：基于需求的测试 预置条件：Guest VCPU 链表包含一个 VCPU；当前 VCPU 为 NULL。 测试步骤： step1、初始化 Guest 和 VCPU 链表节点。 step2、将 VCPU 加入 Guest 链表。 step3、设置预期返回指针。 step4、调用被测函数。 step5、比较返回指针。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_next_vcpu。 等价列表：首次取得 Guest 第一个 VCPU。 其它说明：覆盖 !current_vcpu=true、链表非空和 list_first_entry 返回路径。 通过准则：函数返回 vcast_expected_vcpu。
+ 
+⸻
+ 
+vmm_manager_guest_next_vcpu.004.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+INIT_LIST_HEAD(&vcpu0.head);
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.current_vcpu>> =
+    &vcpu0;
+期望值
+return = NULL
+注释
+测试目的：验证当前 VCPU 已是 Guest 链表最后一个节点时，函数返回 NULL。 用例类别：基于需求的测试 预置条件：Guest 链表仅包含一个 VCPU；当前 VCPU 指向该节点。 测试步骤： step1、初始化 Guest 和单节点 VCPU 链表。 step2、设置当前 VCPU 为链表唯一节点。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、边界值分析。 追溯ID：vmm_manager_guest_next_vcpu。 等价列表：当前 VCPU 为最后一个节点。 其它说明：覆盖 !current_vcpu=false 和 !list_is_last=false 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_next_vcpu.005.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+list_add_tail(&vcpu1.head, &guest.vcpu_list);
+
+vcast_expected_vcpu = &vcpu1;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_next_vcpu.current_vcpu>> =
+    &vcpu0;
+期望值
+return = vcast_expected_vcpu
+注释
+测试目的：验证当前 VCPU 后仍存在链表节点时，函数返回当前 VCPU 的下一个节点。 用例类别：基于需求的测试 预置条件：Guest 链表依次包含两个 VCPU；当前 VCPU 为第一个节点。 测试步骤： step1、初始化 Guest 和两个 VCPU 节点。 step2、依次将两个 VCPU 加入 Guest 链表。 step3、设置当前 VCPU 为第一个节点。 step4、设置预期返回指针为第二个节点。 step5、调用被测函数。 step6、比较返回指针。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_next_vcpu。 等价列表：取得当前 VCPU 的后继节点。 其它说明：覆盖 current_vcpu!=NULL、当前节点不是最后节点以及后继节点返回路径。 通过准则：函数返回 vcast_expected_vcpu。
+ 
+⸻
+ 
+六、
+vmm_manager_guest_vcpu_iterate
+最少需要 4 条用例。
+vmm_manager_guest_vcpu_iterate.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.iter>> =
+    manager_guest_reset_iter;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 Guest 指针为空时，VCPU 遍历接口返回失败。 用例类别：接口测试 预置条件：Guest 入参为 NULL；回调函数有效。 测试步骤： step1、设置 Guest 指针为 NULL。 step2、设置遍历回调为 manager_guest_reset_iter。 step3、调用 vmm_manager_guest_vcpu_iterate。 step4、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_vcpu_iterate。 等价列表：Guest 空指针。 其它说明：覆盖参数复合判断中 !guest 为 true 的短路路径，!iter 不求值。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu_iterate.002.IN
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.iter>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 Guest 指针有效但遍历回调为空时，函数返回失败。 用例类别：接口测试 预置条件：Guest 指针有效；回调函数指针为 NULL。 测试步骤： step1、初始化 Guest 锁和 VCPU 链表。 step2、设置遍历回调为 NULL。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_vcpu_iterate。 等价列表：遍历回调空指针。 其它说明：覆盖参数复合判断中 !guest=false、!iter=true 的路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu_iterate.003.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+vcpu0.halt_flag = TRUE;
+vcpu1.halt_flag = TRUE;
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+list_add_tail(&vcpu1.head, &guest.vcpu_list);
+
+vcast_vcpu_reset_seq_idx = 0U;
+vcast_vcpu_reset_ret_seq[0] = VMM_OK;
+vcast_vcpu_reset_ret_seq[1] = VMM_OK;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.iter>> =
+    manager_guest_reset_iter;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_OK
+vcpu0.halt_flag = FALSE
+vcpu1.halt_flag = FALSE
+注释
+测试目的：验证 Guest VCPU 遍历过程中所有回调均返回成功时，函数完成整个链表遍历并返回 VMM_OK。 用例类别：基于需求的测试 预置条件：Guest 链表包含两个 VCPU；两次 VCPU reset 均返回成功。 测试步骤： step1、初始化 Guest 和两个 VCPU 链表节点。 step2、将两个 VCPU 的 halt_flag 设置为 true。 step3、将两个 VCPU 加入 Guest 链表。 step4、配置两次 reset 返回 VMM_OK。 step5、以 manager_guest_reset_iter 作为回调调用遍历函数。 step6、观察返回值及两个 halt_flag。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_vcpu_iterate。 等价列表：全部 VCPU 回调成功。 其它说明：覆盖循环多次执行、回调返回 0、if(rc) 为 false和循环自然结束路径。 通过准则：函数返回 VMM_OK，两个 VCPU 的 halt_flag 均为 false。
+ 
+⸻
+ 
+vmm_manager_guest_vcpu_iterate.004.FI
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+memset(&guest, 0, sizeof(guest));
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+vcpu0.halt_flag = TRUE;
+vcpu1.halt_flag = TRUE;
+
+list_add_tail(&vcpu0.head, &guest.vcpu_list);
+list_add_tail(&vcpu1.head, &guest.vcpu_list);
+
+vcast_vcpu_reset_seq_idx = 0U;
+vcast_vcpu_reset_ret_seq[0] = VMM_EIO;
+vcast_vcpu_reset_ret_seq[1] = VMM_OK;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.iter>> =
+    manager_guest_reset_iter;
+
+<<vmm_manager.vmm_manager_guest_vcpu_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_EIO
+vcpu0.halt_flag = FALSE
+vcpu1.halt_flag = TRUE
+注释
+测试目的：通过故障注入验证首个 VCPU 回调返回错误时，函数停止遍历并返回该错误码。 用例类别：故障注入测试 预置条件：Guest 链表包含两个 VCPU；第一个 VCPU reset 返回 VMM_EIO。 测试步骤： step1、初始化两个 VCPU 并将 halt_flag 设置为 true。 step2、将两个 VCPU 按顺序加入 Guest 链表。 step3、设置第一次 reset 返回 VMM_EIO。 step4、调用 VCPU 遍历函数。 step5、观察返回值及两个 halt_flag。 用例来源：故障注入。 追溯ID：vmm_manager_guest_vcpu_iterate。 等价列表：首个 VCPU 回调失败。 其它说明：覆盖 rc!=0 和 break 提前退出路径；第二个 VCPU 未被回调处理，其 halt_flag 保持 true。 通过准则：函数返回 VMM_EIO，第一个 halt_flag 为 false，第二个保持 true。
+ 
+⸻
+ 
+七、
+manager_guest_reset_iter
+manager_guest_reset_iter.001.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+static int dummy_priv;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.halt_flag = TRUE;
+
+vcast_vcpu_reset_seq_idx = 0U;
+vcast_vcpu_reset_ret_seq[0] = VMM_EIO;
+
+<<vmm_manager.manager_guest_reset_iter.vcpu>> =
+    &vcpu;
+
+<<vmm_manager.manager_guest_reset_iter.priv>> =
+    &dummy_priv;
+期望值
+return = VMM_EIO
+vcpu.halt_flag = FALSE
+注释
+测试目的：通过故障注入验证 Guest reset 遍历回调清除 VCPU halt 标志、强制移出等待队列，并原样返回 VCPU reset 错误。 用例类别：故障注入测试 预置条件：VCPU 的 halt_flag=true；VCPU reset 返回 VMM_EIO。 测试步骤： step1、清零 VCPU 并设置 halt 标志。 step2、配置 VCPU reset 返回错误。 step3、调用 manager_guest_reset_iter。 step4、观察返回值和 halt 标志。 用例来源：故障注入。 追溯ID：manager_guest_reset_iter。 等价列表：VCPU reset 失败。 其它说明：该函数无判断分支；一条故障注入用例即可覆盖全部语句及错误返回传播。 通过准则：函数返回 VMM_EIO，halt_flag 更新为 false。
+ 
+⸻
+ 
+八、
+guest_reset_user_iter
+最少需要 4 条用例。
+guest_reset_user_iter.001.IN
+Begin User Code
+static int dummy_priv;
+
+<<vmm_manager.guest_reset_user_iter.guest>> =
+    NULL;
+
+<<vmm_manager.guest_reset_user_iter.priv>> =
+    &dummy_priv;
+期望值
+return = VMM_OK
+注释
+测试目的：验证 Guest 指针为空时，回调不执行 reset 并返回 VMM_OK。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 Guest 指针为 NULL。 step2、调用 guest_reset_user_iter。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：guest_reset_user_iter。 等价列表：Guest 空指针。 其它说明：覆盖复合条件中 guest 为 false 的短路路径，strstr 不执行。priv 在函数内部置 NULL属于局部赋值，不作为检查项。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+guest_reset_user_iter.002.R
+Begin User Code
+static struct vmm_guest guest;
+static int dummy_priv;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "serverVM",
+        sizeof(guest.name));
+
+<<vmm_manager.guest_reset_user_iter.guest>> =
+    &guest;
+
+<<vmm_manager.guest_reset_user_iter.priv>> =
+    &dummy_priv;
+期望值
+return = VMM_OK
+注释
+测试目的：验证 Guest 指针有效但名称不包含 user 时，回调不执行 reset 并返回成功。 用例类别：基于需求的测试 预置条件：Guest 名称为 serverVM。 测试步骤： step1、清零 Guest 对象。 step2、设置 Guest 名称为不包含 user 的字符串。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：guest_reset_user_iter。 等价列表：非 user Guest。 其它说明：覆盖复合条件中 Guest 有效但 strstr 返回 NULL 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+guest_reset_user_iter.003.FI
+Begin User Code
+static struct vmm_guest guest;
+static int dummy_priv;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "user-android",
+        sizeof(guest.name));
+
+vcast_guest_reset_ret = VMM_EIO;
+
+<<vmm_manager.guest_reset_user_iter.guest>> =
+    &guest;
+
+<<vmm_manager.guest_reset_user_iter.priv>> =
+    &dummy_priv;
+Stub Processing
+vmm_manager_guest_reset：
+    返回 VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 user Guest reset 失败时，回调返回 reset 错误。 用例类别：故障注入测试 预置条件：Guest 名称包含 user；Guest reset 返回 VMM_EIO。 测试步骤： step1、构造名称为 user-android 的 Guest。 step2、设置 Guest reset 返回错误。 step3、调用 guest_reset_user_iter。 step4、观察返回值。 用例来源：故障注入。 追溯ID：guest_reset_user_iter。 等价列表：user Guest reset 失败。 其它说明：覆盖外层复合条件为 true和内部 ret!=0 的错误日志路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+guest_reset_user_iter.004.R
+Begin User Code
+static struct vmm_guest guest;
+static int dummy_priv;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "user-android",
+        sizeof(guest.name));
+
+vcast_guest_reset_ret = VMM_OK;
+
+<<vmm_manager.guest_reset_user_iter.guest>> =
+    &guest;
+
+<<vmm_manager.guest_reset_user_iter.priv>> =
+    &dummy_priv;
+Stub Processing
+vmm_manager_guest_reset：
+    返回 VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 user Guest reset 成功时，回调返回 VMM_OK。 用例类别：基于需求的测试 预置条件：Guest 名称包含 user；Guest reset 返回成功。 测试步骤： step1、构造 user Guest。 step2、设置 Guest reset 返回 VMM_OK。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：guest_reset_user_iter。 等价列表：user Guest reset 成功。 其它说明：覆盖内部 ret==0 的成功日志路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+九、
+vmm_manager_guest_reset
+最少需要 5 条用例。
+测试该函数时，取消 vmm_manager_guest_reset Stub，启用其下层 Stub。
+vmm_manager_guest_reset.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_reset.guest>> =
+    NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 Guest 指针为空时，函数返回失败。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 guest=NULL。 step2、调用 vmm_manager_guest_reset。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_reset。 等价列表：Guest 空指针。 其它说明：覆盖入口空指针检查，不执行任何 reset 流程。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_reset.002.FI
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "normal-guest",
+        sizeof(guest.name));
+
+guest.reset_count = 2U;
+guest.reset_tstamp = 0ULL;
+guest.state = RUNNING;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+vcast_guest_vcpu_iterate_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_guest_reset.guest>> =
+    &guest;
+Stub Processing
+vmm_manager_guest_vcpu_iterate：
+    返回 VMM_EIO
+期望值
+return = VMM_EIO
+guest.reset_count = 3
+guest.reset_tstamp = 0x12345678
+guest.state = RUNNING
+注释
+测试目的：通过故障注入验证 Guest VCPU reset 遍历失败时，函数返回遍历错误且不继续执行架构和地址空间 reset。 用例类别：故障注入测试 预置条件：Guest 名称不包含 serverVM；VCPU 遍历返回 VMM_EIO。 测试步骤： step1、构造普通 Guest 并设置初始 reset 信息。 step2、配置时间戳返回固定值。 step3、注入 VCPU 遍历失败。 step4、调用被测函数。 step5、观察返回值、reset 计数、时间戳和 Guest 状态。 用例来源：故障注入。 追溯ID：vmm_manager_guest_reset。 等价列表：Guest VCPU reset 遍历失败。 其它说明：覆盖 serverVM 判断为 false、reset 计数和时间戳更新、rc!=0 提前返回路径。由于提前返回，Guest 状态保持原值。 通过准则：函数返回 VMM_EIO，reset 计数增加 1，时间戳更新，状态保持 RUNNING。
+ 
+⸻
+ 
+vmm_manager_guest_reset.003.FI
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "serverVM",
+        sizeof(guest.name));
+
+guest.state = RUNNING;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+
+/*
+ * serverVM 分支中的 guest_iterate 返回值随后会被覆盖。
+ */
+vcast_guest_iterate_ret = VMM_EIO;
+
+vcast_guest_vcpu_iterate_ret = VMM_OK;
+vcast_arch_guest_init_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_guest_reset.guest>> =
+    &guest;
+Stub Processing
+vmm_manager_guest_iterate：
+    返回 VMM_EIO
+
+vmm_manager_guest_vcpu_iterate：
+    返回 VMM_OK
+
+arch_guest_init：
+    返回 VMM_EIO
+期望值
+return = VMM_EIO
+guest.reset_count = 1
+guest.reset_tstamp = 0x12345678
+guest.state = RESET
+注释
+测试目的：通过故障注入验证 serverVM reset 时执行 user Guest 清理流程，并在架构 Guest 初始化失败后返回错误。 用例类别：故障注入测试 预置条件：Guest 名称为 serverVM；VCPU 遍历成功；arch_guest_init 返回 VMM_EIO。 测试步骤： step1、构造 serverVM Guest。 step2、配置 serverVM 相关 Guest 遍历返回错误。 step3、配置 VCPU reset 遍历成功。 step4、注入架构 Guest 初始化失败。 step5、调用被测函数。 step6、观察返回值及 Guest 状态。 用例来源：故障注入。 追溯ID：vmm_manager_guest_reset。 等价列表：serverVM 架构初始化失败。 其它说明：覆盖 serverVM 判断为 true、后端注销和 user Guest 遍历调用；guest_iterate 的返回值会被后续 VCPU 遍历结果覆盖。覆盖 arch_guest_init 非零和地址空间 reset 不执行的路径。函数末尾仍将状态设置为 RESET。 通过准则：函数返回 VMM_EIO，Guest 状态为 RESET。
+ 
+⸻
+ 
+vmm_manager_guest_reset.004.FI
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "normal-guest",
+        sizeof(guest.name));
+
+guest.state = RUNNING;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+vcast_guest_vcpu_iterate_ret = VMM_OK;
+vcast_arch_guest_init_ret = VMM_OK;
+vcast_guest_aspace_reset_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_guest_reset.guest>> =
+    &guest;
+Stub Processing
+vmm_manager_guest_vcpu_iterate：
+    返回 VMM_OK
+
+arch_guest_init：
+    返回 VMM_OK
+
+vmm_guest_aspace_reset：
+    返回 VMM_EIO
+期望值
+return = VMM_EIO
+guest.state = RESET
+guest.reset_count = 1
+guest.reset_tstamp = 0x12345678
+注释
+测试目的：通过故障注入验证架构 Guest 初始化成功但 Guest 地址空间 reset 失败时，函数返回地址空间错误并将 Guest 状态置为 RESET。 用例类别：故障注入测试 预置条件：VCPU 遍历成功；架构 Guest 初始化成功；地址空间 reset 返回 VMM_EIO。 测试步骤： step1、构造普通 Guest。 step2、设置 VCPU 遍历和架构初始化成功。 step3、注入地址空间 reset 失败。 step4、调用被测函数。 step5、观察返回值和 Guest 状态。 用例来源：故障注入。 追溯ID：vmm_manager_guest_reset。 等价列表：Guest 地址空间 reset 失败。 其它说明：覆盖 !(rc=arch_guest_init) 为 true、执行地址空间 reset并传播其错误值的路径。 通过准则：函数返回 VMM_EIO，Guest 状态为 RESET。
+ 
+⸻
+ 
+vmm_manager_guest_reset.005.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "normal-guest",
+        sizeof(guest.name));
+
+guest.reset_count = 4U;
+guest.state = RUNNING;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+vcast_guest_vcpu_iterate_ret = VMM_OK;
+vcast_arch_guest_init_ret = VMM_OK;
+vcast_guest_aspace_reset_ret = VMM_OK;
+
+<<vmm_manager.vmm_manager_guest_reset.guest>> =
+    &guest;
+期望值
+return = VMM_OK
+guest.reset_count = 5
+guest.reset_tstamp = 0x12345678
+guest.state = RESET
+注释
+测试目的：验证普通 Guest 的 VCPU reset、架构初始化和地址空间 reset 均成功时，函数完成完整 reset 流程。 用例类别：基于需求的测试 预置条件：Guest 指针有效；所有下层 reset 和初始化接口均返回成功。 测试步骤： step1、构造普通 Guest 并设置初始 reset 计数。 step2、配置时间戳返回值。 step3、配置 VCPU 遍历、架构初始化和地址空间 reset 均成功。 step4、调用 vmm_manager_guest_reset。 step5、观察返回值和 Guest reset 状态。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reset。 等价列表：Guest 正常 reset。 其它说明：覆盖 serverVM 判断为 false、VCPU 遍历成功、架构初始化成功、地址空间 reset 成功和正常返回路径。 通过准则：函数返回 VMM_OK，reset 计数增加 1，时间戳更新，状态为 RESET。
+ 
+⸻
+ 
+十、
+vmm_manager_guest_reset_timestamp
+最少需要 2 条用例。
+vmm_manager_guest_reset_timestamp.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_reset_timestamp.guest>> =
+    NULL;
+期望值
+return = 0
+注释
+测试目的：验证 Guest 指针为空时，函数返回时间戳 0。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 Guest 指针为 NULL。 step2、调用 vmm_manager_guest_reset_timestamp。 step3、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_reset_timestamp。 等价列表：Guest 空指针。 其它说明：覆盖三目表达式中 Guest 指针为 false 的路径。 通过准则：函数返回 0。
+ 
+⸻
+ 
+vmm_manager_guest_reset_timestamp.002.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+guest.reset_tstamp = 0x1122334455667788ULL;
+
+<<vmm_manager.vmm_manager_guest_reset_timestamp.guest>> =
+    &guest;
+期望值
+return = 0x1122334455667788
+注释
+测试目的：验证 Guest 指针有效时，函数返回 Guest 保存的最近 reset 时间戳。 用例类别：基于需求的测试 预置条件：Guest 的 reset_tstamp 设置为固定值。 测试步骤： step1、清零 Guest 对象。 step2、设置 reset 时间戳。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reset_timestamp。 等价列表：有效 Guest reset 时间戳查询。 其它说明：覆盖三目表达式中 Guest 指针为 true 的路径。 通过准则：函数返回 0x1122334455667788。
