@@ -1,0 +1,816 @@
+下面给出 vmm_manager_vcpu_orphan_create 和 vmm_manager_vcpu_orphan_destroy 的完整构造方案。用例名称继续使用：
+函数名.三位序号.R
+函数名.三位序号.IN
+函数名.三位序号.FI
+注释字段统一改为：
+追溯ID
+ 
+⸻
+ 
+一、共用 User Code
+已有同名变量或 Stub 时直接复用，不要重复定义。
+1. User Global / Data
+/*
+ * 已在前面函数中使用过的变量可直接复用。
+ */
+extern unsigned int vcast_timer_started_ret;
+extern unsigned int vcast_is_percpu_ret;
+extern u32 vcast_good_hcpu_ret;
+
+/* 控制 vmm_malloc 是否返回 NULL。 */
+unsigned int vcast_malloc_fail;
+
+/* 控制架构初始化、反初始化返回值。 */
+int vcast_arch_vcpu_init_ret;
+int vcast_arch_vcpu_deinit_ret;
+
+/*
+ * 控制 vmm_manager_vcpu_set_state 的返回序列。
+ *
+ * create 只使用第 1 项；
+ * destroy 最多调用两次。
+ */
+int vcast_vcpu_set_state_ret_seq[2];
+unsigned int vcast_vcpu_set_state_seq_idx;
+
+/* 控制 vmm_timer_timestamp 返回值。 */
+u64 vcast_timer_timestamp_ret;
+
+/*
+ * vmm_malloc 成功时返回的固定存储。
+ * 被测函数只保存该地址，不会真实使用其中的数据。
+ */
+static unsigned char vcast_orphan_stack_store[256];
+
+/* Unit Appendix 中环境初始化函数的声明。 */
+struct vmm_vcpu *
+vcast_manager_prepare_orphan_create_env(int first_available_index);
+
+void vcast_manager_prepare_orphan_destroy_env(
+    struct vmm_vcpu *vcpu);
+ 
+⸻
+ 
+2. 公共 Test Case Init
+vcast_timer_started_ret = 0U;
+vcast_is_percpu_ret = 1U;
+vcast_good_hcpu_ret = 0U;
+
+vcast_malloc_fail = 0U;
+
+vcast_arch_vcpu_init_ret = VMM_OK;
+vcast_arch_vcpu_deinit_ret = VMM_OK;
+
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+vcast_vcpu_set_state_ret_seq[1] = VMM_OK;
+vcast_vcpu_set_state_seq_idx = 0U;
+
+vcast_timer_timestamp_ret = 0x12345678ULL;
+
+memset(vcast_orphan_stack_store,
+       0,
+       sizeof(vcast_orphan_stack_store));
+ 
+⸻
+ 
+二、Unit Appendix User Code
+mngr 是源文件内部的静态对象，不能使用：
+<<vmm_manager.mngr.xxx>>
+构造。下面的辅助函数放在 Unit Appendix User Code，用于模拟 vmm_manager_init() 已为 manager 内部数组建立存储的运行环境。
+static struct vmm_vcpu
+vcast_orphan_vcpu_array[CONFIG_MAX_VCPU_COUNT];
+
+static bool
+vcast_orphan_vcpu_avail_array[CONFIG_MAX_VCPU_COUNT];
+
+static struct vmm_cpumask
+vcast_orphan_affinity_array[CONFIG_MAX_VCPU_COUNT];
+
+static u32
+vcast_orphan_domain_id_array[CONFIG_MAX_VCPU_COUNT];
+
+/*
+ * 改写目的：
+ * 为 orphan_create 准备 manager 内部 VCPU 数组、可用状态数组、
+ * affinity 数组、domain ID 数组和孤儿 VCPU 链表。
+ *
+ * first_available_index：
+ *   -1  -> 没有可用 VCPU；
+ *   0及以上有效索引 -> 对应 VCPU 可用。
+ *
+ * 返回值：
+ *   对应的可用 VCPU 地址；没有可用 VCPU 时返回 NULL。
+ */
+struct vmm_vcpu *
+vcast_manager_prepare_orphan_create_env(int first_available_index)
+{
+    u32 i;
+
+    memset(vcast_orphan_vcpu_array,
+           0,
+           sizeof(vcast_orphan_vcpu_array));
+
+    memset(vcast_orphan_vcpu_avail_array,
+           0,
+           sizeof(vcast_orphan_vcpu_avail_array));
+
+    memset(vcast_orphan_affinity_array,
+           0,
+           sizeof(vcast_orphan_affinity_array));
+
+    memset(vcast_orphan_domain_id_array,
+           0,
+           sizeof(vcast_orphan_domain_id_array));
+
+    mngr.vcpu_array = vcast_orphan_vcpu_array;
+    mngr.vcpu_avail_array = vcast_orphan_vcpu_avail_array;
+    mngr.vcpu_affinity_mask = vcast_orphan_affinity_array;
+    mngr.vcpu_hcpu_domain_id = vcast_orphan_domain_id_array;
+    mngr.vcpu_count = 0U;
+
+    INIT_LIST_HEAD(&mngr.orphan_vcpu_list);
+
+    for (i = 0U; i < (u32)CONFIG_MAX_VCPU_COUNT; ++i) {
+        vcast_orphan_vcpu_array[i].id = i;
+        vcast_orphan_vcpu_avail_array[i] = FALSE;
+        INIT_LIST_HEAD(&vcast_orphan_vcpu_array[i].head);
+    }
+
+    if ((first_available_index >= 0) &&
+        ((u32)first_available_index <
+            (u32)CONFIG_MAX_VCPU_COUNT)) {
+        vcast_orphan_vcpu_avail_array[
+            (u32)first_available_index] = TRUE;
+
+        return &vcast_orphan_vcpu_array[
+            (u32)first_available_index];
+    }
+
+    return NULL;
+}
+
+/*
+ * 改写目的：
+ * 为 orphan_destroy 准备可用状态数组、孤儿 VCPU 链表和计数。
+ * 传入的 VCPU 被视为当前已创建、尚未释放的孤儿 VCPU。
+ */
+void vcast_manager_prepare_orphan_destroy_env(
+    struct vmm_vcpu *vcpu)
+{
+    u32 i;
+
+    memset(vcast_orphan_vcpu_avail_array,
+           0,
+           sizeof(vcast_orphan_vcpu_avail_array));
+
+    memset(vcast_orphan_affinity_array,
+           0,
+           sizeof(vcast_orphan_affinity_array));
+
+    memset(vcast_orphan_domain_id_array,
+           0,
+           sizeof(vcast_orphan_domain_id_array));
+
+    mngr.vcpu_avail_array = vcast_orphan_vcpu_avail_array;
+    mngr.vcpu_affinity_mask = vcast_orphan_affinity_array;
+    mngr.vcpu_hcpu_domain_id = vcast_orphan_domain_id_array;
+    mngr.vcpu_count = 1U;
+
+    INIT_LIST_HEAD(&mngr.orphan_vcpu_list);
+
+    for (i = 0U; i < (u32)CONFIG_MAX_VCPU_COUNT; ++i) {
+        vcast_orphan_vcpu_avail_array[i] = TRUE;
+    }
+
+    if (!vcpu ||
+        ((u32)vcpu->id >=
+            (u32)CONFIG_MAX_VCPU_COUNT)) {
+        return;
+    }
+
+    vcast_orphan_vcpu_avail_array[vcpu->id] = FALSE;
+
+    INIT_LIST_HEAD(&vcpu->head);
+    list_add_tail(&vcpu->head, &mngr.orphan_vcpu_list);
+}
+ 
+⸻
+ 
+三、共用 Stub 配置
+vmm_timer_started
+return vcast_timer_started_ret ? TRUE : FALSE;
+is_percpu_vcpu
+沿用此前方案：
+return vcast_is_percpu_ret ? TRUE : FALSE;
+__vmm_manager_good_hcpu
+return vcast_good_hcpu_ret;
+vmm_manager_lock
+return;
+vmm_manager_unlock
+return;
+vmm_scheduler_set_hcpu_raw
+当前 UUT 不验证调度器内部状态：
+return;
+vmm_scheduler_set_state_raw
+return;
+vmm_malloc
+if (vcast_malloc_fail) {
+    return NULL;
+}
+
+return (void *)vcast_orphan_stack_store;
+vmm_free
+return;
+vmm_timer_timestamp
+return vcast_timer_timestamp_ret;
+arch_vcpu_init
+return vcast_arch_vcpu_init_ret;
+arch_vcpu_deinit
+return vcast_arch_vcpu_deinit_ret;
+vmm_manager_vcpu_set_state
+unsigned int idx;
+int ret;
+
+idx = vcast_vcpu_set_state_seq_idx;
+
+if (idx > 1U) {
+    idx = 1U;
+}
+
+ret = vcast_vcpu_set_state_ret_seq[idx];
+
+if (vcast_vcpu_set_state_seq_idx < 2U) {
+    vcast_vcpu_set_state_seq_idx++;
+}
+
+return ret;
+该下标只用于提供返回序列，不作为调用次数检查项。
+vmm_waitqueue_forced_remove
+return;
+vmm_manager_vcpu_resource_flush
+该辅助函数已有独立测试时，在本 UUT 中使用空 Stub：
+return;
+若当前 VectorCAST 环境不能 Stub 同一单元内的静态函数，则在 destroy 用例中保留：
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+真实 vmm_manager_vcpu_resource_flush() 将处理空资源链表。
+strlcpy
+本组使用真实实现，不 Stub。
+ 
+⸻
+ 
+四、
+vmm_manager_vcpu_orphan_create
+最少使用 10 条用例。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> = NULL;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> = NULL;
+期望值
+return = NULL
+注释
+测试目的：验证 VCPU 名称指针为空时，函数在参数检查阶段返回 NULL。 用例类别：接口测试 预置条件：名称参数为 NULL；其他数值参数合法；affinity 参数为 NULL。 测试步骤： step1、设置 name=NULL。 step2、设置非零启动地址和时间片。 step3、设置 affinity=NULL。 step4、调用 vmm_manager_vcpu_orphan_create。 step5、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：名称空指针。 其它说明：覆盖 affinity 三目表达式的 false 路径，以及参数复合判断中 name==NULL 为 true的短路路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.002.IN
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "orphan-vcpu";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：验证启动地址为 0 时，函数返回 NULL。 用例类别：接口测试 预置条件：名称和 affinity 指针有效；start_pc=0；时间片非零。 测试步骤： step1、构造有效名称和 affinity 对象。 step2、设置启动地址为 0。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：无效启动地址。 其它说明：覆盖 affinity 三目表达式的 true 路径；覆盖参数复合判断中名称条件为 false、启动地址条件为 true。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.003.IN
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "orphan-vcpu";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)0U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：验证时间片为 0 时，函数返回 NULL。 用例类别：接口测试 预置条件：名称、启动地址和 affinity 参数有效；time_slice_nsecs=0。 测试步骤： step1、构造有效名称、启动地址和 affinity 对象。 step2、设置时间片为 0。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：零时间片。 其它说明：覆盖参数复合判断中前两个条件为 false、第三个条件为 true。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.004.IN
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "orphan-vcpu";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)(VMM_VCPU_MAX_PRIORITY + 1U);
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：验证优先级高于允许的最大值时，函数返回 NULL。 用例类别：接口测试 预置条件：名称、启动地址、时间片和 affinity 参数有效；优先级设置为最大值加 1。 测试步骤： step1、构造合法的基础输入参数。 step2、将优先级设置为 VMM_VCPU_MAX_PRIORITY+1。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：优先级超过上限。 其它说明：覆盖最大优先级检查为 true 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.005.FI
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+/* -1 表示所有 VCPU 槽位均不可用。 */
+vcast_manager_prepare_orphan_create_env(-1);
+
+vcast_timer_started_ret = 0U;
+vcast_is_percpu_ret = 0U;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "orphan-vcpu";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证 manager 中没有可用 VCPU 实例时，孤儿 VCPU 创建失败并返回 NULL。 用例类别：故障注入测试 预置条件：所有 VCPU 可用标志均为 false；timer 未启动；VCPU 名称被识别为普通 VCPU。 测试步骤： step1、初始化 manager 环境并设置无可用 VCPU。 step2、设置 timer 未启动。 step3、设置 is_percpu_vcpu 返回 false。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：VCPU 实例资源耗尽。 其它说明：覆盖 timer 未启动、普通 VCPU 使用默认 domain、VCPU 可用性判断持续为 false、for 循环正常退出、vcpu==NULL 和失败路径中 locked=false。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.006.IN
+Begin User Code
+static struct vmm_cpumask affinity;
+static char long_name[VMM_FIELD_NAME_SIZE + 2U];
+
+memset(&affinity, 0, sizeof(affinity));
+
+memset(long_name, 'A', sizeof(long_name));
+long_name[sizeof(long_name) - 1U] = '\0';
+
+vcast_manager_prepare_orphan_create_env(0);
+
+vcast_timer_started_ret = 1U;
+vcast_is_percpu_ret = 1U;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    long_name;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：验证名称长度达到或超过 VCPU 名称缓冲区容量时，函数恢复 VCPU 可用状态并返回 NULL。 用例类别：接口测试 预置条件：manager 中存在可用 VCPU；timer 已启动；VCPU 被识别为 per-CPU VCPU；名称长度超过目标缓冲区。 测试步骤： step1、准备一个可用 VCPU 实例。 step2、构造长度大于 VMM_FIELD_NAME_SIZE 的名称。 step3、设置 timer 已启动和 per-CPU VCPU 路径。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：VCPU 名称过长。 其它说明：覆盖 timer 已启动、per-CPU VCPU 路径、找到可用槽位、名称复制失败、fail_avail 和最终 locked=true 解锁路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.007.FI
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+vcast_manager_prepare_orphan_create_env(0);
+
+vcast_timer_started_ret = 0U;
+vcast_is_percpu_ret = 1U;
+vcast_malloc_fail = 1U;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "percpu-orphan";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证孤儿 VCPU 栈内存分配失败时，函数从孤儿链表移除 VCPU、恢复可用状态并返回 NULL。 用例类别：故障注入测试 预置条件：存在可用 VCPU；timer 未启动；VCPU 名称有效；vmm_malloc 返回 NULL。 测试步骤： step1、准备一个可用 VCPU 实例。 step2、设置 timer 未启动和 per-CPU VCPU 路径。 step3、注入栈内存分配失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：VCPU 栈内存分配失败。 其它说明：覆盖名称复制成功、孤儿链表添加、第一次 locked=false、栈地址为空、清理阶段 timer 未启动以及最终 locked=false。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.008.FI
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+vcast_manager_prepare_orphan_create_env(0);
+
+vcast_timer_started_ret = 1U;
+vcast_is_percpu_ret = 1U;
+vcast_malloc_fail = 0U;
+vcast_arch_vcpu_init_ret = VMM_EIO;
+
+/*
+ * deadline == time_slice：比较结果为 false。
+ * periodicity == deadline：比较结果为 false。
+ */
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "percpu-orphan";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证架构相关 VCPU 初始化失败时，函数释放栈并完成 manager 状态回滚。 用例类别：故障注入测试 预置条件：timer 已启动；栈分配成功；deadline 和 periodicity 均不需要修正；arch_vcpu_init 返回 VMM_EIO。 测试步骤： step1、准备可用 VCPU 和有效 affinity。 step2、设置 timer 已启动。 step3、设置 deadline 等于时间片、periodicity 等于 deadline。 step4、注入 arch_vcpu_init 失败。 step5、调用被测函数。 step6、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：架构 VCPU 初始化失败。 其它说明：覆盖第一次 locked=true 解锁、栈分配成功、两个时间参数比较均为 false、架构初始化失败、清理阶段 timer 已启动以及最终 locked=true。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.009.FI
+Begin User Code
+static struct vmm_cpumask affinity;
+
+memset(&affinity, 0, sizeof(affinity));
+
+vcast_manager_prepare_orphan_create_env(0);
+
+vcast_timer_started_ret = 0U;
+vcast_is_percpu_ret = 1U;
+vcast_malloc_fail = 0U;
+vcast_arch_vcpu_init_ret = VMM_OK;
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_EIO;
+
+/*
+ * deadline < time_slice：需要修正。
+ * periodicity < 修正后的 deadline：需要修正。
+ */
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "percpu-orphan";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)50U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)20U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证向调度器设置 RESET 状态失败时，函数执行架构反初始化、释放栈并完成 manager 状态回滚。 用例类别：故障注入测试 预置条件：栈分配和架构初始化成功；deadline 小于时间片；periodicity 小于修正后的 deadline；状态设置接口返回 VMM_EIO。 测试步骤： step1、准备可用 VCPU 环境。 step2、设置 deadline 和 periodicity 均需要向上修正。 step3、设置架构初始化成功。 step4、注入 RESET 状态设置失败。 step5、调用被测函数。 step6、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：VCPU RESET 状态设置失败。 其它说明：覆盖 deadline 修正、periodicity 修正、架构初始化成功、状态设置失败以及 fail_vcpu_deinit 清理路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_create.010.R
+Begin User Code
+static struct vmm_cpumask affinity;
+static struct vmm_vcpu *expected_vcpu;
+
+memset(&affinity, 0, sizeof(affinity));
+
+expected_vcpu =
+    vcast_manager_prepare_orphan_create_env(0);
+
+vcast_timer_started_ret = 0U;
+
+/*
+ * 普通 VCPU：
+ * 被测函数使用 default_cpu_domain.mask。
+ */
+vcast_is_percpu_ret = 0U;
+vcast_good_hcpu_ret = 0U;
+
+vcast_malloc_fail = 0U;
+vcast_arch_vcpu_init_ret = VMM_OK;
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_create.name>> =
+    "orphan-vcpu";
+<<vmm_manager.vmm_manager_vcpu_orphan_create.start_pc>> =
+    (virtual_addr_t)0x1000U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.stack_sz>> =
+    (virtual_size_t)64U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.time_slice_nsecs>> =
+    (u64)100U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.deadline>> =
+    (u64)200U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.periodicity>> =
+    (u64)300U;
+<<vmm_manager.vmm_manager_vcpu_orphan_create.affinity>> =
+    &affinity;
+期望值
+return = expected_vcpu
+注释
+测试目的：验证有效参数下普通孤儿 VCPU 能够完成实例分配、栈分配、调度参数初始化、架构初始化及 RESET 状态设置并返回 VCPU 地址。 用例类别：基于需求的测试 预置条件：manager 中存在一个可用 VCPU；timer 未启动；VCPU 为普通 VCPU；内存、架构初始化和状态设置均成功。 测试步骤： step1、准备一个可用 VCPU 实例并保存其预期地址。 step2、构造有效的启动地址、栈大小、优先级和调度参数。 step3、设置普通 VCPU 路径。 step4、设置栈分配、架构初始化和状态设置成功。 step5、调用 vmm_manager_vcpu_orphan_create。 step6、比较返回指针与预期 VCPU 地址。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vcpu_orphan_create。 等价列表：孤儿 VCPU 正常创建。 其它说明：覆盖普通 VCPU 使用默认 domain、找到可用实例、名称复制成功、栈分配成功、架构初始化成功、状态设置成功和函数正常返回路径。 通过准则：函数返回 expected_vcpu。
+ 
+⸻
+ 
+五、
+vmm_manager_vcpu_orphan_destroy
+最少使用 7 条用例。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> = NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 VCPU 指针为空时，孤儿 VCPU 销毁接口返回失败。 用例类别：接口测试 预置条件：VCPU 入参为 NULL。 测试步骤： step1、设置 vcpu=NULL。 step2、调用 vmm_manager_vcpu_orphan_destroy。 step3、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：VCPU 空指针。 其它说明：覆盖第一个参数检查分支。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.002.IN
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.is_normal = TRUE;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证普通 Guest VCPU 不能通过孤儿 VCPU 销毁接口释放。 用例类别：接口测试 预置条件：VCPU 指针有效；is_normal=true。 测试步骤： step1、清零 VCPU 对象。 step2、设置 VCPU 为普通 Guest VCPU。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、无效类型等价类。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：非孤儿 VCPU。 其它说明：覆盖 VCPU 非空但 is_normal=true 的拒绝路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.003.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 0U;
+vcpu.is_normal = FALSE;
+vcpu.stack_va =
+    (virtual_addr_t)vcast_orphan_stack_store;
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_manager_prepare_orphan_destroy_env(&vcpu);
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_EIO;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证将孤儿 VCPU 切换至 RESET 状态失败时，函数立即返回下层错误。 用例类别：故障注入测试 预置条件：VCPU 为有效孤儿 VCPU；manager 环境有效；第一次状态设置返回 VMM_EIO。 测试步骤： step1、构造孤儿 VCPU 并加入 manager 孤儿链表。 step2、设置第一次状态切换失败。 step3、调用 vmm_manager_vcpu_orphan_destroy。 step4、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：RESET 状态切换失败。 其它说明：覆盖 VCPU 类型检查通过、强制移出等待队列以及第一次状态设置错误返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.004.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 0U;
+vcpu.is_normal = FALSE;
+vcpu.stack_va =
+    (virtual_addr_t)vcast_orphan_stack_store;
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_manager_prepare_orphan_destroy_env(&vcpu);
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+vcast_vcpu_set_state_ret_seq[1] = VMM_EIO;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 RESET 状态设置成功但 UNKNOWN 状态设置失败时，函数返回第二次状态设置错误。 用例类别：故障注入测试 预置条件：VCPU 为有效孤儿 VCPU；第一次状态设置成功；第二次状态设置返回 VMM_EIO。 测试步骤： step1、构造并注册孤儿 VCPU。 step2、设置 RESET 状态切换成功。 step3、设置 UNKNOWN 状态切换失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：UNKNOWN 状态切换失败。 其它说明：覆盖资源清理后第二次状态设置失败的路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.005.FI
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 0U;
+vcpu.is_normal = FALSE;
+vcpu.stack_va =
+    (virtual_addr_t)vcast_orphan_stack_store;
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_manager_prepare_orphan_destroy_env(&vcpu);
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+vcast_vcpu_set_state_ret_seq[1] = VMM_OK;
+
+vcast_arch_vcpu_deinit_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证状态清理成功但架构 VCPU 反初始化失败时，函数返回架构层错误。 用例类别：故障注入测试 预置条件：两次状态设置均成功；arch_vcpu_deinit 返回 VMM_EIO。 测试步骤： step1、构造有效孤儿 VCPU 和 manager 环境。 step2、设置 RESET 和 UNKNOWN 状态切换成功。 step3、注入架构反初始化失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：架构 VCPU 反初始化失败。 其它说明：覆盖 sched_priv 清空后架构反初始化错误返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.006.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 0U;
+vcpu.is_normal = FALSE;
+vcpu.stack_va =
+    (virtual_addr_t)vcast_orphan_stack_store;
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_manager_prepare_orphan_destroy_env(&vcpu);
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+vcast_vcpu_set_state_ret_seq[1] = VMM_OK;
+
+vcast_arch_vcpu_deinit_ret = VMM_OK;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_OK
+注释
+测试目的：验证带有已分配栈的孤儿 VCPU 能够完成状态清理、资源清理、架构反初始化、栈释放和 manager 状态更新。 用例类别：基于需求的测试 预置条件：VCPU 为有效孤儿 VCPU；栈地址非零；两次状态设置和架构反初始化均成功。 测试步骤： step1、构造带有效栈地址的孤儿 VCPU。 step2、将 VCPU 加入 manager 孤儿链表并标记为已占用。 step3、设置两次状态切换成功。 step4、设置架构反初始化成功。 step5、调用被测函数。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：带栈孤儿 VCPU 正常销毁。 其它说明：覆盖 stack_va 非零、栈释放、manager 计数递减、孤儿链表删除和可用状态恢复路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vcpu_orphan_destroy.007.R
+Begin User Code
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcpu.id = 0U;
+vcpu.is_normal = FALSE;
+vcpu.stack_va = (virtual_addr_t)0U;
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+vcast_manager_prepare_orphan_destroy_env(&vcpu);
+
+vcast_vcpu_set_state_seq_idx = 0U;
+vcast_vcpu_set_state_ret_seq[0] = VMM_OK;
+vcast_vcpu_set_state_ret_seq[1] = VMM_OK;
+
+vcast_arch_vcpu_deinit_ret = VMM_OK;
+
+<<vmm_manager.vmm_manager_vcpu_orphan_destroy.vcpu>> =
+    &vcpu;
+期望值
+return = VMM_OK
+注释
+测试目的：验证栈地址为 0 的孤儿 VCPU 销毁时跳过栈释放操作，其余清理流程正常完成。 用例类别：基于需求的测试 预置条件：VCPU 为有效孤儿 VCPU；stack_va=0；两次状态设置和架构反初始化均成功。 测试步骤： step1、构造无独立栈地址的孤儿 VCPU。 step2、准备 manager 内部环境和孤儿链表。 step3、设置状态切换和架构反初始化成功。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vcpu_orphan_destroy。 等价列表：无栈孤儿 VCPU 正常销毁。 其它说明：覆盖 if (vcpu->stack_va) 为 false 的路径，并与 .006.R 配合覆盖该判断的两个结果。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+六、不可行路径说明
+vmm_manager_vcpu_orphan_create() 中：
+if (priority < VMM_VCPU_MIN_PRIORITY) {
+    return NULL;
+}
+已知：
+#define VMM_VCPU_MIN_PRIORITY 0
+并且：
+priority
+的类型为：
+u8
+因此 priority 的最小值也是 0，不存在：
+priority < 0
+的输入。该判断的 true 路径结构性不可达，只能覆盖 false 路径。
+其余可达路径由上述：
+create：10 条
+destroy：7 条
+完成覆盖。
