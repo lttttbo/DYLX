@@ -1,0 +1,416 @@
+下面先完成这一批较独立的 guest 管理函数：
+vcast_manager_prepare_guest_env
+vmm_manager_max_guest_count
+vmm_manager_guest_count
+vmm_manager_guest
+vmm_manager_guest_find
+vmm_manager_get_all_guest_name
+vmm_manager_guest_iterate
+后续再继续 guest-VCPU 链表、guest reset 和 kick 相关函数。
+注释字段统一使用 “追溯ID”。
+ 
+⸻
+ 
+一、共用 User Code
+已有同名内容时直接复用，不要重复定义。
+1. User Global / Data
+/*
+ * 模拟 vmm_manager_init() 分配的 guest 数组及可用状态数组。
+ */
+struct vmm_guest
+vcast_guest_array[CONFIG_MAX_GUEST_COUNT];
+
+bool
+vcast_guest_avail_array[CONFIG_MAX_GUEST_COUNT];
+
+/*
+ * 当 guest_reset_user_iter 作为回调使用时，
+ * 控制 vmm_manager_guest_reset 的返回值。
+ */
+int vcast_guest_reset_ret;
+
+/* Unit Appendix 中环境准备函数的声明。 */
+void vcast_manager_prepare_guest_env(u32 guest_count);
+2. 公共 Test Case Init
+vcast_guest_reset_ret = VMM_OK;
+3. Unit Appendix User Code
+/*
+ * 改写目的：
+ * 模拟 vmm_manager_init() 为 mngr.guest_array 和
+ * mngr.guest_avail_array 建立有效存储。
+ *
+ * 默认将全部 guest 槽位设置为可用状态。
+ * 每条用例再将需要使用的槽位置为 FALSE。
+ */
+void vcast_manager_prepare_guest_env(u32 guest_count)
+{
+    u32 g;
+
+    memset(vcast_guest_array,
+           0,
+           sizeof(vcast_guest_array));
+
+    for (g = 0U;
+         g < (u32)CONFIG_MAX_GUEST_COUNT;
+         ++g) {
+        vcast_guest_array[g].id = g;
+        vcast_guest_avail_array[g] = TRUE;
+    }
+
+    mngr.guest_array = vcast_guest_array;
+    mngr.guest_avail_array = vcast_guest_avail_array;
+    mngr.guest_count = guest_count;
+}
+该函数本身会被统计，因此后面提供一条独立用例。
+ 
+⸻
+ 
+二、共用 Stub
+vmm_manager_lock
+return;
+vmm_manager_unlock
+return;
+vmm_manager_guest_reset
+仅在测试 vmm_manager_guest_iterate、guest_reset_user_iter 时启用该 Stub：
+return vcast_guest_reset_ret;
+测试真实的 vmm_manager_guest_reset 时取消该 Stub。
+日志接口不影响返回结果，可以保留真实实现；环境不允许输出日志时，将其底层日志函数设为空实现即可。
+ 
+⸻
+ 
+三、新增环境函数测试
+vcast_manager_prepare_guest_env.001.R
+Begin User Code
+/*
+ * 先写入非默认值，确认准备函数会重新初始化数组。
+ */
+memset(vcast_guest_array,
+       0x5A,
+       sizeof(vcast_guest_array));
+
+memset(vcast_guest_avail_array,
+       0,
+       sizeof(vcast_guest_avail_array));
+
+<<vmm_manager.vcast_manager_prepare_guest_env.guest_count>> =
+    2U;
+期望值
+vcast_guest_array[0].id = 0
+vcast_guest_array[CONFIG_MAX_GUEST_COUNT - 1].id =
+    CONFIG_MAX_GUEST_COUNT - 1
+
+vcast_guest_avail_array[0] = TRUE
+vcast_guest_avail_array[CONFIG_MAX_GUEST_COUNT - 1] = TRUE
+注释
+测试目的：验证 guest 环境准备函数能够清零 guest 数组、初始化 guest ID、将全部槽位设置为可用状态并建立 manager 内部存储环境。 用例类别：接口测试 预置条件：guest 测试数组包含非默认值；传入 guest 数量为 2。 测试步骤： step1、向 guest 数组和可用状态数组写入非默认值。 step2、调用 vcast_manager_prepare_guest_env。 step3、检查首尾 guest 的 ID。 step4、检查首尾 guest 槽位的可用状态。 用例来源：接口分析。 追溯ID：vcast_manager_prepare_guest_env。 等价列表：有效 guest 环境初始化。 其它说明：覆盖初始化循环进入、重复执行和正常退出，以及内部 manager 指针、guest 数量的赋值语句。 通过准则：首尾 guest ID 正确，首尾可用状态均为 TRUE。
+ 
+⸻
+ 
+四、
+vmm_manager_max_guest_count
+vmm_manager_max_guest_count.001.R
+输入构造
+该函数没有入参，不需要 Begin User Code。
+期望值
+return = CONFIG_MAX_GUEST_COUNT
+注释
+测试目的：验证函数返回编译期配置的最大 Guest 数量。 用例类别：基于需求的测试 预置条件：无。 测试步骤： step1、调用 vmm_manager_max_guest_count。 step2、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_max_guest_count。 等价列表：最大 Guest 数量查询。 其它说明：函数无判断分支，一条用例即可完成覆盖。 通过准则：函数返回 CONFIG_MAX_GUEST_COUNT。
+ 
+⸻
+ 
+五、
+vmm_manager_guest_count
+vmm_manager_guest_count.001.R
+Begin User Code
+vcast_manager_prepare_guest_env(2U);
+期望值
+return = 2
+注释
+测试目的：验证函数在 manager 锁保护下返回当前 Guest 数量。 用例类别：基于需求的测试 预置条件：manager 测试环境已初始化；当前 Guest 数量设置为 2。 测试步骤： step1、调用环境准备函数，将 guest_count 设置为 2。 step2、调用 vmm_manager_guest_count。 step3、观察函数返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_count。 等价列表：Guest 数量正常查询。 其它说明：不通过调用打点检查 manager 加锁和解锁，返回值足以验证功能结果。 通过准则：函数返回 2。
+ 
+⸻
+ 
+六、
+vmm_manager_guest
+最少需要 4 条用例。
+vmm_manager_guest.001.IN
+Begin User Code
+vcast_manager_prepare_guest_env(0U);
+
+<<vmm_manager.vmm_manager_guest.guest_id>> =
+    (u32)CONFIG_MAX_GUEST_COUNT;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest ID 等于最大 Guest 数量时，函数判定索引越界并返回 NULL。 用例类别：接口测试 预置条件：manager guest 环境有效；Guest ID 设置为第一个越界值。 测试步骤： step1、初始化 manager guest 环境。 step2、将 guest_id 设置为 CONFIG_MAX_GUEST_COUNT。 step3、调用 vmm_manager_guest。 step4、观察函数返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_guest。 等价列表：Guest ID 越界下边界。 其它说明：覆盖 guest_id < CONFIG_MAX_GUEST_COUNT 为 false 的路径，不访问 guest 数组。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest.002.IN
+Begin User Code
+vcast_manager_prepare_guest_env(0U);
+
+/*
+ * 环境准备函数默认将所有槽位置为 TRUE，
+ * 表示 guest 0 当前未被使用。
+ */
+<<vmm_manager.vmm_manager_guest.guest_id>> = 0U;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest ID 合法但对应槽位处于可用状态时，函数返回 NULL。 用例类别：接口测试 预置条件：Guest ID 为 0；guest 0 的可用状态为 TRUE。 测试步骤： step1、初始化 manager guest 环境。 step2、保持 guest 0 为可用状态。 step3、调用 vmm_manager_guest。 step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest。 等价列表：合法 ID 对应空闲 Guest 槽位。 其它说明：覆盖 Guest ID 合法和 !mngr.guest_avail_array[guest_id] 为 false 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest.003.R
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+/* FALSE 表示 guest 0 已被使用。 */
+vcast_guest_avail_array[0] = FALSE;
+
+/* 非零引用计数允许 atomic_add_unless 增加引用。 */
+arch_atomic_write(&vcast_guest_array[0].refcnt,
+                  (long)1);
+
+<<vmm_manager.vmm_manager_guest.guest_id>> = 0U;
+期望值
+return = &vcast_guest_array[0]
+可选检查：
+vcast_guest_array[0].refcnt = 2
+注释
+测试目的：验证合法且已创建的 Guest 在引用计数非零时，函数增加引用并返回该 Guest 地址。 用例类别：基于需求的测试 预置条件：guest 0 已被使用；引用计数初始值为 1。 测试步骤： step1、初始化一个已使用 Guest 的 manager 环境。 step2、将 guest 0 的引用计数设置为 1。 step3、调用 vmm_manager_guest。 step4、观察返回指针。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest。 等价列表：有效 Guest 获取成功。 其它说明：覆盖 ID 合法、槽位已使用和 atomic_add_unless 成功的路径。 通过准则：函数返回 &vcast_guest_array[0]。
+ 
+⸻
+ 
+vmm_manager_guest.004.IN
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+vcast_guest_avail_array[0] = FALSE;
+
+/*
+ * 引用计数为 0，atomic_add_unless 不允许复活对象。
+ */
+arch_atomic_write(&vcast_guest_array[0].refcnt,
+                  (long)0);
+
+<<vmm_manager.vmm_manager_guest.guest_id>> = 0U;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest 槽位已使用但引用计数为 0 时，函数不增加引用并返回 NULL。 用例类别：接口测试 预置条件：guest 0 被标记为已使用；引用计数为 0。 测试步骤： step1、初始化 manager guest 环境。 step2、将 guest 0 标记为已使用。 step3、将 guest 0 引用计数设置为 0。 step4、调用被测函数。 step5、观察返回值。 用例来源：接口分析、无效状态等价类。 追溯ID：vmm_manager_guest。 等价列表：销毁阶段 Guest 引用计数为 0。 其它说明：覆盖 atomic_add_unless 返回 false，并将临时返回指针重新置为 NULL 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+七、
+vmm_manager_guest_find
+最少需要 4 条用例。
+vmm_manager_guest_find.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_find.guest_name>> =
+    NULL;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest 名称指针为空时，函数立即返回 NULL。 用例类别：接口测试 预置条件：Guest 名称参数为 NULL。 测试步骤： step1、设置 guest_name=NULL。 step2、调用 vmm_manager_guest_find。 step3、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_find。 等价列表：Guest 名称空指针。 其它说明：覆盖函数入口空指针检查，不获取 manager 锁。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_find.002.IN
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+/*
+ * guest 0 已使用，但名称与查询名称不匹配。
+ * 其余槽位保持可用状态。
+ */
+vcast_guest_avail_array[0] = FALSE;
+
+strlcpy(vcast_guest_array[0].name,
+        "guest-A",
+        sizeof(vcast_guest_array[0].name));
+
+arch_atomic_write(&vcast_guest_array[0].refcnt,
+                  (long)1);
+
+<<vmm_manager.vmm_manager_guest_find.guest_name>> =
+    "guest-B";
+期望值
+return = NULL
+注释
+测试目的：验证遍历结束后不存在同名 Guest 时，函数返回 NULL。 用例类别：接口测试 预置条件：guest 0 已被使用且名称为 guest-A；查询名称为 guest-B；其余槽位为空闲。 测试步骤： step1、初始化 manager guest 环境。 step2、构造一个名称不匹配的已使用 Guest。 step3、调用 vmm_manager_guest_find。 step4、观察函数返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_find。 等价列表：查询名称不存在。 其它说明：覆盖槽位已使用、名称比较不相等、槽位可用时跳过以及 for 循环自然结束路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_find.003.R
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+vcast_guest_avail_array[0] = FALSE;
+
+strlcpy(vcast_guest_array[0].name,
+        "guest-A",
+        sizeof(vcast_guest_array[0].name));
+
+arch_atomic_write(&vcast_guest_array[0].refcnt,
+                  (long)1);
+
+<<vmm_manager.vmm_manager_guest_find.guest_name>> =
+    "guest-A";
+期望值
+return = &vcast_guest_array[0]
+注释
+测试目的：验证存在同名且引用计数非零的 Guest 时，函数增加引用并返回该 Guest 地址。 用例类别：基于需求的测试 预置条件：guest 0 已被使用；名称与查询名称相同；引用计数为 1。 测试步骤： step1、初始化 manager guest 环境。 step2、构造名称为 guest-A 的有效 Guest。 step3、调用 vmm_manager_guest_find 查询 guest-A。 step4、观察函数返回指针。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_find。 等价列表：按名称查找 Guest 成功。 其它说明：覆盖名称比较相等、引用增加成功和 break 提前退出循环的路径。 通过准则：函数返回 &vcast_guest_array[0]。
+ 
+⸻
+ 
+vmm_manager_guest_find.004.IN
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+vcast_guest_avail_array[0] = FALSE;
+
+strlcpy(vcast_guest_array[0].name,
+        "guest-A",
+        sizeof(vcast_guest_array[0].name));
+
+arch_atomic_write(&vcast_guest_array[0].refcnt,
+                  (long)0);
+
+<<vmm_manager.vmm_manager_guest_find.guest_name>> =
+    "guest-A";
+期望值
+return = NULL
+注释
+测试目的：验证名称匹配但 Guest 引用计数为 0 时，函数不恢复引用并返回 NULL。 用例类别：接口测试 预置条件：Guest 名称与查询名称匹配；引用计数为 0。 测试步骤： step1、初始化 manager guest 环境。 step2、构造名称匹配但引用计数为 0 的 Guest。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效状态等价类。 追溯ID：vmm_manager_guest_find。 等价列表：匹配 Guest 已进入销毁状态。 其它说明：覆盖名称匹配后 atomic_add_unless 失败、返回指针被置为 NULL并 break 的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+八、
+vmm_manager_get_all_guest_name
+vmm_manager_get_all_guest_name.001.R
+Begin User Code
+static char names[CONFIG_MAX_GUEST_COUNT]
+                 [VMM_FIELD_NAME_SIZE];
+
+memset(names, 0, sizeof(names));
+
+vcast_manager_prepare_guest_env(2U);
+
+/*
+ * guest 0、guest 1 已使用；
+ * 其余槽位保持可用，覆盖 continue 路径。
+ */
+vcast_guest_avail_array[0] = FALSE;
+vcast_guest_avail_array[1] = FALSE;
+
+strlcpy(vcast_guest_array[0].name,
+        "guest-A",
+        sizeof(vcast_guest_array[0].name));
+
+strlcpy(vcast_guest_array[1].name,
+        "guest-B",
+        sizeof(vcast_guest_array[1].name));
+
+<<vmm_manager.vmm_manager_get_all_guest_name.arr>> =
+    names;
+期望值
+names[0] = "guest-A"
+names[1] = "guest-B"
+
+names[0][VMM_FIELD_NAME_SIZE - 1] = '\0'
+names[1][VMM_FIELD_NAME_SIZE - 1] = '\0'
+注释
+测试目的：验证函数按 Guest 数组顺序复制所有已使用 Guest 的名称，并跳过空闲槽位。 用例类别：基于需求的测试 预置条件：guest 0和 guest 1 已使用，名称分别为 guest-A、guest-B；其余槽位为空闲。 测试步骤： step1、初始化输出名称数组。 step2、准备两个已使用 Guest。 step3、调用 vmm_manager_get_all_guest_name。 step4、检查输出数组前两个名称。 step5、检查输出字符串末尾终止符。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_get_all_guest_name。 等价列表：多个 Guest 名称查询。 其它说明：覆盖可用槽位的 continue 路径、已使用槽位的复制路径、index 递增以及循环自然结束。 通过准则：输出数组前两项分别为 guest-A 和 guest-B，字符串末尾均为 '\0'。
+ 
+⸻
+ 
+九、
+vmm_manager_guest_iterate
+最少需要 3 条用例。回调直接复用现有：
+guest_reset_user_iter
+不新增测试回调函数。
+vmm_manager_guest_iterate.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_iterate.iter>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_guest_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证遍历回调为空时，函数返回无效参数错误。 用例类别：接口测试 预置条件：iter=NULL。 测试步骤： step1、设置回调函数指针为 NULL。 step2、调用 vmm_manager_guest_iterate。 step3、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_iterate。 等价列表：遍历回调空指针。 其它说明：覆盖函数入口回调检查，不获取 manager 锁。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_guest_iterate.002.R
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+/*
+ * guest 0 已使用，但名称不包含 "user"，
+ * guest_reset_user_iter 返回 VMM_OK。
+ * 其余槽位保持可用，覆盖 continue。
+ */
+vcast_guest_avail_array[0] = FALSE;
+
+strlcpy(vcast_guest_array[0].name,
+        "normal-guest",
+        sizeof(vcast_guest_array[0].name));
+
+vcast_guest_reset_ret = VMM_OK;
+
+<<vmm_manager.vmm_manager_guest_iterate.iter>> =
+    guest_reset_user_iter;
+
+<<vmm_manager.vmm_manager_guest_iterate.priv>> =
+    NULL;
+期望值
+return = VMM_OK
+注释
+测试目的：验证遍历过程中回调持续返回成功时，函数完成全部 Guest 槽位遍历并返回 VMM_OK。 用例类别：基于需求的测试 预置条件：guest 0 已使用且名称不包含 user；其余槽位为空闲；回调为 guest_reset_user_iter。 测试步骤： step1、初始化 manager guest 环境。 step2、构造一个普通已使用 Guest。 step3、将 guest_reset_user_iter 作为遍历回调。 step4、调用 vmm_manager_guest_iterate。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_iterate。 等价列表：Guest 遍历完成且回调全部成功。 其它说明：覆盖空闲槽位 continue、已使用槽位回调执行、rc==0 以及 for 循环自然结束路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_iterate.003.FI
+Begin User Code
+vcast_manager_prepare_guest_env(1U);
+
+vcast_guest_avail_array[0] = FALSE;
+
+/*
+ * 名称包含 "user"，回调会调用
+ * Stub 的 vmm_manager_guest_reset。
+ */
+strlcpy(vcast_guest_array[0].name,
+        "user-guest",
+        sizeof(vcast_guest_array[0].name));
+
+vcast_guest_reset_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manager_guest_iterate.iter>> =
+    guest_reset_user_iter;
+
+<<vmm_manager.vmm_manager_guest_iterate.priv>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    返回 VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 Guest 遍历回调返回错误时，函数立即停止遍历并返回该错误码。 用例类别：故障注入测试 预置条件：guest 0 已使用且名称包含 user；vmm_manager_guest_reset 返回 VMM_EIO。 测试步骤： step1、初始化一个已使用的 user Guest。 step2、设置 Guest reset 接口返回 VMM_EIO。 step3、将 guest_reset_user_iter 设置为遍历回调。 step4、调用 vmm_manager_guest_iterate。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_iterate。 等价列表：遍历回调执行失败。 其它说明：覆盖回调返回非零和 break 提前退出循环的路径，同时为 guest_reset_user_iter 覆盖 user Guest 的错误日志分支。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+本批合计：
+环境辅助函数：1 条
+vmm_manager_max_guest_count：1 条
+vmm_manager_guest_count：1 条
+vmm_manager_guest：4 条
+vmm_manager_guest_find：4 条
+vmm_manager_get_all_guest_name：1 条
+vmm_manager_guest_iterate：3 条
+共 15 条用例。
