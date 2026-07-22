@@ -1,0 +1,600 @@
+下面继续两个函数：
+vmm_manager_vfs_load
+vmm_manager_vfs_file_parent_dir
+vmm_manager_guest_load_list 分支较多，放到下一批单独给出。
+后续按你的实际使用方式处理：
+	•	非本 .c 文件内的函数默认会被 VectorCAST Stub；
+	•	优先在 Stub 表中直接设置返回值或连续返回值；
+	•	不为单纯控制 Stub 返回值额外增加 User Code 全局变量；
+	•	每完成一个函数后附上正式名称汇总。
+ 
+⸻
+ 
+一、
+vmm_manager_vfs_load
+1. 本函数依赖处理
+建议 Stub 的函数
+vmm_manger_vfs_file_open_read
+vmm_malloc
+vmm_free
+vfs_read
+vmm_guest_memory_write
+vmm_host_memory_write
+vfs_close
+其中：
+	•	vmm_free 使用默认空 Stub 即可；
+	•	不检查 vmm_free、vfs_close 等中间函数的调用次数；
+	•	vmm_manger_vfs_file_open_read 虽然在同一个 .c 文件中，但测试本函数时建议隔离为 Stub，避免重复依赖前一个函数的文件系统逻辑；
+	•	若当前环境不能隔离该静态函数，则需要通过 vfs_open、vfs_fstat 间接驱动，测试会明显复杂。
+ 
+⸻
+ 
+2. 公共缓冲区
+只有成功进入内存分配后的用例需要一块实际可写缓冲区。可直接在每条用例的 Begin User Code 中声明：
+static char buf_storage[VFS_LOAD_BUF_SZ];
+然后将 vmm_malloc 的返回值设置为：
+buf_storage
+不需要新增全局变量或辅助函数。
+ 
+⸻
+ 
+3. 用例数量
+建议使用 8 条用例，覆盖：
+打开辅助函数失败
+off >= 文件长度
+内存分配失败
+off == 0
+off > 0
+读取长度小于缓冲区
+读取长度大于缓冲区
+vfs_read 返回 0
+guest 写入
+host 写入
+写入长度不一致
+完整循环
+关闭文件失败
+关闭文件成功
+ 
+⸻
+ 
+vmm_manager_vfs_load.001.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char curdir[] = "/boot";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0x1000U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证文件打开辅助函数失败时，加载函数立即返回对应错误。 用例类别：故障注入测试 预置条件：Guest、目标地址和路径参数有效；文件打开辅助函数返回 VMM_EIO。 测试步骤： step1、初始化 Guest 和路径参数。 step2、设置文件打开辅助函数返回 VMM_EIO。 step3、调用 vmm_manager_vfs_load。 step4、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：源文件打开失败。 其它说明：覆盖 VMM_OK != rc 为 true 的提前返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_load.002.IN
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    4096U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read 需要同时输出：
+return = VMM_OK
+*fdp = 3
+*len = 4096
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证文件偏移等于文件长度时，函数判定偏移超出可加载范围并返回无效参数错误。 用例类别：接口测试 预置条件：文件打开成功；文件长度为 4096；输入偏移为 4096。 测试步骤： step1、设置文件打开辅助函数返回成功并输出文件长度 4096。 step2、设置加载偏移为 4096。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vfs_load。 等价列表：加载偏移等于文件长度。 其它说明：覆盖 off >= len 的边界 true 路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_vfs_load.003.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 4096
+vmm_malloc：
+return = NULL
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证文件加载缓冲区分配失败时，函数返回内存不足错误。 用例类别：故障注入测试 预置条件：文件打开成功；偏移小于文件长度；vmm_malloc 返回 NULL。 测试步骤： step1、设置文件长度为 4096，偏移为 0。 step2、注入加载缓冲区分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：加载缓冲区分配失败。 其它说明：覆盖文件偏移检查通过和 buf==NULL 的错误路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_vfs_load.004.R
+本用例覆盖：
+off == 0
+len 小于 VFS_LOAD_BUF_SZ
+guest != NULL
+完整读取和完整写入
+循环正常结束
+关闭文件成功
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 16
+vmm_guest_memory_write：
+return = 16
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证偏移为 0、文件长度小于单次缓冲区容量且目标为 Guest 内存时，函数完成一次读取和写入并返回成功。 用例类别：基于需求的测试 预置条件：文件长度为 16；缓冲区分配成功；文件读取返回 16；Guest 内存写入返回 16；文件关闭成功。 测试步骤： step1、初始化 Guest 和加载缓冲区。 step2、设置文件长度为 16，加载偏移为 0。 step3、设置读取和 Guest 内存写入均完整成功。 step4、调用 vmm_manager_vfs_load。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_load。 等价列表：小文件完整加载到 Guest 内存。 其它说明：覆盖长度调整三目表达式中 off==0 对应的 false 路径、单次读取长度选择文件剩余长度、guest=true、写入长度相等和 while 正常结束路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.005.R
+本用例覆盖：
+off > 0
+len - off 路径
+guest == NULL
+host memory write
+Begin User Code
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x90000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    4U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 4
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 12
+vmm_host_memory_write：
+return = 12
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证加载偏移大于 0且目标 Guest 为空时，函数按照文件剩余长度读取，并将数据写入宿主机内存。 用例类别：基于需求的测试 预置条件：文件长度为 16；加载偏移为 4；缓冲区分配成功；读取和宿主机内存写入均返回 12。 测试步骤： step1、设置 Guest 入参为 NULL。 step2、设置文件长度为 16、偏移为 4。 step3、设置文件读取和宿主机写入均成功处理 12字节。 step4、调用被测函数。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_load。 等价列表：带偏移加载到宿主机内存。 其它说明：覆盖长度调整三目表达式中 (len-off)<len 为 true、guest=false 及宿主机内存写入路径。 通过准则：函数返回 VMM_OK。
+注意：源码只缩短了加载长度，但没有调用 vfs_lseek()，因此 off=4 并不会真正将文件读取位置移动到第 4字节。这是源码行为问题，不影响当前分支覆盖。
+ 
+⸻
+ 
+vmm_manager_vfs_load.006.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 32
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 0
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证文件读取未获得任何数据时，函数退出加载循环，并在文件关闭成功后返回 VMM_OK。 用例类别：故障注入测试 预置条件：文件打开和缓冲区分配成功；vfs_read 返回 0；文件关闭成功。 测试步骤： step1、设置文件长度为 32。 step2、注入文件读取返回 0。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：文件读取无数据。 其它说明：覆盖 buf_count < 1 为 true和 break 路径。当前源码不会把读取失败转换为错误返回，关闭成功后仍返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.007.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 16
+vmm_guest_memory_write：
+return = 8
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证 Guest 内存写入长度小于读取长度时，函数退出加载循环。 用例类别：故障注入测试 预置条件：文件读取返回 16；Guest 内存写入仅返回 8；文件关闭成功。 测试步骤： step1、设置文件长度和读取长度为 16。 step2、注入 Guest 内存部分写入，仅返回 8。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：目标内存部分写入。 其它说明：覆盖 buf_wr != buf_count 为 true和 break 路径。当前实现同样不会将部分写入转换为错误，文件关闭成功后返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.008.FI
+本用例同时覆盖：
+len > VFS_LOAD_BUF_SZ
+buf_rd 选择 VFS_LOAD_BUF_SZ
+至少两次 while
+文件关闭失败
+Begin User Code
+static char path[] = "/boot/large.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x90000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 4
+*len = VFS_LOAD_BUF_SZ + 4
+vmm_malloc：
+return = buf_storage
+vfs_read 连续返回：
+第1次：VFS_LOAD_BUF_SZ
+第2次：4
+vmm_host_memory_write 连续返回：
+第1次：VFS_LOAD_BUF_SZ
+第2次：4
+vfs_close：
+return = VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证大文件分块加载完成后，文件关闭失败会作为函数最终返回值。 用例类别：故障注入测试 预置条件：文件长度为 VFS_LOAD_BUF_SZ+4；两次读取和宿主机写入均完整成功；文件关闭返回 VMM_EIO。 测试步骤： step1、设置文件长度超过单次加载缓冲区容量。 step2、设置第一次读取和写入处理完整缓冲区。 step3、设置第二次读取和写入处理剩余 4字节。 step4、注入文件关闭失败。 step5、调用被测函数。 step6、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：大文件分块加载后关闭失败。 其它说明：覆盖 len<VFS_LOAD_BUF_SZ 为 false和 true、while 多次迭代、宿主机写入成功、循环自然结束及 vfs_close 错误传播路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_load
+名称汇总
+完成用例录入后，可统一修改为以下正式名称：
+vmm_manager_vfs_load.001.FI_文件打开辅助函数失败
+vmm_manager_vfs_load.002.IN_加载偏移等于文件长度
+vmm_manager_vfs_load.003.FI_加载缓冲区分配失败
+vmm_manager_vfs_load.004.R_小文件加载至Guest内存成功
+vmm_manager_vfs_load.005.R_带偏移加载至宿主机内存成功
+vmm_manager_vfs_load.006.FI_文件读取无数据
+vmm_manager_vfs_load.007.FI_Guest内存部分写入
+vmm_manager_vfs_load.008.FI_大文件分块加载后关闭失败
+ 
+⸻
+ 
+二、
+vmm_manager_vfs_file_parent_dir
+int vmm_manager_vfs_file_parent_dir(
+    const char *path,
+    char *out,
+    size_t out_sz)
+1. 依赖函数
+非本文件函数：
+vfs_stat
+VectorCAST 会自动 Stub，可以直接设置：
+返回值
+st.st_mode
+strlcpy 可以使用实际实现；若被自动 Stub，必须配置其返回值为源字符串长度，同时让其真实写入 out 较麻烦。因此建议在此函数测试中将 strlcpy 设置为 Actual。
+ 
+⸻
+ 
+2. 用例数量
+使用 4 条用例，覆盖：
+vfs_stat 失败
+目标不是普通文件
+路径中存在 /
+路径中不存在 /
+while 循环进入和退出
+if 命中和始终不命中
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.001.FI
+Begin User Code
+static char path[] = "/boot/image.bin";
+static char out[64];
+
+memset(out, 0x5A, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证路径状态查询失败时，函数原样返回查询错误。 用例类别：故障注入测试 预置条件：输入路径和输出缓冲区有效；vfs_stat 返回 VMM_EIO。 测试步骤： step1、初始化输入路径和输出缓冲区。 step2、注入路径状态查询失败。 step3、调用 vmm_manager_vfs_file_parent_dir。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：路径状态查询失败。 其它说明：覆盖 if(rc) 为 true 的提前返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.002.IN
+Begin User Code
+static char path[] = "/boot";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = 0
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证输入路径对应对象不是普通文件时，函数返回无效参数错误。 用例类别：接口测试 预置条件：路径状态查询成功；st_mode 不包含 S_IFREG。 测试步骤： step1、设置有效路径和输出缓冲区。 step2、设置路径状态查询成功但目标不是普通文件。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：非普通文件路径。 其它说明：覆盖状态查询成功以及普通文件判断为 false 的路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.003.R
+Begin User Code
+static char path[] = "/boot/images/kernel.bin";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = S_IFREG
+期望值
+return = VMM_OK
+out = "/boot/images"
+注释
+测试目的：验证普通文件路径包含目录分隔符时，函数正确提取最后一级父目录。 用例类别：基于需求的测试 预置条件：路径对应普通文件；输出缓冲区容量足够；strlcpy 使用真实实现。 测试步骤： step1、设置路径为 /boot/images/kernel.bin。 step2、设置路径状态为普通文件。 step3、调用 vmm_manager_vfs_file_parent_dir。 step4、检查返回值和输出字符串。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：具有父目录的普通文件路径。 其它说明：覆盖 while 循环多次执行、字符比较为 false后最终命中 /，并写入字符串终止符的路径。 通过准则：函数返回 VMM_OK，输出字符串为 /boot/images。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.004.R
+Begin User Code
+static char path[] = "kernel.bin";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = S_IFREG
+期望值
+return = VMM_OK
+out = "kernel.bin"
+注释
+测试目的：验证普通文件路径不包含目录分隔符时，函数扫描完整字符串后保持原路径不变。 用例类别：基于需求的测试 预置条件：输入路径为不含 / 的普通文件名；输出缓冲区容量足够。 测试步骤： step1、设置输入路径为 kernel.bin。 step2、设置路径状态为普通文件。 step3、调用被测函数。 step4、检查返回值和输出字符串。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：不含父目录分隔符的普通文件名。 其它说明：覆盖 while 循环执行至 out_len==0，且内部 / 判断始终为 false 的路径。根据当前源码，此时不会将输出改为空目录，而是保留完整文件名。 通过准则：函数返回 VMM_OK，输出字符串保持为 kernel.bin。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir
+名称汇总
+vmm_manager_vfs_file_parent_dir.001.FI_路径状态查询失败
+vmm_manager_vfs_file_parent_dir.002.IN_目标不是普通文件
+vmm_manager_vfs_file_parent_dir.003.R_提取普通文件父目录成功
+vmm_manager_vfs_file_parent_dir.004.R_无目录分隔符时保留原路径
+ 
+⸻
+ 
+三、需要注意的两个源码问题
+1. 
+vmm_manager_vfs_load
+没有真正应用 
+off
+源码只执行：
+len = len - off;
+但没有：
+vfs_lseek(fd, off, SEEK_SET);
+所以 off>0 时仍然从文件当前位置开始读取，只是减少了读取总长度。
+2. 
+vmm_manager_vfs_file_parent_dir
+可能因截断产生越界
+strlcpy() 的返回值是源字符串完整长度，不是实际复制长度：
+out_len = strlcpy(out, path, out_sz);
+若：
+strlen(path) >= out_sz
+则后续：
+out[out_len - 1]
+可能访问输出缓冲区之外。
+因此单元测试不要构造“路径长度大于输出缓冲区”的场景直接执行，否则可能导致测试驱动越界崩溃。该情况应作为源代码静态缺陷记录，而不是通过运行时用例强行覆盖。
