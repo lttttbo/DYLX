@@ -1,0 +1,1845 @@
+下面继续两个函数：
+vmm_manager_vfs_load
+vmm_manager_vfs_file_parent_dir
+vmm_manager_guest_load_list 分支较多，放到下一批单独给出。
+后续按你的实际使用方式处理：
+	•	非本 .c 文件内的函数默认会被 VectorCAST Stub；
+	•	优先在 Stub 表中直接设置返回值或连续返回值；
+	•	不为单纯控制 Stub 返回值额外增加 User Code 全局变量；
+	•	每完成一个函数后附上正式名称汇总。
+ 
+⸻
+ 
+一、
+vmm_manager_vfs_load
+1. 本函数依赖处理
+建议 Stub 的函数
+vmm_manger_vfs_file_open_read
+vmm_malloc
+vmm_free
+vfs_read
+vmm_guest_memory_write
+vmm_host_memory_write
+vfs_close
+其中：
+	•	vmm_free 使用默认空 Stub 即可；
+	•	不检查 vmm_free、vfs_close 等中间函数的调用次数；
+	•	vmm_manger_vfs_file_open_read 虽然在同一个 .c 文件中，但测试本函数时建议隔离为 Stub，避免重复依赖前一个函数的文件系统逻辑；
+	•	若当前环境不能隔离该静态函数，则需要通过 vfs_open、vfs_fstat 间接驱动，测试会明显复杂。
+ 
+⸻
+ 
+2. 公共缓冲区
+只有成功进入内存分配后的用例需要一块实际可写缓冲区。可直接在每条用例的 Begin User Code 中声明：
+static char buf_storage[VFS_LOAD_BUF_SZ];
+然后将 vmm_malloc 的返回值设置为：
+buf_storage
+不需要新增全局变量或辅助函数。
+ 
+⸻
+ 
+3. 用例数量
+建议使用 8 条用例，覆盖：
+打开辅助函数失败
+off >= 文件长度
+内存分配失败
+off == 0
+off > 0
+读取长度小于缓冲区
+读取长度大于缓冲区
+vfs_read 返回 0
+guest 写入
+host 写入
+写入长度不一致
+完整循环
+关闭文件失败
+关闭文件成功
+ 
+⸻
+ 
+vmm_manager_vfs_load.001.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char curdir[] = "/boot";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0x1000U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证文件打开辅助函数失败时，加载函数立即返回对应错误。 用例类别：故障注入测试 预置条件：Guest、目标地址和路径参数有效；文件打开辅助函数返回 VMM_EIO。 测试步骤： step1、初始化 Guest 和路径参数。 step2、设置文件打开辅助函数返回 VMM_EIO。 step3、调用 vmm_manager_vfs_load。 step4、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：源文件打开失败。 其它说明：覆盖 VMM_OK != rc 为 true 的提前返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_load.002.IN
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    4096U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read 需要同时输出：
+return = VMM_OK
+*fdp = 3
+*len = 4096
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证文件偏移等于文件长度时，函数判定偏移超出可加载范围并返回无效参数错误。 用例类别：接口测试 预置条件：文件打开成功；文件长度为 4096；输入偏移为 4096。 测试步骤： step1、设置文件打开辅助函数返回成功并输出文件长度 4096。 step2、设置加载偏移为 4096。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vfs_load。 等价列表：加载偏移等于文件长度。 其它说明：覆盖 off >= len 的边界 true 路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_vfs_load.003.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 4096
+vmm_malloc：
+return = NULL
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证文件加载缓冲区分配失败时，函数返回内存不足错误。 用例类别：故障注入测试 预置条件：文件打开成功；偏移小于文件长度；vmm_malloc 返回 NULL。 测试步骤： step1、设置文件长度为 4096，偏移为 0。 step2、注入加载缓冲区分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：加载缓冲区分配失败。 其它说明：覆盖文件偏移检查通过和 buf==NULL 的错误路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_vfs_load.004.R
+本用例覆盖：
+off == 0
+len 小于 VFS_LOAD_BUF_SZ
+guest != NULL
+完整读取和完整写入
+循环正常结束
+关闭文件成功
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 16
+vmm_guest_memory_write：
+return = 16
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证偏移为 0、文件长度小于单次缓冲区容量且目标为 Guest 内存时，函数完成一次读取和写入并返回成功。 用例类别：基于需求的测试 预置条件：文件长度为 16；缓冲区分配成功；文件读取返回 16；Guest 内存写入返回 16；文件关闭成功。 测试步骤： step1、初始化 Guest 和加载缓冲区。 step2、设置文件长度为 16，加载偏移为 0。 step3、设置读取和 Guest 内存写入均完整成功。 step4、调用 vmm_manager_vfs_load。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_load。 等价列表：小文件完整加载到 Guest 内存。 其它说明：覆盖长度调整三目表达式中 off==0 对应的 false 路径、单次读取长度选择文件剩余长度、guest=true、写入长度相等和 while 正常结束路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.005.R
+本用例覆盖：
+off > 0
+len - off 路径
+guest == NULL
+host memory write
+Begin User Code
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x90000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    4U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 4
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 12
+vmm_host_memory_write：
+return = 12
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证加载偏移大于 0且目标 Guest 为空时，函数按照文件剩余长度读取，并将数据写入宿主机内存。 用例类别：基于需求的测试 预置条件：文件长度为 16；加载偏移为 4；缓冲区分配成功；读取和宿主机内存写入均返回 12。 测试步骤： step1、设置 Guest 入参为 NULL。 step2、设置文件长度为 16、偏移为 4。 step3、设置文件读取和宿主机写入均成功处理 12字节。 step4、调用被测函数。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_load。 等价列表：带偏移加载到宿主机内存。 其它说明：覆盖长度调整三目表达式中 (len-off)<len 为 true、guest=false 及宿主机内存写入路径。 通过准则：函数返回 VMM_OK。
+注意：源码只缩短了加载长度，但没有调用 vfs_lseek()，因此 off=4 并不会真正将文件读取位置移动到第 4字节。这是源码行为问题，不影响当前分支覆盖。
+ 
+⸻
+ 
+vmm_manager_vfs_load.006.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 32
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 0
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证文件读取未获得任何数据时，函数退出加载循环，并在文件关闭成功后返回 VMM_OK。 用例类别：故障注入测试 预置条件：文件打开和缓冲区分配成功；vfs_read 返回 0；文件关闭成功。 测试步骤： step1、设置文件长度为 32。 step2、注入文件读取返回 0。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：文件读取无数据。 其它说明：覆盖 buf_count < 1 为 true和 break 路径。当前源码不会把读取失败转换为错误返回，关闭成功后仍返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.007.FI
+Begin User Code
+static struct vmm_guest guest;
+static char path[] = "/boot/image.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    &guest;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x80000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 3
+*len = 16
+vmm_malloc：
+return = buf_storage
+vfs_read：
+return = 16
+vmm_guest_memory_write：
+return = 8
+vfs_close：
+return = VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证 Guest 内存写入长度小于读取长度时，函数退出加载循环。 用例类别：故障注入测试 预置条件：文件读取返回 16；Guest 内存写入仅返回 8；文件关闭成功。 测试步骤： step1、设置文件长度和读取长度为 16。 step2、注入 Guest 内存部分写入，仅返回 8。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：目标内存部分写入。 其它说明：覆盖 buf_wr != buf_count 为 true和 break 路径。当前实现同样不会将部分写入转换为错误，文件关闭成功后返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_vfs_load.008.FI
+本用例同时覆盖：
+len > VFS_LOAD_BUF_SZ
+buf_rd 选择 VFS_LOAD_BUF_SZ
+至少两次 while
+文件关闭失败
+Begin User Code
+static char path[] = "/boot/large.bin";
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(buf_storage, 0, sizeof(buf_storage));
+
+<<vmm_manager.vmm_manager_vfs_load.guest>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.pa>> =
+    (physical_addr_t)0x90000000ULL;
+
+<<vmm_manager.vmm_manager_vfs_load.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manager_vfs_load.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_load.off>> =
+    0U;
+
+<<vmm_manager.vmm_manager_vfs_load.len>> =
+    0U;
+Stub Processing
+vmm_manger_vfs_file_open_read：
+return = VMM_OK
+*fdp = 4
+*len = VFS_LOAD_BUF_SZ + 4
+vmm_malloc：
+return = buf_storage
+vfs_read 连续返回：
+第1次：VFS_LOAD_BUF_SZ
+第2次：4
+vmm_host_memory_write 连续返回：
+第1次：VFS_LOAD_BUF_SZ
+第2次：4
+vfs_close：
+return = VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证大文件分块加载完成后，文件关闭失败会作为函数最终返回值。 用例类别：故障注入测试 预置条件：文件长度为 VFS_LOAD_BUF_SZ+4；两次读取和宿主机写入均完整成功；文件关闭返回 VMM_EIO。 测试步骤： step1、设置文件长度超过单次加载缓冲区容量。 step2、设置第一次读取和写入处理完整缓冲区。 step3、设置第二次读取和写入处理剩余 4字节。 step4、注入文件关闭失败。 step5、调用被测函数。 step6、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_load。 等价列表：大文件分块加载后关闭失败。 其它说明：覆盖 len<VFS_LOAD_BUF_SZ 为 false和 true、while 多次迭代、宿主机写入成功、循环自然结束及 vfs_close 错误传播路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_load
+名称汇总
+完成用例录入后，可统一修改为以下正式名称：
+vmm_manager_vfs_load.001.FI_文件打开辅助函数失败
+vmm_manager_vfs_load.002.IN_加载偏移等于文件长度
+vmm_manager_vfs_load.003.FI_加载缓冲区分配失败
+vmm_manager_vfs_load.004.R_小文件加载至Guest内存成功
+vmm_manager_vfs_load.005.R_带偏移加载至宿主机内存成功
+vmm_manager_vfs_load.006.FI_文件读取无数据
+vmm_manager_vfs_load.007.FI_Guest内存部分写入
+vmm_manager_vfs_load.008.FI_大文件分块加载后关闭失败
+ 
+⸻
+ 
+二、
+vmm_manager_vfs_file_parent_dir
+int vmm_manager_vfs_file_parent_dir(
+    const char *path,
+    char *out,
+    size_t out_sz)
+1. 依赖函数
+非本文件函数：
+vfs_stat
+VectorCAST 会自动 Stub，可以直接设置：
+返回值
+st.st_mode
+strlcpy 可以使用实际实现；若被自动 Stub，必须配置其返回值为源字符串长度，同时让其真实写入 out 较麻烦。因此建议在此函数测试中将 strlcpy 设置为 Actual。
+ 
+⸻
+ 
+2. 用例数量
+使用 4 条用例，覆盖：
+vfs_stat 失败
+目标不是普通文件
+路径中存在 /
+路径中不存在 /
+while 循环进入和退出
+if 命中和始终不命中
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.001.FI
+Begin User Code
+static char path[] = "/boot/image.bin";
+static char out[64];
+
+memset(out, 0x5A, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证路径状态查询失败时，函数原样返回查询错误。 用例类别：故障注入测试 预置条件：输入路径和输出缓冲区有效；vfs_stat 返回 VMM_EIO。 测试步骤： step1、初始化输入路径和输出缓冲区。 step2、注入路径状态查询失败。 step3、调用 vmm_manager_vfs_file_parent_dir。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：路径状态查询失败。 其它说明：覆盖 if(rc) 为 true 的提前返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.002.IN
+Begin User Code
+static char path[] = "/boot";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = 0
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证输入路径对应对象不是普通文件时，函数返回无效参数错误。 用例类别：接口测试 预置条件：路径状态查询成功；st_mode 不包含 S_IFREG。 测试步骤： step1、设置有效路径和输出缓冲区。 step2、设置路径状态查询成功但目标不是普通文件。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：非普通文件路径。 其它说明：覆盖状态查询成功以及普通文件判断为 false 的路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.003.R
+Begin User Code
+static char path[] = "/boot/images/kernel.bin";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = S_IFREG
+期望值
+return = VMM_OK
+out = "/boot/images"
+注释
+测试目的：验证普通文件路径包含目录分隔符时，函数正确提取最后一级父目录。 用例类别：基于需求的测试 预置条件：路径对应普通文件；输出缓冲区容量足够；strlcpy 使用真实实现。 测试步骤： step1、设置路径为 /boot/images/kernel.bin。 step2、设置路径状态为普通文件。 step3、调用 vmm_manager_vfs_file_parent_dir。 step4、检查返回值和输出字符串。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：具有父目录的普通文件路径。 其它说明：覆盖 while 循环多次执行、字符比较为 false后最终命中 /，并写入字符串终止符的路径。 通过准则：函数返回 VMM_OK，输出字符串为 /boot/images。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir.004.R
+Begin User Code
+static char path[] = "kernel.bin";
+static char out[64];
+
+memset(out, 0, sizeof(out));
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.path>> =
+    path;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out>> =
+    out;
+
+<<vmm_manager.vmm_manager_vfs_file_parent_dir.out_sz>> =
+    sizeof(out);
+Stub Processing
+vfs_stat：
+return = VMM_OK
+st.st_mode = S_IFREG
+期望值
+return = VMM_OK
+out = "kernel.bin"
+注释
+测试目的：验证普通文件路径不包含目录分隔符时，函数扫描完整字符串后保持原路径不变。 用例类别：基于需求的测试 预置条件：输入路径为不含 / 的普通文件名；输出缓冲区容量足够。 测试步骤： step1、设置输入路径为 kernel.bin。 step2、设置路径状态为普通文件。 step3、调用被测函数。 step4、检查返回值和输出字符串。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_vfs_file_parent_dir。 等价列表：不含父目录分隔符的普通文件名。 其它说明：覆盖 while 循环执行至 out_len==0，且内部 / 判断始终为 false 的路径。根据当前源码，此时不会将输出改为空目录，而是保留完整文件名。 通过准则：函数返回 VMM_OK，输出字符串保持为 kernel.bin。
+ 
+⸻
+ 
+vmm_manager_vfs_file_parent_dir
+名称汇总
+vmm_manager_vfs_file_parent_dir.001.FI_路径状态查询失败
+vmm_manager_vfs_file_parent_dir.002.IN_目标不是普通文件
+vmm_manager_vfs_file_parent_dir.003.R_提取普通文件父目录成功
+vmm_manager_vfs_file_parent_dir.004.R_无目录分隔符时保留原路径
+ 
+⸻
+ 
+三、需要注意的两个源码问题
+1. 
+vmm_manager_vfs_load
+没有真正应用 
+off
+源码只执行：
+len = len - off;
+但没有：
+vfs_lseek(fd, off, SEEK_SET);
+所以 off>0 时仍然从文件当前位置开始读取，只是减少了读取总长度。
+2. 
+vmm_manager_vfs_file_parent_dir
+可能因截断产生越界
+strlcpy() 的返回值是源字符串完整长度，不是实际复制长度：
+out_len = strlcpy(out, path, out_sz);
+若：
+strlen(path) >= out_sz
+则后续：
+out[out_len - 1]
+可能访问输出缓冲区之外。
+因此单元测试不要构造“路径长度大于输出缓冲区”的场景直接执行，否则可能导致测试驱动越界崩溃。该情况应作为源代码静态缺陷记录，而不是通过运行时用例强行覆盖。
+
+
+
+下面补充这 5 个函数的测试用例：
+manager_reboot_request
+vmm_manager_guest_reboot_request
+manager_shutdown_request
+vmm_manager_guest_shutdown_request
+gpio_key_init
+其中 manager_reboot_request() 含多个编译宏分支，因此分为：
+	•	基础配置必需用例；
+	•	CONFIG_T517_REBOOT 条件用例；
+	•	CONFIG_BOARD_A1_EVB 条件用例；
+	•	CONFIG_ANDROID_BOOTLOADER 条件用例。
+只录入当前测试环境实际启用宏对应的用例。非本 .c 文件中的函数继续直接在 VectorCAST Stub 表中设置返回值，不额外增加控制变量。
+ 
+⸻
+ 
+一、
+manager_reboot_request
+static void manager_reboot_request(struct vmm_guest *guest, void *data)
+data 未使用，所有用例统一设置：
+<<vmm_manager.manager_reboot_request.data>> = NULL;
+1. 基础配置用例
+以下两条不依赖：
+CONFIG_T517_REBOOT
+CONFIG_BOARD_A1_EVB
+CONFIG_ANDROID_BOOTLOADER
+但若这些宏已启用，需同时按照后续说明设置对应字段。
+ 
+⸻
+ 
+manager_reboot_request.001.R
+覆盖：
+guest->load_list_path[0] == '\0'
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+guest.load_list_path[0] = '\0';
+
+#if defined(CONFIG_ANDROID_BOOTLOADER)
+guest.android_boot_info = NULL;
+#endif
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+vmm_manager_guest_kick：
+    return VMM_OK
+若启用了 CONFIG_T517_REBOOT：
+strstr：
+    return NULL
+期望结果
+函数正常返回。
+注释
+测试目的：验证 Guest 重置完成且未配置加载列表时，函数跳过镜像列表加载并继续执行 Guest 启动流程。 用例类别：基于需求的测试 预置条件：Guest 指针有效；Guest 名称不是特殊重启对象；加载列表路径为空；Guest 重置和启动接口返回成功。 测试步骤： step1、初始化 Guest 对象。 step2、设置 Guest 加载列表路径为空。 step3、设置 Guest 重置和启动接口返回成功。 step4、调用 manager_reboot_request。 step5、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_reboot_request。 等价列表：无加载列表的普通 Guest 重启。 其它说明：覆盖加载列表路径判断为 false并执行 Guest kick 的路径。 通过准则：函数正常返回，无异常访问。
+ 
+⸻
+ 
+manager_reboot_request.002.R
+覆盖：
+guest->load_list_path[0] != '\0'
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+strlcpy(guest.load_list_path,
+        "/boot/load.list",
+        sizeof(guest.load_list_path));
+
+#if defined(CONFIG_ANDROID_BOOTLOADER)
+guest.android_boot_info = NULL;
+#endif
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+vmm_manager_guest_load_list：
+    return VMM_OK
+
+vmm_manager_guest_kick：
+    return VMM_OK
+若启用了 CONFIG_T517_REBOOT：
+strstr：
+    return NULL
+期望结果
+函数正常返回。
+注释
+测试目的：验证普通 Guest 配置加载列表路径时，重置后执行加载列表处理并继续启动 Guest。 用例类别：基于需求的测试 预置条件：Guest 指针有效；加载列表路径非空；相关外部接口返回成功。 测试步骤： step1、初始化 Guest 并设置非空加载列表路径。 step2、设置 Guest 重置、加载列表和启动接口返回成功。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_reboot_request。 等价列表：带加载列表的普通 Guest 重启。 其它说明：覆盖加载列表路径判断为 true 的路径。 通过准则：函数正常返回，无异常访问。
+ 
+⸻
+ 
+manager_reboot_request
+基础名称汇总
+manager_reboot_request.001.R_普通Guest无加载列表重启
+manager_reboot_request.002.R_普通Guest加载列表后重启
+ 
+⸻
+ 
+二、
+CONFIG_T517_REBOOT
+条件用例
+仅当前环境定义：
+CONFIG_T517_REBOOT
+时增加。
+manager_reboot_request.003.R
+覆盖：
+guest &&
+strstr(guest->name, "VM_linux")
+整体为 true。
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "VM_linux",
+        sizeof(guest.name));
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+strstr 可以直接设置：
+return = guest.name
+board_reset 为 void Stub，保持默认空实现。
+期望结果
+函数正常返回。
+注释
+测试目的：验证 T517 配置下 VM_linux 请求重启时，函数执行单板复位路径并立即返回。 用例类别：基于需求的测试 预置条件：已定义 CONFIG_T517_REBOOT；Guest 名称匹配 VM_linux。 测试步骤： step1、初始化 Guest 名称为 VM_linux。 step2、设置 strstr 返回非空指针。 step3、调用 manager_reboot_request。 step4、确认函数执行提前返回路径。 用例来源：需求分析、有效等价类。 追溯ID：manager_reboot_request。 等价列表：VM_linux 触发单板重启。 其它说明：覆盖 T517 特殊 Guest 条件为 true和 board_reset() 后提前返回的路径。 通过准则：函数正常返回，不继续访问后续 Guest 重启流程。
+ 
+⸻
+ 
+manager_reboot_request
+T517 名称补充
+manager_reboot_request.003.R_VM_linux触发单板重启
+基础用例 .001.R 或 .002.R 中设置：
+strstr return = NULL
+即可覆盖该条件为 false，不需额外增加用例。
+ 
+⸻
+ 
+三、
+CONFIG_BOARD_A1_EVB
+条件用例
+定义：
+CONFIG_BOARD_A1_EVB
+后，源码不再直接对所有 Guest 执行 load_list_path 判断，而是先区分：
+guest->name == "serverVM"
+1. 
+serverVM
+分支
+需要分别覆盖：
+vmm_boot_load_linux_image(NULL) != VMM_OK
+vmm_boot_load_linux_image(NULL) == VMM_OK
+虽然两条路径最终均继续执行 kick，但分支覆盖需要两种返回值。
+ 
+⸻
+ 
+manager_reboot_request.004.FI
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "serverVM",
+        sizeof(guest.name));
+
+#if defined(CONFIG_ANDROID_BOOTLOADER)
+guest.android_boot_info = NULL;
+#endif
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+strncmp：
+    return 0
+
+vmm_boot_load_linux_image：
+    return VMM_EFAIL
+
+vmm_manager_guest_kick：
+    return VMM_OK
+启用 T517 时：
+strstr：
+    return NULL
+期望结果
+函数正常返回。
+注释
+测试目的：通过故障注入验证 A1 EVB 环境中 serverVM 的 Linux 镜像加载失败路径。 用例类别：故障注入测试 预置条件：已定义 CONFIG_BOARD_A1_EVB；Guest 名称匹配 serverVM；Linux 镜像加载接口返回失败。 测试步骤： step1、设置 Guest 名称为 serverVM。 step2、设置名称比较结果为相等。 step3、注入 Linux 镜像加载失败。 step4、调用被测函数。 step5、确认函数正常结束。 用例来源：故障注入。 追溯ID：manager_reboot_request。 等价列表：serverVM 镜像加载失败。 其它说明：覆盖 serverVM 分支以及镜像加载返回值非 VMM_OK 的路径。源码仅记录错误，仍继续执行 kick。 通过准则：函数正常返回，无异常访问。
+ 
+⸻
+ 
+manager_reboot_request.005.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "serverVM",
+        sizeof(guest.name));
+
+#if defined(CONFIG_ANDROID_BOOTLOADER)
+guest.android_boot_info = NULL;
+#endif
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+strncmp：
+    return 0
+
+vmm_boot_load_linux_image：
+    return VMM_OK
+
+vmm_manager_guest_kick：
+    return VMM_OK
+启用 T517 时：
+strstr：
+    return NULL
+期望结果
+函数正常返回。
+注释
+测试目的：验证 A1 EVB 环境中 serverVM 的 Linux 镜像加载成功路径。 用例类别：基于需求的测试 预置条件：已定义 CONFIG_BOARD_A1_EVB；Guest 名称匹配 serverVM；Linux 镜像加载成功。 测试步骤： step1、初始化 serverVM Guest。 step2、设置名称比较相等。 step3、设置 Linux 镜像加载返回成功。 step4、调用被测函数。 step5、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_reboot_request。 等价列表：serverVM 镜像加载成功。 其它说明：覆盖镜像加载结果为 VMM_OK 的分支。 通过准则：函数正常返回。
+ 
+⸻
+ 
+2. 非 
+serverVM
+分支
+基础用例 .001.R、.002.R 在 A1 EVB 环境下应增加：
+strncmp return = 非0
+分别覆盖：
+load_list_path[0] == '\0'
+load_list_path[0] != '\0'
+不需要再增加用例。
+A1 EVB 名称补充
+manager_reboot_request.004.FI_serverVM镜像加载失败
+manager_reboot_request.005.R_serverVM镜像加载成功
+ 
+⸻
+ 
+四、
+CONFIG_ANDROID_BOOTLOADER
+条件用例
+基础用例已经通过：
+guest.android_boot_info = NULL;
+覆盖：
+if (guest->android_boot_info)
+为 false。
+还需增加成功和失败两条。
+ 
+⸻
+ 
+manager_reboot_request.006.FI
+Begin User Code
+static struct vmm_guest guest;
+static u8 boot_info_storage[8];
+
+memset(&guest, 0, sizeof(guest));
+memset(boot_info_storage, 0, sizeof(boot_info_storage));
+
+strlcpy(guest.name,
+        "androidVM",
+        sizeof(guest.name));
+
+guest.load_list_path[0] = '\0';
+
+guest.android_boot_info =
+    (void *)boot_info_storage;
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+vmm_android_bootloader_boot_flow：
+    return VMM_EFAIL
+启用 T517 时：
+strstr：
+    return NULL
+启用 A1 EVB 时：
+strncmp：
+    return 非0
+期望结果
+函数正常返回。
+注释
+测试目的：通过故障注入验证 Android 启动信息存在但 Bootloader 重启流程失败时，函数执行提前返回。 用例类别：故障注入测试 预置条件：已定义 CONFIG_ANDROID_BOOTLOADER；Android 启动信息指针有效；Bootloader 流程返回失败。 测试步骤： step1、初始化 Android Guest 和启动信息。 step2、注入 Android Bootloader 流程失败。 step3、调用被测函数。 step4、确认函数执行错误提前返回路径。 用例来源：故障注入。 追溯ID：manager_reboot_request。 等价列表：Android Bootloader 重启失败。 其它说明：覆盖 android_boot_info 非空和 Bootloader 返回值非 VMM_OK 的路径；该路径不继续执行 Guest kick。 通过准则：函数正常返回，无异常访问。
+ 
+⸻
+ 
+manager_reboot_request.007.R
+Begin User Code
+static struct vmm_guest guest;
+static u8 boot_info_storage[8];
+
+memset(&guest, 0, sizeof(guest));
+memset(boot_info_storage, 0, sizeof(boot_info_storage));
+
+strlcpy(guest.name,
+        "androidVM",
+        sizeof(guest.name));
+
+guest.load_list_path[0] = '\0';
+
+guest.android_boot_info =
+    (void *)boot_info_storage;
+
+<<vmm_manager.manager_reboot_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_reboot_request.data>> =
+    NULL;
+Stub Processing
+vmm_manager_guest_reset：
+    return VMM_OK
+
+vmm_android_bootloader_boot_flow：
+    return VMM_OK
+
+vmm_manager_guest_kick：
+    return VMM_OK
+启用 T517 时：
+strstr：
+    return NULL
+启用 A1 EVB 时：
+strncmp：
+    return 非0
+期望结果
+函数正常返回。
+注释
+测试目的：验证 Android Bootloader 重启流程成功后，函数继续执行 Guest 启动流程。 用例类别：基于需求的测试 预置条件：Android 启动信息有效；Bootloader 流程和 Guest kick 均返回成功。 测试步骤： step1、初始化 Android Guest 和启动信息。 step2、设置 Bootloader 流程返回成功。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_reboot_request。 等价列表：Android Bootloader 重启成功。 其它说明：覆盖 Bootloader 返回 VMM_OK 并继续执行 Guest kick 的路径。 通过准则：函数正常返回。
+ 
+⸻
+ 
+Android Bootloader 名称补充
+manager_reboot_request.006.FI_AndroidBootloader重启失败
+manager_reboot_request.007.R_AndroidBootloader重启成功
+ 
+⸻
+ 
+五、
+vmm_manager_guest_reboot_request
+int vmm_manager_guest_reboot_request(struct vmm_guest *guest)
+为了完整覆盖复合条件：
+cvcpu &&
+(cvcpu->guest == guest) &&
+vmm_scheduler_normal_context()
+需要 5 条用例。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_reboot_request.guest>> =
+    NULL;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证 Guest 入参为空时，重启请求接口返回无效参数错误。 用例类别：接口测试 预置条件：Guest 指针为 NULL。 测试步骤： step1、设置 Guest 入参为 NULL。 step2、调用 vmm_manager_guest_reboot_request。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_reboot_request。 等价列表：Guest 空指针。 其它说明：覆盖参数检查失败路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request.002.R
+覆盖：
+cvcpu == NULL
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+<<vmm_manager.vmm_manager_guest_reboot_request.guest>> =
+    &guest;
+Stub Processing
+vmm_scheduler_current_vcpu：
+    return NULL
+
+vmm_manager_guest_request：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证当前无运行 VCPU 时，函数不执行当前 VCPU 暂停处理，直接提交 Guest 重启请求。 用例类别：基于需求的测试 预置条件：Guest 有效；当前 VCPU 查询返回 NULL；请求提交成功。 测试步骤： step1、初始化 Guest。 step2、设置当前 VCPU 返回 NULL。 step3、设置 Guest 请求提交返回成功。 step4、调用被测函数。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reboot_request。 等价列表：无当前 VCPU 的重启请求。 其它说明：覆盖复合条件第一个子条件为 false 的短路路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request.003.R
+覆盖：
+cvcpu != NULL
+cvcpu->guest != guest
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_guest other_guest;
+static struct vmm_vcpu cvcpu;
+
+memset(&guest, 0, sizeof(guest));
+memset(&other_guest, 0, sizeof(other_guest));
+memset(&cvcpu, 0, sizeof(cvcpu));
+
+cvcpu.guest = &other_guest;
+
+<<vmm_manager.vmm_manager_guest_reboot_request.guest>> =
+    &guest;
+Stub Processing
+vmm_scheduler_current_vcpu：
+    return &cvcpu
+
+vmm_manager_guest_request：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证当前 VCPU 不属于目标 Guest 时，函数不暂停当前 VCPU并正常提交重启请求。 用例类别：基于需求的测试 预置条件：当前 VCPU 有效，但其所属 Guest 与目标 Guest 不同。 测试步骤： step1、初始化两个 Guest 和一个当前 VCPU。 step2、设置当前 VCPU 属于另一 Guest。 step3、调用重启请求接口。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reboot_request。 等价列表：当前 VCPU 属于其他 Guest。 其它说明：覆盖复合条件第一个子条件为 true、第二个子条件为 false的短路路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request.004.R
+覆盖：
+cvcpu != NULL
+cvcpu->guest == guest
+normal_context == false
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu cvcpu;
+
+memset(&guest, 0, sizeof(guest));
+memset(&cvcpu, 0, sizeof(cvcpu));
+
+cvcpu.guest = &guest;
+
+<<vmm_manager.vmm_manager_guest_reboot_request.guest>> =
+    &guest;
+Stub Processing
+vmm_scheduler_current_vcpu：
+    return &cvcpu
+
+vmm_scheduler_normal_context：
+    return FALSE
+
+vmm_manager_guest_request：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证当前 VCPU 属于目标 Guest，但当前不处于普通调度上下文时，不执行暂停处理并提交重启请求。 用例类别：基于需求的测试 预置条件：当前 VCPU 属于目标 Guest；普通上下文判断返回 FALSE。 测试步骤： step1、初始化 Guest 和当前 VCPU。 step2、设置当前 VCPU 所属 Guest 为目标 Guest。 step3、设置普通上下文判断为 FALSE。 step4、调用被测函数。 step5、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reboot_request。 等价列表：非普通上下文中的 Guest 重启请求。 其它说明：覆盖复合条件前两个子条件为 true、第三个子条件为 false。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request.005.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_vcpu cvcpu;
+
+memset(&guest, 0, sizeof(guest));
+memset(&cvcpu, 0, sizeof(cvcpu));
+
+cvcpu.guest = &guest;
+
+arch_atomic_write(&cvcpu.do_reboot, 0L);
+
+<<vmm_manager.vmm_manager_guest_reboot_request.guest>> =
+    &guest;
+Stub Processing
+vmm_scheduler_current_vcpu：
+    return &cvcpu
+
+vmm_scheduler_normal_context：
+    return TRUE
+
+vmm_manager_vcpu_pause：
+    return VMM_OK
+
+vmm_manager_guest_request：
+    return VMM_OK
+期望值
+return = VMM_OK
+cvcpu.do_reboot = 1
+在 VectorCAST 中若原子类型无法直接比较，可展开检查其内部计数成员，或在 GDB 中执行：
+p arch_atomic_read(&cvcpu.do_reboot)
+注释
+测试目的：验证当前 VCPU 属于目标 Guest且处于普通上下文时，函数设置重启标志、暂停当前 VCPU并提交重启请求。 用例类别：基于需求的测试 预置条件：当前 VCPU 属于目标 Guest；普通上下文判断为 TRUE；请求提交成功。 测试步骤： step1、初始化 Guest 和当前 VCPU。 step2、设置当前 VCPU 重启标志初值为 0。 step3、设置当前 VCPU 属于目标 Guest且处于普通上下文。 step4、调用重启请求接口。 step5、检查返回值和重启标志。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_reboot_request。 等价列表：当前 Guest VCPU 主动发起重启。 其它说明：覆盖复合条件整体为 true 的路径。 通过准则：函数返回 VMM_OK，当前 VCPU 的 do_reboot 为 1。
+ 
+⸻
+ 
+vmm_manager_guest_reboot_request
+名称汇总
+vmm_manager_guest_reboot_request.001.IN_Guest为空
+vmm_manager_guest_reboot_request.002.R_无当前VCPU时提交重启请求
+vmm_manager_guest_reboot_request.003.R_当前VCPU属于其他Guest
+vmm_manager_guest_reboot_request.004.R_非普通上下文提交重启请求
+vmm_manager_guest_reboot_request.005.R_暂停当前VCPU并提交重启请求
+ 
+⸻
+ 
+六、
+manager_shutdown_request
+static void manager_shutdown_request(struct vmm_guest *guest, void *data)
+data 未使用，统一设置为 NULL。
+最少 3 条用例。
+ 
+⸻
+ 
+manager_shutdown_request.001.R
+覆盖：
+vmm_completion_vcpu_count(...) == 0
+vmm_manager_guest_reset(...) == VMM_OK
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_completion completion;
+
+memset(&guest, 0, sizeof(guest));
+memset(&completion, 0, sizeof(completion));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+guest.cmpl_poweroff = &completion;
+
+<<vmm_manager.manager_shutdown_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_shutdown_request.data>> =
+    NULL;
+Stub Processing
+vmm_completion_vcpu_count：
+    return 0
+
+vmm_manager_guest_reset：
+    return VMM_OK
+期望结果
+函数正常返回。
+注释
+测试目的：验证没有 VCPU 等待关机完成量且 Guest 重置成功时，函数完成重置处理。 用例类别：基于需求的测试 预置条件：完成量有效；等待 VCPU 数量为 0；Guest 重置返回成功。 测试步骤： step1、初始化 Guest 和关机完成量。 step2、设置完成量等待者数量为 0。 step3、设置 Guest 重置成功。 step4、调用 manager_shutdown_request。 step5、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_shutdown_request。 等价列表：无关机等待者且 Guest 重置成功。 其它说明：覆盖完成量等待者判断为 false和 Guest 重置返回 0 的路径。 通过准则：函数正常返回。
+ 
+⸻
+ 
+manager_shutdown_request.002.FI
+Begin User Code
+与 .001.R 相同。
+Stub Processing
+vmm_completion_vcpu_count：
+    return 0
+
+vmm_manager_guest_reset：
+    return VMM_EFAIL
+期望结果
+函数正常返回。
+注释
+测试目的：通过故障注入验证没有完成量等待者但 Guest 重置失败时，函数执行重置失败处理。 用例类别：故障注入测试 预置条件：完成量等待者数量为 0；Guest 重置返回失败。 测试步骤： step1、初始化 Guest 和完成量。 step2、设置等待者数量为 0。 step3、注入 Guest 重置失败。 step4、调用被测函数。 step5、确认函数正常返回。 用例来源：故障注入。 追溯ID：manager_shutdown_request。 等价列表：Guest 关机重置失败。 其它说明：覆盖 vmm_manager_guest_reset() 返回非零的分支。 通过准则：函数正常返回，无异常访问。
+ 
+⸻
+ 
+manager_shutdown_request.003.R
+覆盖：
+vmm_completion_vcpu_count(...) != 0
+vmm_completion_complete(...) == 0
+Begin User Code
+同 .001.R。
+Stub Processing
+vmm_completion_vcpu_count：
+    return 1
+
+vmm_completion_complete：
+    return VMM_OK
+期望结果
+函数正常返回。
+注释
+测试目的：验证存在 VCPU 等待关机完成量时，函数通知完成量并提前返回。 用例类别：基于需求的测试 预置条件：完成量等待者数量大于 0；完成量通知成功。 测试步骤： step1、初始化 Guest 和关机完成量。 step2、设置完成量等待者数量为 1。 step3、设置完成量通知返回成功。 step4、调用被测函数。 step5、确认函数执行提前返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_shutdown_request。 等价列表：通知关机完成量成功。 其它说明：覆盖等待者判断为 true和完成量通知返回 0 的路径。 通过准则：函数正常返回。
+ 
+⸻
+ 
+manager_shutdown_request.004.FI
+Stub Processing
+vmm_completion_vcpu_count：
+    return 1
+
+vmm_completion_complete：
+    return VMM_EFAIL
+其他输入同 .001.R。
+期望结果
+函数正常返回。
+注释
+测试目的：通过故障注入验证存在关机等待者但完成量通知失败时，函数执行通知失败处理并返回。 用例类别：故障注入测试 预置条件：完成量等待者数量大于 0；完成量通知接口返回失败。 测试步骤： step1、初始化 Guest 和完成量。 step2、设置等待者数量为 1。 step3、注入完成量通知失败。 step4、调用被测函数。 step5、确认函数正常返回。 用例来源：故障注入。 追溯ID：manager_shutdown_request。 等价列表：关机完成量通知失败。 其它说明：覆盖完成量通知返回非零的路径。 通过准则：函数正常返回。
+ 
+⸻
+ 
+manager_shutdown_request
+名称汇总
+manager_shutdown_request.001.R_无等待者时Guest重置成功
+manager_shutdown_request.002.FI_无等待者时Guest重置失败
+manager_shutdown_request.003.R_关机完成量通知成功
+manager_shutdown_request.004.FI_关机完成量通知失败
+ 
+⸻
+ 
+七、
+vmm_manager_guest_shutdown_request
+该函数与 reboot request 条件结构相同，同样使用 5 条。
+测试数据可复用前述重启请求用例，仅将被测函数改为：
+vmm_manager_guest_shutdown_request
+并将提交请求的期望返回值设置在：
+vmm_manager_guest_request
+用例对应关系
+shutdown 用例	数据直接对应
+.001.IN	reboot .001.IN
+.002.R	reboot .002.R
+.003.R	reboot .003.R
+.004.R	reboot .004.R
+.005.R	reboot .005.R
+其中 .005.R 同样检查：
+cvcpu.do_reboot = 1
+虽然成员名为 do_reboot，源码关机请求路径也确实写入该字段。
+每条用例 Stub
+统一将：
+vmm_manager_guest_request：
+    return VMM_OK
+.001.IN
+期望
+return = VMM_EINVALID
+.002.R
+至 
+.005.R
+期望
+return = VMM_OK
+vmm_manager_guest_shutdown_request
+名称汇总
+vmm_manager_guest_shutdown_request.001.IN_Guest为空
+vmm_manager_guest_shutdown_request.002.R_无当前VCPU时提交关机请求
+vmm_manager_guest_shutdown_request.003.R_当前VCPU属于其他Guest
+vmm_manager_guest_shutdown_request.004.R_非普通上下文提交关机请求
+vmm_manager_guest_shutdown_request.005.R_暂停当前VCPU并提交关机请求
+ 
+⸻
+ 
+八、
+gpio_key_init
+static void gpio_key_init(struct vmm_guest *guest)
+1. 测试准备
+需要两个设备树节点和三个属性：
+static struct vmm_devtree_node node0;
+static struct vmm_devtree_node node1;
+
+static struct vmm_devtree_attr irq0_attr;
+static struct vmm_devtree_attr timeout_attr;
+static struct vmm_devtree_attr irq1_attr;
+
+static u32 irq0_be;
+static u32 timeout_be;
+static u32 irq1_be;
+正常情况下建议用：
+irq0_be = vmm_cpu_to_be32(32U);
+timeout_be = vmm_cpu_to_be32(30U);
+irq1_be = vmm_cpu_to_be32(33U);
+然后：
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+irq1_attr.value = &irq1_be;
+若 vmm_cpu_to_be32() 在当前环境不可用，可直接在 Stub 表中设置 vmm_be32_to_cpu() 的连续返回值。
+ 
+⸻
+ 
+gpio_key_init.001.FI
+覆盖第一个节点不存在。
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+guest.poweroff_irq = 0xAAAAAAAAU;
+guest.suspend_irq = 0xBBBBBBBBU;
+guest.poweroff_timeout_secs = 0xCCCCCCCCULL;
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    return NULL
+vmm_devtree_dref_node 保持默认空 Stub。
+期望值
+guest.poweroff_irq = 0
+guest.suspend_irq = 0
+guest.poweroff_timeout_secs = 0
+注释
+测试目的：通过故障注入验证 /gpio-keys0 节点不存在时，函数清零 GPIO 关机配置并提前返回。 用例类别：故障注入测试 预置条件：Guest 有效；第一个 GPIO keys 节点查询返回 NULL。 测试步骤： step1、将 Guest GPIO 配置字段设置为非零哨兵值。 step2、注入 /gpio-keys0 节点不存在。 step3、调用 gpio_key_init。 step4、检查 Guest GPIO 配置字段。 用例来源：故障注入。 追溯ID：gpio_key_init。 等价列表：主 GPIO keys 节点缺失。 其它说明：覆盖初始化清零和第一个节点空指针提前返回路径。 通过准则：三个 GPIO 配置字段均为 0。
+ 
+⸻
+ 
+gpio_key_init.002.FI
+覆盖第一个节点存在，但 interrupts 属性不存在。
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_devtree_node node0;
+
+memset(&guest, 0, sizeof(guest));
+memset(&node0, 0, sizeof(node0));
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    第1次 return &node0
+
+vmm_devtree_getattr：
+    第1次 return NULL
+期望值
+guest.poweroff_irq = 0
+guest.suspend_irq = 0
+guest.poweroff_timeout_secs = 0
+注释
+测试目的：通过故障注入验证 /gpio-keys0 节点缺少 interrupts 属性时，函数提前返回。 用例类别：故障注入测试 预置条件：第一个 GPIO keys 节点存在；interrupts 属性查询返回 NULL。 测试步骤： step1、初始化 Guest 和第一个设备树节点。 step2、设置节点查询成功。 step3、注入 interrupts 属性缺失。 step4、调用被测函数。 step5、检查 Guest 配置字段。 用例来源：故障注入。 追溯ID：gpio_key_init。 等价列表：主 GPIO 中断属性缺失。 其它说明：覆盖第一个节点非空和第一个属性为空的路径。 通过准则：Guest GPIO 配置字段保持 0。
+ 
+⸻
+ 
+gpio_key_init.003.FI
+覆盖 timeout_secs 属性不存在。
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_devtree_node node0;
+static struct vmm_devtree_attr irq0_attr;
+static u32 irq0_be;
+
+memset(&guest, 0, sizeof(guest));
+memset(&node0, 0, sizeof(node0));
+memset(&irq0_attr, 0, sizeof(irq0_attr));
+
+irq0_be = vmm_cpu_to_be32(32U);
+irq0_attr.value = &irq0_be;
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    第1次 return &node0
+
+vmm_devtree_getattr：
+    第1次 return &irq0_attr
+    第2次 return NULL
+期望值
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 0
+guest.suspend_irq = 0
+注释
+测试目的：通过故障注入验证主 GPIO 中断属性有效但 timeout_secs 属性缺失时，函数保存关机中断号后提前返回。 用例类别：故障注入测试 预置条件：/gpio-keys0 节点和 interrupts 属性有效；timeout_secs 属性不存在。 测试步骤： step1、构造主 GPIO 中断属性。 step2、设置节点和 interrupts 属性查询成功。 step3、注入 timeout_secs 属性缺失。 step4、调用被测函数。 step5、检查 Guest 字段。 用例来源：故障注入。 追溯ID：gpio_key_init。 等价列表：关机超时属性缺失。 其它说明：覆盖主 GPIO 中断号解析成功和 timeout 属性为空的路径。 通过准则：poweroff_irq 为 32，其余字段为 0。
+ 
+⸻
+ 
+gpio_key_init.004.FI
+覆盖：
+time <= 60
+node1 == NULL
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_devtree_node node0;
+
+static struct vmm_devtree_attr irq0_attr;
+static struct vmm_devtree_attr timeout_attr;
+
+static u32 irq0_be;
+static u32 timeout_be;
+
+memset(&guest, 0, sizeof(guest));
+memset(&node0, 0, sizeof(node0));
+memset(&irq0_attr, 0, sizeof(irq0_attr));
+memset(&timeout_attr, 0, sizeof(timeout_attr));
+
+irq0_be = vmm_cpu_to_be32(32U);
+timeout_be = vmm_cpu_to_be32(30U);
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    第1次 return &node0
+    第2次 return NULL
+
+vmm_devtree_getattr：
+    第1次 return &irq0_attr
+    第2次 return &timeout_attr
+期望值
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 30
+guest.suspend_irq = 0
+注释
+测试目的：验证关机超时值不超过 60秒且挂起 GPIO 节点不存在时，函数保存关机配置并提前返回。 用例类别：故障注入测试 预置条件：主 GPIO 节点及属性有效；timeout_secs 为 30；/gpio-keys1 节点不存在。 测试步骤： step1、构造关机中断号和 30秒超时属性。 step2、设置第一个节点及属性查询成功。 step3、注入第二个 GPIO 节点不存在。 step4、调用被测函数。 step5、检查 Guest 配置字段。 用例来源：故障注入。 追溯ID：gpio_key_init。 等价列表：合法关机超时且挂起 GPIO 节点缺失。 其它说明：覆盖 time>60 为 false、超时三目表达式选择原值，以及第二个节点为空的路径。 通过准则：关机中断号为 32，关机超时为 30，挂起中断号为 0。
+ 
+⸻
+ 
+gpio_key_init.005.FI
+覆盖：
+time > 60
+node1 != NULL
+node1 interrupts == NULL
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_devtree_node node0;
+static struct vmm_devtree_node node1;
+
+static struct vmm_devtree_attr irq0_attr;
+static struct vmm_devtree_attr timeout_attr;
+
+static u32 irq0_be;
+static u32 timeout_be;
+
+memset(&guest, 0, sizeof(guest));
+memset(&node0, 0, sizeof(node0));
+memset(&node1, 0, sizeof(node1));
+memset(&irq0_attr, 0, sizeof(irq0_attr));
+memset(&timeout_attr, 0, sizeof(timeout_attr));
+
+irq0_be = vmm_cpu_to_be32(32U);
+timeout_be = vmm_cpu_to_be32(100U);
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    第1次 return &node0
+    第2次 return &node1
+
+vmm_devtree_getattr：
+    第1次 return &irq0_attr
+    第2次 return &timeout_attr
+    第3次 return NULL
+期望值
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 60
+guest.suspend_irq = 0
+注释
+测试目的：通过故障注入验证关机超时超过上限时被限制为 60秒，且挂起 GPIO 节点缺少 interrupts 属性时函数提前返回。 用例类别：故障注入测试 预置条件：主 GPIO 配置有效；timeout_secs 为 100；挂起 GPIO 节点存在但中断属性缺失。 测试步骤： step1、构造关机中断号和 100秒超时属性。 step2、设置两个 GPIO 节点查询成功。 step3、注入第二个节点 interrupts 属性缺失。 step4、调用被测函数。 step5、检查 Guest 配置字段。 用例来源：故障注入。 追溯ID：gpio_key_init。 等价列表：超时超过上限且挂起中断属性缺失。 其它说明：覆盖 time>60 为 true、超时值限制为 60，以及第二个 interrupts 属性为空的路径。 通过准则：关机超时为 60，挂起中断号保持 0。
+ 
+⸻
+ 
+gpio_key_init.006.R
+完整成功路径。
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_devtree_node node0;
+static struct vmm_devtree_node node1;
+
+static struct vmm_devtree_attr irq0_attr;
+static struct vmm_devtree_attr timeout_attr;
+static struct vmm_devtree_attr irq1_attr;
+
+static u32 irq0_be;
+static u32 timeout_be;
+static u32 irq1_be;
+
+memset(&guest, 0, sizeof(guest));
+memset(&node0, 0, sizeof(node0));
+memset(&node1, 0, sizeof(node1));
+
+memset(&irq0_attr, 0, sizeof(irq0_attr));
+memset(&timeout_attr, 0, sizeof(timeout_attr));
+memset(&irq1_attr, 0, sizeof(irq1_attr));
+
+irq0_be = vmm_cpu_to_be32(32U);
+timeout_be = vmm_cpu_to_be32(30U);
+irq1_be = vmm_cpu_to_be32(33U);
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+irq1_attr.value = &irq1_be;
+
+<<vmm_manager.gpio_key_init.guest>> =
+    &guest;
+Stub Processing
+vmm_devtree_getchild：
+    第1次 return &node0
+    第2次 return &node1
+
+vmm_devtree_getattr：
+    第1次 return &irq0_attr
+    第2次 return &timeout_attr
+    第3次 return &irq1_attr
+期望值
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 30
+guest.suspend_irq = 33
+注释
+测试目的：验证两个 GPIO keys 节点及相关属性均有效时，函数正确初始化关机中断、关机超时和挂起中断。 用例类别：基于需求的测试 预置条件：两个 GPIO keys 节点有效；中断号分别为 32和33；关机超时为 30秒。 测试步骤： step1、构造两个 GPIO 节点及三个设备树属性。 step2、设置设备树查询依次返回对应节点和属性。 step3、调用 gpio_key_init。 step4、检查 Guest 的三个 GPIO 配置字段。 用例来源：需求分析、有效等价类。 追溯ID：gpio_key_init。 等价列表：GPIO 关机和挂起配置完整有效。 其它说明：覆盖完整初始化成功路径。 通过准则：poweroff_irq=32、poweroff_timeout_secs=30、suspend_irq=33。
+ 
+⸻
+ 
+gpio_key_init
+名称汇总
+gpio_key_init.001.FI_主GPIO节点不存在
+gpio_key_init.002.FI_主GPIO中断属性不存在
+gpio_key_init.003.FI_关机超时属性不存在
+gpio_key_init.004.FI_挂起GPIO节点不存在
+gpio_key_init.005.FI_超时限幅且挂起中断属性不存在
+gpio_key_init.006.R_GPIO关机与挂起配置成功
+需要特别注意：源码在判断 node 是否为 NULL 之前调用了：
+vmm_devtree_dref_node(node);
+因此 .001.FI 中必须保证 vmm_devtree_dref_node 是可接受 NULL 的空 Stub；若使用真实实现且不接受 NULL，该用例可能在进入 if (!node) 前崩溃。
+
+
+对，你提醒得对，我漏掉了 vmm_manager_guest_load_list()。这个函数是整个 VFS 模块里分支最多的之一，应该单独作为一批。
+它依赖：
+vmm_manager_vfs_file_parent_dir
+vmm_manger_vfs_file_open_read
+vmm_manager_file_buf_read
+vmm_manager_vfs_next_token
+vmm_manager_vfs_load
+vfs_close
+strtoull
+其中除了 strtoull 建议用真实实现，其余全部可以直接 Stub 返回，不需要再去联动测试前面的函数。
+ 
+⸻
+ 
+建议用例数量
+我分析了一下控制流，最少 10 条即可做到完整覆盖（不包含 errno 极端平台异常）。
+ 
+⸻
+ 
+001.FI
+覆盖
+curdir = vmm_zalloc(...)
+== NULL
+返回：
+VMM_ENOMEM
+ 
+⸻
+ 
+002.FI
+覆盖
+vmm_manager_vfs_file_parent_dir()
+!= VMM_OK
+返回：
+该错误码
+ 
+⸻
+ 
+003.FI
+覆盖
+vmm_manger_vfs_file_open_read()
+!= VMM_OK
+ 
+⸻
+ 
+004.FI
+覆盖
+buf = vmm_malloc(...)
+== NULL
+返回
+VMM_ENOMEM
+ 
+⸻
+ 
+005.IN
+覆盖
+token == NULL
+||
+buf == NULL
+即
+token = vmm_manager_vfs_next_token(...);
+
+if (!token || !buf)
+直接 break。
+ 
+⸻
+ 
+006.IN
+覆盖
+is_valid_number
+== false
+例如：
+"xyz"
+进入：
+Please check your nor_flash address.
+ 
+⸻
+ 
+007.FI
+覆盖
+errno != 0
+这里直接 Stub
+strtoull
+之后把
+errno
+设为：
+ERANGE
+返回
+VMM_EINVALID
+ 
+⸻
+ 
+008.FI
+覆盖
+vmm_manager_vfs_load()
+!= VMM_OK
+进入：
+Error %d
+然后 break。
+ 
+⸻
+ 
+009.R
+正常流程
+覆盖：
+token1 地址
+↓
+
+token2 文件名
+
+↓
+
+load success
+
+↓
+
+while退出
+
+↓
+
+vfs_close success
+最终
+VMM_OK
+ 
+⸻
+ 
+010.FI
+覆盖最后：
+rc = vfs_close(fd);
+
+if (rc)
+返回：
+rc
+ 
+⸻
+ 
+这10条即可覆盖
+包括：
+✅ curdir malloc失败
+✅ parent_dir失败
+✅ open失败
+✅ malloc失败
+✅ token读取失败
+✅ 地址非法
+✅ strtoull失败
+✅ load失败
+✅ 全成功
+✅ close失败
+ 
+⸻
+ 
+UserCode 几乎不用增加
+仍然沿用我们之前的原则。
+例如：
+static char buf_storage[VFS_LOAD_BUF_SZ];
+static char curdir[VFS_MAX_PATH];
+static struct vmm_guest guest;
+就足够。
+其它全部：
+vmm_manager_vfs_file_parent_dir
+vmm_manger_vfs_file_open_read
+vmm_manager_file_buf_read
+vmm_manager_vfs_next_token
+vmm_manager_vfs_load
+vfs_close
+全部直接在 Stub Return 中控制。
+ 
+⸻
+ 
+最终名称汇总
+vmm_manager_guest_load_list.001.FI_当前目录缓冲区分配失败
+vmm_manager_guest_load_list.002.FI_父目录解析失败
+vmm_manager_guest_load_list.003.FI_加载列表文件打开失败
+vmm_manager_guest_load_list.004.FI_加载列表缓冲区分配失败
+vmm_manager_guest_load_list.005.IN_Token读取失败
+vmm_manager_guest_load_list.006.IN_地址字符串非法
+vmm_manager_guest_load_list.007.FI_地址转换失败
+vmm_manager_guest_load_list.008.FI_镜像加载失败
+vmm_manager_guest_load_list.009.R_加载列表正常解析成功
+vmm_manager_guest_load_list.010.FI_加载列表文件关闭失败
+我建议下一批开始直接进入 vmm_manager_guest_create（你之前要求最后写的大函数除外），这样整个 vmm_manager.c 就基本完成了。
+
+下面补充 vmm_manager_guest_shutdown_request() 的 5 条用例注释。测试数据和 Stub 配置可继续沿用对应的 vmm_manager_guest_reboot_request() 用例，但每条关机用例必须分别填写完整注释。
+ 
+⸻
+ 
+vmm_manager_guest_shutdown_request.001.IN
+测试目的：验证 Guest 入参为空时，关机请求接口能够识别无效输入并返回无效参数错误。
+用例类别：接口测试
+预置条件：无。
+测试步骤：
+step1、将 guest 入参设置为 NULL。
+step2、调用 vmm_manager_guest_shutdown_request。
+step3、观察函数返回值。
+用例来源：接口分析、无效等价类。
+追溯ID：vmm_manager_guest_shutdown_request。
+等价列表：Guest 指针为空。
+其它说明：覆盖 !guest 条件为 true 的参数检查提前返回路径；后续当前 VCPU 查询和 Guest 请求提交逻辑均不执行。
+通过准则：函数返回 VMM_EINVALID，测试用例通过。
+ 
+⸻
+ 
+vmm_manager_guest_shutdown_request.002.R
+对应场景：
+guest != NULL
+cvcpu == NULL
+测试目的：验证当前没有正在运行的 VCPU 时，函数跳过当前 VCPU 的暂停处理并正常提交 Guest 关机请求。
+用例类别：基于需求的测试
+预置条件：Guest 指针有效；vmm_scheduler_current_vcpu 返回 NULL；vmm_manager_guest_request 返回 VMM_OK。
+测试步骤：
+step1、构造有效的 Guest 对象。
+step2、设置 vmm_scheduler_current_vcpu 返回 NULL。
+step3、设置 vmm_manager_guest_request 返回 VMM_OK。
+step4、调用 vmm_manager_guest_shutdown_request。
+step5、观察函数返回值。
+用例来源：需求分析、有效等价类。
+追溯ID：vmm_manager_guest_shutdown_request。
+等价列表：无当前 VCPU 时提交关机请求。
+其它说明：覆盖复合条件中 cvcpu 为 false 的短路路径；不执行 do_reboot 标志写入和 VCPU 暂停处理，直接提交 manager_shutdown_request。
+通过准则：函数返回 VMM_OK，测试用例通过。
+ 
+⸻
+ 
+vmm_manager_guest_shutdown_request.003.R
+对应场景：
+cvcpu != NULL
+cvcpu->guest != guest
+测试目的：验证当前 VCPU 不属于目标 Guest 时，函数不暂停当前 VCPU，并正常提交目标 Guest 的关机请求。
+用例类别：基于需求的测试
+预置条件：目标 Guest 和当前 VCPU 均有效；当前 VCPU 所属 Guest 与目标 Guest 不同；vmm_manager_guest_request 返回 VMM_OK。
+测试步骤：
+step1、构造目标 Guest、另一 Guest 和当前 VCPU。
+step2、将当前 VCPU 的 guest 成员设置为另一 Guest。
+step3、设置 vmm_scheduler_current_vcpu 返回当前 VCPU。
+step4、设置 vmm_manager_guest_request 返回 VMM_OK。
+step5、调用 vmm_manager_guest_shutdown_request。
+step6、观察函数返回值。
+用例来源：需求分析、有效等价类。
+追溯ID：vmm_manager_guest_shutdown_request。
+等价列表：当前 VCPU 属于其他 Guest。
+其它说明：覆盖复合条件中 cvcpu 为 true、cvcpu->guest == guest 为 false 的短路路径；不执行当前 VCPU 的关机标志写入和暂停处理。
+通过准则：函数返回 VMM_OK，测试用例通过。
+ 
+⸻
+ 
+vmm_manager_guest_shutdown_request.004.R
+对应场景：
+cvcpu != NULL
+cvcpu->guest == guest
+vmm_scheduler_normal_context() == FALSE
+测试目的：验证当前 VCPU 属于目标 Guest，但当前不处于普通调度上下文时，函数不暂停当前 VCPU并正常提交关机请求。
+用例类别：基于需求的测试
+预置条件：Guest 和当前 VCPU 有效；当前 VCPU 属于目标 Guest；vmm_scheduler_normal_context 返回 FALSE；vmm_manager_guest_request 返回 VMM_OK。
+测试步骤：
+step1、构造有效的 Guest 和当前 VCPU。
+step2、将当前 VCPU 的 guest 成员设置为目标 Guest。
+step3、设置 vmm_scheduler_current_vcpu 返回当前 VCPU。
+step4、设置 vmm_scheduler_normal_context 返回 FALSE。
+step5、设置 vmm_manager_guest_request 返回 VMM_OK。
+step6、调用 vmm_manager_guest_shutdown_request。
+step7、观察函数返回值。
+用例来源：需求分析、有效等价类。
+追溯ID：vmm_manager_guest_shutdown_request。
+等价列表：非普通上下文中的 Guest 关机请求。
+其它说明：覆盖复合条件中前两个子条件为 true、vmm_scheduler_normal_context 为 false 的路径；函数不执行 do_reboot 标志写入和 VCPU 暂停处理。
+通过准则：函数返回 VMM_OK，测试用例通过。
+ 
+⸻
+ 
+vmm_manager_guest_shutdown_request.005.R
+对应场景：
+cvcpu != NULL
+cvcpu->guest == guest
+vmm_scheduler_normal_context() == TRUE
+测试目的：验证当前 VCPU 属于目标 Guest且处于普通调度上下文时，函数设置当前 VCPU 的关机处理标志、暂停当前 VCPU并提交 Guest 关机请求。
+用例类别：基于需求的测试
+预置条件：Guest 和当前 VCPU 有效；当前 VCPU 属于目标 Guest；当前处于普通调度上下文；do_reboot 初始值为 0；vmm_manager_vcpu_pause 和 vmm_manager_guest_request 返回 VMM_OK。
+测试步骤：
+step1、构造有效的 Guest 和当前 VCPU。
+step2、将当前 VCPU 的 guest 成员设置为目标 Guest。
+step3、将当前 VCPU 的 do_reboot 初始值设置为 0。
+step4、设置 vmm_scheduler_current_vcpu 返回当前 VCPU。
+step5、设置 vmm_scheduler_normal_context 返回 TRUE。
+step6、设置 vmm_manager_vcpu_pause 返回 VMM_OK。
+step7、设置 vmm_manager_guest_request 返回 VMM_OK。
+step8、调用 vmm_manager_guest_shutdown_request。
+step9、检查函数返回值和当前 VCPU 的 do_reboot 值。
+用例来源：需求分析、有效等价类。
+追溯ID：vmm_manager_guest_shutdown_request。
+等价列表：当前 Guest VCPU 在普通上下文中主动申请关机。
+其它说明：覆盖复合条件整体为 true 的路径。虽然字段名称为 do_reboot，但当前源码在关机请求路径中同样将其写为 1，用于避免请求提交后重新返回该 VCPU。
+通过准则：函数返回 VMM_OK，当前 VCPU 的 do_reboot 值为 1，测试用例通过。
+ 
+⸻
+ 
+名称汇总
+vmm_manager_guest_shutdown_request.001.IN_Guest为空
+vmm_manager_guest_shutdown_request.002.R_无当前VCPU时提交关机请求
+vmm_manager_guest_shutdown_request.003.R_当前VCPU属于其他Guest
+vmm_manager_guest_shutdown_request.004.R_非普通上下文提交关机请求
+vmm_manager_guest_shutdown_request.005.R_暂停当前VCPU并提交关机请求
