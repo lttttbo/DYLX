@@ -1,137 +1,90 @@
-下面先完成本批中的 Guest 请求队列及请求提交函数：
-manager_have_req
-manager_enqueue_req
-manager_dequeue_req
-manager_flush_req
-manager_req_work
-vmm_manager_guest_request
-VFS 相关函数从下一批的：
+继续下一批，先完成此前排队的四个 VFS 辅助函数：
 vmm_manger_vfs_file_open_read
-继续。
-本批继续沿用已有的 vcast_manager_prepare_guest_env()，不再增加新的环境准备函数。测试注释中的字段统一使用 追溯ID。
+vmm_manager_file_buf_read
+vmm_manager_vfs_in_esclist
+vmm_manager_vfs_next_token
+本批共 12 条用例：
+vmm_manger_vfs_file_open_read：5 条
+vmm_manager_file_buf_read：2 条
+vmm_manager_vfs_in_esclist：2 条
+vmm_manager_vfs_next_token：3 条
+继续遵循已确认的规则：
+	•	不增加函数调用次数打点。
+	•	不验证无关的中间函数是否执行。
+	•	用例类别仅使用：基于需求的测试、接口测试、故障注入测试。
+	•	每条用例保留完整注释。
+	•	注释字段使用“追溯ID”。
+	•		•	正式名称保留 .R、.IN、.FI 后缀。
  
 ⸻
  
-一、对现有 Guest 环境 User Code 的补充
-manager_enqueue_req() 和 manager_req_work() 会访问：
-mngr.guest_work_array
-因此，需要在之前的 vcast_manager_prepare_guest_env() 中补充 work 数组环境。
-1. Unit Appendix 增加唯一存储
-与现有的：
-vcast_guest_array
-vcast_guest_avail_array
-放在同一个 Unit Appendix 中：
+一、本批需要补充或沿用的 User Code
+已有同名变量时直接复用，不要重复定义。
+1. User Global / Data
 /*
- * 额外保留一个前置元素：
+ * 控制 VFS 外部接口返回结果。
+ */
+int vcast_vfs_open_ret;
+int vcast_vfs_fstat_ret;
+int vcast_vfs_close_ret;
+
+/*
+ * vfs_fstat 成功时写入 struct stat 的字段。
+ */
+u32 vcast_vfs_stat_mode;
+u64 vcast_vfs_stat_size;
+
+/*
+ * 用于 next_token 返回指针和剩余缓冲区指针的精确比较。
+ */
+char *vcast_expected_char_ptr;
+char *vcast_expected_next_buf;
+
+/*
+ * 前面请求队列用例已经定义过时直接复用：
  *
- * mngr.guest_work_array 指向下标 1。
- * vcast_guest_work_store[0] 因而是一个合法的、
- * 与 work 数组属于同一数组对象且位于 start 之前的地址，
- * 用于覆盖 manager_req_work 的 ptr < start 路径。
+ * void *vcast_zalloc_ret;
  */
-struct vmm_work
-vcast_guest_work_store[CONFIG_MAX_GUEST_COUNT + 1U];
-不要加 static，测试用例需要通过 extern 使用同一份存储。
-2. User Global 增加声明
-extern struct vmm_work
-vcast_guest_work_store[CONFIG_MAX_GUEST_COUNT + 1U];
-3. 修改已有的 
-vcast_manager_prepare_guest_env
-在已有实现中增加：
-memset(vcast_guest_work_store,
-       0,
-       sizeof(vcast_guest_work_store));
+extern void *vcast_zalloc_ret;
+2. 公共 Test Case Init
+vcast_vfs_open_ret = 3;
+vcast_vfs_fstat_ret = VMM_OK;
+vcast_vfs_close_ret = VMM_OK;
 
-/*
- * 下标 1 作为 mngr.guest_work_array[0]。
- */
-mngr.guest_work_array = &vcast_guest_work_store[1];
-修改后的关键部分如下：
-void vcast_manager_prepare_guest_env(u32 guest_count)
-{
-    u32 g;
+vcast_vfs_stat_mode = (u32)S_IFREG;
+vcast_vfs_stat_size = 0ULL;
 
-    memset(vcast_guest_array,
-           0,
-           sizeof(vcast_guest_array));
+vcast_expected_char_ptr = NULL;
+vcast_expected_next_buf = NULL;
 
-    memset(vcast_guest_avail_array,
-           0,
-           sizeof(vcast_guest_avail_array));
-
-    memset(vcast_guest_work_store,
-           0,
-           sizeof(vcast_guest_work_store));
-
-    for (g = 0U;
-         g < (u32)CONFIG_MAX_GUEST_COUNT;
-         ++g) {
-        vcast_guest_array[g].id = g;
-        vcast_guest_avail_array[g] = TRUE;
-    }
-
-    mngr.guest_array = vcast_guest_array;
-    mngr.guest_avail_array =
-        vcast_guest_avail_array;
-
-    /*
-     * mngr.guest_work_array[0]
-     * 实际为 vcast_guest_work_store[1]。
-     */
-    mngr.guest_work_array =
-        &vcast_guest_work_store[1];
-
-    mngr.guest_count = guest_count;
-
-    vcast_expected_guest = NULL;
-}
-原来的：
-vcast_manager_prepare_guest_env.001.R
-已经会执行新增语句，不需要再增加辅助函数用例。
- 
-⸻
- 
-二、本批需要补充的 User Global
-已有同名变量时直接复用。
-/*
- * manager_dequeue_req 等函数返回指针的精确期望值。
- */
-struct vmm_guest_request *vcast_expected_req;
-
-/*
- * manager_req_work 中 Stub 的 vmm_manager_guest 返回值。
- */
-struct vmm_guest *vcast_manager_guest_ret;
-
-/*
- * vmm_manager_guest_request 中控制 vmm_zalloc 返回地址。
- * NULL 表示内存分配失败。
- */
-void *vcast_zalloc_ret;
-
-/*
- * 控制 vmm_manager_guest_put 返回值。
- * manager_req_work 不使用该返回值，默认设为 VMM_OK。
- */
-int vcast_guest_put_ret;
-公共 Test Case Init
-vcast_expected_req = NULL;
-vcast_manager_guest_ret = NULL;
 vcast_zalloc_ret = NULL;
-vcast_guest_put_ret = VMM_OK;
  
 ⸻
  
-三、本批 Stub 配置
+二、本批 Stub User Code
 1. 
-vmm_manager_guest
-仅测试 manager_req_work 时启用：
-return vcast_manager_guest_ret;
+vfs_open
+return vcast_vfs_open_ret;
 2. 
-vmm_manager_guest_put
-return vcast_guest_put_ret;
+vfs_fstat
+将 st 替换为 VectorCAST 生成的实际 struct stat * 形参名：
+if (st) {
+    memset(st, 0, sizeof(*st));
+
+    st->st_mode =
+        vcast_vfs_stat_mode;
+
+    st->st_size =
+        vcast_vfs_stat_size;
+}
+
+return vcast_vfs_fstat_ret;
 3. 
+vfs_close
+return vcast_vfs_close_ret;
+4. 
 vmm_zalloc
+继续沿用请求队列用例中已经使用的方案：
 void *ret;
 
 ret = vcast_zalloc_ret;
@@ -141,541 +94,447 @@ if (ret) {
 }
 
 return ret;
-其中 size 使用 VectorCAST 生成的实际形参名。
-该实现模拟 vmm_zalloc() 的基本契约：成功时返回已清零存储。
-4. 
+其中 size 替换为生成代码中的实际大小形参名。
+5. 
 vmm_free
 return;
-不记录释放次数。请求节点在出队前已经从链表中删除，因此空实现不会影响队列结果。
-5. 
-vmm_workqueue_schedule_work
-该调用的返回结果没有被被测函数使用，沿用无副作用成功 Stub：
-	•	实际原型为 void 时使用空实现；
-	•	实际原型带返回值时返回 VMM_OK。
-不增加调用打点。
-6. 请求队列锁
-继续沿用当前工程中已建立的锁隔离方案。每条用例仍执行：
-INIT_SPIN_LOCK(&guest.req_lock);
-并初始化：
-INIT_LIST_HEAD(&guest.req_list);
+6. 
+vfs_read
+测试 vmm_manager_file_buf_read 时，将 Stub 设置为：
+/*
+ * 返回调用者传入的读取长度，
+ * 从函数返回值即可验证被测函数是否进行了长度截断。
+ *
+ * count 替换为 vfs_read 第三个形参的实际名称。
+ */
+return (size_t)count;
+该 Stub 不修改目标缓冲区，因此可以同时检查：
+memset(buf, 0, VFS_LOAD_BUF_SZ);
+的结果。
+7. 
+vmm_isprintable
+测试 vmm_manager_vfs_next_token 时优先使用真实实现：
+可打印 ASCII 字符：返回 TRUE
+0x01：返回 FALSE
+vmm_manager_vfs_in_esclist 同样使用本单元中的真实实现，不 Stub。
  
 ⸻
  
-四、请求回调的选择
-本批不新增测试回调函数，直接复用源文件中已有、签名完全一致的：
-manager_suspend_request
-其原型是：
-static void manager_suspend_request(
-    struct vmm_guest *guest,
-    void *data);
-在请求处理用例中统一设置：
-guest.cmpl_suspend = NULL;
-因此该回调不会访问完成量，也不会引入额外依赖。
+三、
+vmm_manger_vfs_file_open_read
+最少使用 5 条用例，同时覆盖：
+前导空格循环进入/不进入
+相对路径判断的三个短路条件
+路径缓冲区分配成功/失败
+vfs_open 成功/失败
+vfs_fstat 成功/失败
+普通文件/非普通文件
+正常输出 fd 和 len
+ 
+⸻
+ 
+vmm_manger_vfs_file_open_read.001.FI
+Begin User Code
+static int fd;
+static u32 len;
+static char path[] = "   /image.bin";
+static char curdir[] = "/boot";
+
+fd = 0x55;
+len = 0xAAAAAAAAU;
+
+/*
+ * 前导空格会被跳过；
+ * 跳过后首字符为 '/'，相对路径判断的第一个条件为 false。
+ */
+vcast_vfs_open_ret = VMM_ENOENT;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.path>> =
+    path;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.fdp>> =
+    &fd;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.len>> =
+    &len;
+期望值
+return = VMM_ENOENT
+
+fd = 0x55
+len = 0xAAAAAAAA
+注释
+测试目的：通过故障注入验证输入路径包含前导空格且文件打开失败时，函数跳过前导空格并原样返回 vfs_open 错误。 用例类别：故障注入测试 预置条件：路径以三个空格开头，去除空格后为绝对路径；vfs_open 返回 VMM_ENOENT。 测试步骤： step1、设置带前导空格的路径。 step2、设置输出 fd 和 len 为哨兵值。 step3、注入文件打开失败。 step4、调用 vmm_manger_vfs_file_open_read。 step5、观察返回值和输出参数。 用例来源：故障注入。 追溯ID：vmm_manger_vfs_file_open_read。 等价列表：绝对路径文件打开失败。 其它说明：覆盖前导空格 while 循环进入和退出、相对路径判断第一个条件为 false，以及 fd<0 的错误返回路径。 通过准则：函数返回 VMM_ENOENT，fd 和 len 保持原哨兵值。
+ 
+⸻
+ 
+vmm_manger_vfs_file_open_read.002.FI
+Begin User Code
+static int fd;
+static u32 len;
+static char path[] = ".image.bin";
+static char curdir[] = "/boot";
+
+fd = 0x55;
+len = 0xAAAAAAAAU;
+
+/*
+ * path[0]=='.' 为 true；
+ * path[1]=='/' 为 false；
+ * 因此进入直接打开路径。
+ */
+vcast_vfs_open_ret = 3;
+vcast_vfs_fstat_ret = VMM_EIO;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.path>> =
+    path;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.fdp>> =
+    &fd;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.len>> =
+    &len;
+期望值
+return = VMM_EIO
+
+fd = 0x55
+len = 0xAAAAAAAA
+注释
+测试目的：通过故障注入验证路径以点开头但不是 ./ 形式，且文件状态查询失败时，函数返回 vfs_fstat 错误。 用例类别：故障注入测试 预置条件：路径为 .image.bin；文件打开成功；vfs_fstat 返回 VMM_EIO。 测试步骤： step1、设置以点开头但第二字符不是斜杠的路径。 step2、设置文件打开成功。 step3、注入文件状态查询失败。 step4、调用被测函数。 step5、观察返回值和输出参数。 用例来源：故障注入。 追溯ID：vmm_manger_vfs_file_open_read。 等价列表：直接路径状态查询失败。 其它说明：覆盖前导空格循环初始条件为 false；覆盖相对路径判断第一个条件为 true、第二个条件为 false；覆盖 fd>=0 和 rc!=0 路径。 通过准则：函数返回 VMM_EIO，fd 和 len 保持原值。
+ 
+⸻
+ 
+vmm_manger_vfs_file_open_read.003.IN
+Begin User Code
+static int fd;
+static u32 len;
+static char path[] = "./image.bin";
+
+fd = 0x55;
+len = 0xAAAAAAAAU;
+
+/*
+ * path 为 "./" 形式，但 curdir=NULL，
+ * 因此相对路径判断的第三个条件为 false。
+ */
+vcast_vfs_open_ret = 4;
+vcast_vfs_fstat_ret = VMM_OK;
+vcast_vfs_stat_mode = 0U;
+vcast_vfs_stat_size = 512ULL;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.curdir>> =
+    NULL;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.path>> =
+    path;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.fdp>> =
+    &fd;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.len>> =
+    &len;
+期望值
+return = VMM_EINVALID
+
+fd = 0x55
+len = 0xAAAAAAAA
+注释
+测试目的：验证路径为 ./ 形式但未提供当前目录，且目标不是普通文件时，函数返回 VMM_EINVALID。 用例类别：接口测试 预置条件：curdir=NULL；文件打开和状态查询成功；状态模式不包含 S_IFREG。 测试步骤： step1、设置 ./image.bin 路径和空当前目录。 step2、设置文件打开成功。 step3、设置状态查询成功但目标不是普通文件。 step4、调用被测函数。 step5、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manger_vfs_file_open_read。 等价列表：非普通文件输入。 其它说明：覆盖相对路径判断前两个条件为 true、第三个条件为 false；覆盖 fstat 成功和普通文件判断为 false。 通过准则：函数返回 VMM_EINVALID，输出参数不更新。
+ 
+⸻
+ 
+vmm_manger_vfs_file_open_read.004.FI
+Begin User Code
+static int fd;
+static u32 len;
+static char path[] = "./image.bin";
+static char curdir[] = "/boot";
+
+fd = 0x55;
+len = 0xAAAAAAAAU;
+
+/*
+ * 三个相对路径条件均为 true，
+ * 但路径缓冲区分配失败。
+ */
+vcast_zalloc_ret = NULL;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.path>> =
+    path;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.fdp>> =
+    &fd;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.len>> =
+    &len;
+期望值
+return = VMM_ENOMEM
+
+fd = 0x55
+len = 0xAAAAAAAA
+注释
+测试目的：通过故障注入验证解析相对路径时，路径拼接缓冲区分配失败会返回 VMM_ENOMEM。 用例类别：故障注入测试 预置条件：路径为 ./image.bin；当前目录有效；vmm_zalloc 返回 NULL。 测试步骤： step1、设置有效相对路径和当前目录。 step2、注入路径缓冲区分配失败。 step3、调用被测函数。 step4、观察返回值和输出参数。 用例来源：故障注入。 追溯ID：vmm_manger_vfs_file_open_read。 等价列表：相对路径缓冲区分配失败。 其它说明：覆盖相对路径复合条件全部为 true以及 !npath 的错误返回路径。 通过准则：函数返回 VMM_ENOMEM，输出参数不更新。
+ 
+⸻
+ 
+vmm_manger_vfs_file_open_read.005.R
+Begin User Code
+static int fd;
+static u32 len;
+static char path[] = "./image.bin";
+static char curdir[] = "/boot";
+static char npath_buf[VFS_MAX_PATH * 2U];
+
+fd = -1;
+len = 0U;
+
+memset(npath_buf, 0, sizeof(npath_buf));
+
+vcast_zalloc_ret = npath_buf;
+
+vcast_vfs_open_ret = 5;
+vcast_vfs_fstat_ret = VMM_OK;
+vcast_vfs_stat_mode = (u32)S_IFREG;
+vcast_vfs_stat_size = 4096ULL;
+vcast_vfs_close_ret = VMM_OK;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.curdir>> =
+    curdir;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.path>> =
+    path;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.fdp>> =
+    &fd;
+
+<<vmm_manager.vmm_manger_vfs_file_open_read.len>> =
+    &len;
+期望值
+return = VMM_OK
+
+fd = 5
+len = 4096
+注释
+测试目的：验证有效相对路径指向普通文件时，函数完成路径拼接、文件打开和状态查询，并输出文件描述符及文件长度。 用例类别：基于需求的测试 预置条件：相对路径和当前目录有效；路径缓冲区分配成功；文件打开和状态查询成功；目标为普通文件。 测试步骤： step1、准备有效路径拼接缓冲区。 step2、设置相对路径和当前目录。 step3、设置文件打开返回 fd 5。 step4、设置文件状态为普通文件、大小为 4096。 step5、调用被测函数。 step6、观察返回值和输出参数。 用例来源：需求分析。 追溯ID：vmm_manger_vfs_file_open_read。 等价列表：相对路径普通文件正常打开。 其它说明：覆盖路径缓冲区分配成功、路径拼接、文件打开成功、状态查询成功、普通文件判断为 true及正常输出路径。 通过准则：函数返回 VMM_OK，fd 为 5，len 为 4096。
+ 
+⸻
+ 
+四、
+vmm_manager_file_buf_read
+最少使用 2 条用例。
+测试本函数时，vfs_read Stub 使用：
+return (size_t)count;
+并且不修改 buf。
+ 
+⸻
+ 
+vmm_manager_file_buf_read.001.R
+Begin User Code
+static char buf[VFS_LOAD_BUF_SZ];
+
+memset(buf, 0x5A, sizeof(buf));
+
+<<vmm_manager.vmm_manager_file_buf_read.fd>> =
+    3;
+
+<<vmm_manager.vmm_manager_file_buf_read.buf>> =
+    buf;
+
+<<vmm_manager.vmm_manager_file_buf_read.len>> =
+    (u32)VFS_LOAD_BUF_SZ - 1U;
+期望值
+return = VFS_LOAD_BUF_SZ - 1
+
+buf[0] = 0
+buf[VFS_LOAD_BUF_SZ - 1] = 0
+注释
+测试目的：验证请求读取长度小于缓冲区容量时，函数使用原请求长度调用文件读取接口，并在读取前清零整个缓冲区。 用例类别：基于需求的测试 预置条件：目标缓冲区容量为 VFS_LOAD_BUF_SZ；请求长度为容量减 1；vfs_read 返回其长度形参。 测试步骤： step1、将缓冲区填充为非零值。 step2、设置读取长度为 VFS_LOAD_BUF_SZ-1。 step3、调用 vmm_manager_file_buf_read。 step4、观察返回值和缓冲区首尾字节。 用例来源：需求分析、边界值分析。 追溯ID：vmm_manager_file_buf_read。 等价列表：读取长度小于缓冲区容量。 其它说明：覆盖三目表达式中 len<VFS_LOAD_BUF_SZ 为 true 的路径。 通过准则：函数返回 VFS_LOAD_BUF_SZ-1，缓冲区首尾字节均为 0。
+ 
+⸻
+ 
+vmm_manager_file_buf_read.002.R
+Begin User Code
+static char buf[VFS_LOAD_BUF_SZ];
+
+memset(buf, 0x5A, sizeof(buf));
+
+<<vmm_manager.vmm_manager_file_buf_read.fd>> =
+    3;
+
+<<vmm_manager.vmm_manager_file_buf_read.buf>> =
+    buf;
+
+<<vmm_manager.vmm_manager_file_buf_read.len>> =
+    (u32)VFS_LOAD_BUF_SZ + 1U;
+期望值
+return = VFS_LOAD_BUF_SZ
+
+buf[0] = 0
+buf[VFS_LOAD_BUF_SZ - 1] = 0
+注释
+测试目的：验证请求读取长度超过缓冲区容量时，函数将实际读取长度限制为 VFS_LOAD_BUF_SZ。 用例类别：基于需求的测试 预置条件：请求长度为 VFS_LOAD_BUF_SZ+1；vfs_read 返回其长度形参。 测试步骤： step1、将缓冲区填充为非零值。 step2、设置读取长度超过缓冲区容量。 step3、调用被测函数。 step4、观察返回值和缓冲区内容。 用例来源：需求分析、边界值分析。 追溯ID：vmm_manager_file_buf_read。 等价列表：读取长度大于缓冲区容量。 其它说明：覆盖三目表达式中 len<VFS_LOAD_BUF_SZ 为 false 的截断路径。 通过准则：函数返回 VFS_LOAD_BUF_SZ，缓冲区首尾字节均为 0。
  
 ⸻
  
 五、
-manager_have_req
-最少需要 2 条用例。
+vmm_manager_vfs_in_esclist
+最少使用 2 条用例。
  
 ⸻
  
-manager_have_req.001.R
+vmm_manager_vfs_in_esclist.001.R
 Begin User Code
-static struct vmm_guest guest;
-
-memset(&guest, 0, sizeof(guest));
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-<<vmm_manager.manager_have_req.guest>> =
-    &guest;
+/*
+ * 空格位于转义字符数组的最后一个元素，
+ * 可以覆盖前两个元素比较失败后第三个元素匹配的路径。
+ */
+<<vmm_manager.vmm_manager_vfs_in_esclist.c>> =
+    ' ';
 期望值
-return = FALSE
+return = 1
 注释
-测试目的：验证 Guest 请求链表为空时，函数返回 FALSE。 用例类别：基于需求的测试 预置条件：Guest 指针有效；请求链表已初始化且为空。 测试步骤： step1、清零 Guest 对象。 step2、初始化请求锁和空请求链表。 step3、调用 manager_have_req。 step4、观察函数返回值。 用例来源：需求分析、有效等价类。 追溯ID：manager_have_req。 等价列表：Guest 请求队列为空。 其它说明：覆盖 list_empty() 为 true、!list_empty() 为 false以及保持初始返回值 FALSE 的路径。 通过准则：函数返回 FALSE。
+测试目的：验证空格属于 VFS token 分隔字符集合。 用例类别：基于需求的测试 预置条件：输入字符为空格。 测试步骤： step1、设置输入字符为空格。 step2、调用 vmm_manager_vfs_in_esclist。 step3、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_vfs_in_esclist。 等价列表：有效 token 分隔字符。 其它说明：空格是转义字符数组的第三个元素，可覆盖循环多次执行、前两次比较失败和第三次比较成功的路径。 通过准则：函数返回 1。
  
 ⸻
  
-manager_have_req.002.R
+vmm_manager_vfs_in_esclist.002.R
 Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req, 0, sizeof(req));
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-INIT_LIST_HEAD(&req.head);
-
-list_add_tail(&req.head,
-              &guest.req_list);
-
-<<vmm_manager.manager_have_req.guest>> =
-    &guest;
+/*
+ * 制表符不在 {'\n', '\r', ' '} 中。
+ */
+<<vmm_manager.vmm_manager_vfs_in_esclist.c>> =
+    '\t';
 期望值
-return = TRUE
+return = 0
 注释
-测试目的：验证 Guest 请求链表中存在请求时，函数返回 TRUE。 用例类别：基于需求的测试 预置条件：Guest 请求链表中包含一个有效请求节点。 测试步骤： step1、初始化 Guest 和请求对象。 step2、将请求节点加入 Guest 请求链表。 step3、调用 manager_have_req。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：manager_have_req。 等价列表：Guest 请求队列非空。 其它说明：覆盖 !list_empty() 为 true和返回值设置为 TRUE 的路径。 通过准则：函数返回 TRUE。
+测试目的：验证不属于分隔字符集合的字符返回 0。 用例类别：基于需求的测试 预置条件：输入字符为制表符。 测试步骤： step1、设置输入字符为制表符。 step2、调用被测函数。 step3、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_vfs_in_esclist。 等价列表：非 token 分隔字符。 其它说明：覆盖循环完整执行、每次字符比较均为 false以及循环自然结束路径。 通过准则：函数返回 0。
  
 ⸻
  
 六、
-manager_enqueue_req
-该函数无判断分支，1 条用例即可。
-manager_enqueue_req.001.R
+vmm_manager_vfs_next_token
+最少使用 3 条用例。
+调用该函数时必须保证：
+bufp 非 NULL
+*bufp 指向有效可写缓冲区
+缓冲区至少具有 len+1 个字节空间
+len 指针非 NULL
+该函数没有对这些指针进行防御性检查，不构造空指针输入。
+ 
+⸻
+ 
+vmm_manager_vfs_next_token.001.R
 Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req;
+static char buffer[8] = "abc def";
+static char *cursor;
+static u32 len;
 
-memset(&guest, 0, sizeof(guest));
-memset(&req, 0, sizeof(req));
+cursor = buffer;
+len = 7U;
 
-vcast_manager_prepare_guest_env(1U);
+vcast_expected_char_ptr = buffer;
+vcast_expected_next_buf = &buffer[4];
 
-guest.id = 0U;
+<<vmm_manager.vmm_manager_vfs_next_token.bufp>> =
+    &cursor;
 
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-INIT_LIST_HEAD(&req.head);
-
-<<vmm_manager.manager_enqueue_req.guest>> =
-    &guest;
-
-<<vmm_manager.manager_enqueue_req.req>> =
-    &req;
+<<vmm_manager.vmm_manager_vfs_next_token.len>> =
+    &len;
 期望值
-guest.req_list.next = &req.head
-guest.req_list.prev = &req.head
+return = vcast_expected_char_ptr
 
-req.head.next = &guest.req_list
-req.head.prev = &guest.req_list
+cursor = vcast_expected_next_buf
+len = 3
+
+buffer[0] = 'a'
+buffer[1] = 'b'
+buffer[2] = 'c'
+buffer[3] = '\0'
 注释
-测试目的：验证请求入队函数将请求节点添加至 Guest 请求链表尾部。 用例类别：基于需求的测试 预置条件：Guest ID 为 0；manager work 数组已初始化；Guest 请求链表为空；请求节点有效。 测试步骤： step1、准备 manager Guest 和 work 数组环境。 step2、初始化 Guest 请求锁和空链表。 step3、初始化请求链表节点。 step4、调用 manager_enqueue_req。 step5、检查 Guest 请求链表和请求节点的前后指针。 用例来源：需求分析、有效等价类。 追溯ID：manager_enqueue_req。 等价列表：请求正常入队。 其它说明：覆盖链表尾部添加和 work 调度语句；不对 workqueue 调度调用增加打点。 通过准则：Guest 请求链表仅包含输入请求节点，链表前后指针关系正确。
+测试目的：验证输入包含一个 token 和后续内容时，函数以分隔字符结束当前 token，并更新缓冲区指针和剩余长度。 用例类别：基于需求的测试 预置条件：输入内容为 abc def；长度为 7；字符均为可打印字符。 测试步骤： step1、设置缓冲区指针指向字符串起始位置。 step2、设置输入长度为 7。 step3、调用 vmm_manager_vfs_next_token。 step4、比较返回 token 指针。 step5、检查 token 终止符、剩余缓冲区指针和剩余长度。 用例来源：需求分析。 追溯ID：vmm_manager_vfs_next_token。 等价列表：token 后仍有剩余输入。 其它说明：覆盖首字符不是分隔符、token 扫描循环进入、可打印判断为 true、遇到分隔符退出，以及 pos<*len 为 true的剩余输入更新路径。 通过准则：返回 token 为 abc，cursor 指向 def，剩余长度为 3。
  
 ⸻
  
-七、
-manager_dequeue_req
-最少需要 2 条用例。
- 
-⸻
- 
-manager_dequeue_req.001.R
+vmm_manager_vfs_next_token.002.IN
 Begin User Code
-static struct vmm_guest guest;
+static char buffer[3] = {
+    ' ',
+    '\n',
+    '\0'
+};
 
-memset(&guest, 0, sizeof(guest));
+static char *cursor;
+static u32 len;
 
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
+cursor = buffer;
+len = 2U;
 
-<<vmm_manager.manager_dequeue_req.guest>> =
-    &guest;
+vcast_expected_char_ptr = buffer;
+vcast_expected_next_buf = NULL;
+
+<<vmm_manager.vmm_manager_vfs_next_token.bufp>> =
+    &cursor;
+
+<<vmm_manager.vmm_manager_vfs_next_token.len>> =
+    &len;
+期望值
+return = vcast_expected_char_ptr
+
+cursor = NULL
+len = 0
+buffer[2] = '\0'
+注释
+测试目的：验证输入全部由分隔字符组成时，函数跳过全部分隔字符并将剩余缓冲区置空。 用例类别：接口测试 预置条件：输入缓冲区仅包含空格和换行符；长度为 2；缓冲区具有额外终止字节。 测试步骤： step1、构造仅含两个分隔字符的缓冲区。 step2、设置 cursor 和长度。 step3、调用被测函数。 step4、观察返回指针、cursor 和剩余长度。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_vfs_next_token。 等价列表：仅包含分隔字符的输入。 其它说明：覆盖第一个 while 循环连续进入并因 pos==len 退出，第二个 while 不进入，以及最终 pos<*len 为 false 的缓冲区耗尽路径。按照当前源码，返回值仍指向原始缓冲区，而不是 NULL。 通过准则：函数返回原始缓冲区地址，cursor 置为 NULL，len 置为 0。
+ 
+⸻
+ 
+vmm_manager_vfs_next_token.003.IN
+Begin User Code
+static char buffer[3];
+static char *cursor;
+static u32 len;
+
+buffer[0] = (char)0x01;
+buffer[1] = 'A';
+buffer[2] = '\0';
+
+cursor = buffer;
+len = 2U;
+
+<<vmm_manager.vmm_manager_vfs_next_token.bufp>> =
+    &cursor;
+
+<<vmm_manager.vmm_manager_vfs_next_token.len>> =
+    &len;
 期望值
 return = NULL
+
+cursor = buffer
+len = 2
+
+buffer[0] = 0x01
+buffer[1] = 'A'
 注释
-测试目的：验证 Guest 请求链表为空时，出队函数返回 NULL。 用例类别：基于需求的测试 预置条件：Guest 请求链表已初始化且为空。 测试步骤： step1、初始化 Guest 请求锁和空链表。 step2、调用 manager_dequeue_req。 step3、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：manager_dequeue_req。 等价列表：空请求队列出队。 其它说明：覆盖 !list_empty() 为 false以及返回指针保持 NULL 的路径。 通过准则：函数返回 NULL。
+测试目的：验证 token 中包含不可打印字符时，函数返回 NULL并停止解析。 用例类别：接口测试 预置条件：输入首字符为不可打印值 0x01；长度为 2。 测试步骤： step1、构造首字符不可打印的缓冲区。 step2、设置 cursor 和长度。 step3、调用 vmm_manager_vfs_next_token。 step4、观察返回值、cursor、长度和缓冲区内容。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_vfs_next_token。 等价列表：token 包含不可打印字符。 其它说明：覆盖 token 扫描循环进入、!vmm_isprintable() 为 true和错误提前返回路径。由于不可打印字符位于 pos 0，*len -= pos 后长度仍为 2。 通过准则：函数返回 NULL，cursor 和 len 保持原值，缓冲区内容不变。
  
 ⸻
  
-manager_dequeue_req.002.R
-Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req0;
-static struct vmm_guest_request req1;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req0, 0, sizeof(req0));
-memset(&req1, 0, sizeof(req1));
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-INIT_LIST_HEAD(&req0.head);
-INIT_LIST_HEAD(&req1.head);
-
-list_add_tail(&req0.head,
-              &guest.req_list);
-
-list_add_tail(&req1.head,
-              &guest.req_list);
-
-vcast_expected_req = &req0;
-
-<<vmm_manager.manager_dequeue_req.guest>> =
-    &guest;
-期望值
-return = vcast_expected_req
-
-guest.req_list.next = &req1.head
-guest.req_list.prev = &req1.head
-注释
-测试目的：验证请求队列非空时，函数移除并返回队首请求，同时保留后续请求。 用例类别：基于需求的测试 预置条件：Guest 请求链表依次包含 req0 和 req1。 测试步骤： step1、初始化 Guest 和两个请求节点。 step2、按 req0、req1的顺序将请求加入链表。 step3、设置预期返回指针为 req0。 step4、调用 manager_dequeue_req。 step5、比较返回指针并检查剩余链表。 用例来源：需求分析、有效等价类。 追溯ID：manager_dequeue_req。 等价列表：非空请求队列出队。 其它说明：覆盖 !list_empty() 为 true、list_pop() 及 list_entry() 路径。 通过准则：函数返回 req0，Guest 请求链表中仅剩 req1。
- 
-⸻
- 
-八、
-manager_flush_req
-最少需要 2 条用例。
- 
-⸻
- 
-manager_flush_req.001.R
-Begin User Code
-static struct vmm_guest guest;
-
-memset(&guest, 0, sizeof(guest));
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-<<vmm_manager.manager_flush_req.guest>> =
-    &guest;
-期望值
-guest.req_list.next = &guest.req_list
-guest.req_list.prev = &guest.req_list
-注释
-测试目的：验证请求链表为空时，清理函数不进入循环并保持链表为空。 用例类别：基于需求的测试 预置条件：Guest 请求链表为空。 测试步骤： step1、初始化 Guest 请求锁和空请求链表。 step2、调用 manager_flush_req。 step3、检查请求链表状态。 用例来源：需求分析、有效等价类。 追溯ID：manager_flush_req。 等价列表：清理空请求队列。 其它说明：覆盖 while 条件初始即为 false 的路径。 通过准则：调用后请求链表仍为空。
- 
-⸻
- 
-manager_flush_req.002.R
-Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req0;
-static struct vmm_guest_request req1;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req0, 0, sizeof(req0));
-memset(&req1, 0, sizeof(req1));
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-INIT_LIST_HEAD(&req0.head);
-INIT_LIST_HEAD(&req1.head);
-
-list_add_tail(&req0.head,
-              &guest.req_list);
-
-list_add_tail(&req1.head,
-              &guest.req_list);
-
-<<vmm_manager.manager_flush_req.guest>> =
-    &guest;
-期望值
-guest.req_list.next = &guest.req_list
-guest.req_list.prev = &guest.req_list
-注释
-测试目的：验证请求清理函数依次移除队列中的全部请求，直至链表为空。 用例类别：基于需求的测试 预置条件：Guest 请求链表中包含两个请求节点；vmm_free 为无副作用 Stub。 测试步骤： step1、初始化 Guest 和两个请求节点。 step2、将两个请求加入 Guest 请求链表。 step3、调用 manager_flush_req。 step4、检查请求链表是否为空。 用例来源：需求分析、有效等价类。 追溯ID：manager_flush_req。 等价列表：清理多个待处理请求。 其它说明：覆盖 while 循环进入、多次执行以及正常退出；不使用释放调用次数作为检查项。 通过准则：调用后 Guest 请求链表为空。
- 
-⸻
- 
-九、
-manager_req_work
-最少需要 6 条用例。
-本函数返回类型为 void，主要通过 Guest 请求链表状态验证处理结果。
- 
-⸻
- 
-manager_req_work.001.IN
-Begin User Code
-vcast_manager_prepare_guest_env(0U);
-
-/*
- * mngr.guest_work_array 指向
- * &vcast_guest_work_store[1]。
- *
- * 下标 0 是同一数组对象中位于 start 之前的合法地址。
- */
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[0];
-期望值
-无返回值及状态修改。
-注释
-测试目的：验证 work 指针位于 manager work 数组起始地址之前时，函数立即返回。 用例类别：接口测试 预置条件：manager work 数组已初始化；输入 work 指向前置保留元素。 测试步骤： step1、准备 manager Guest 和 work 数组环境。 step2、设置 work 指向 vcast_guest_work_store[0]。 step3、调用 manager_req_work。 step4、确认函数正常返回且未发生非法访问。 用例来源：接口分析、无效等价类。 追溯ID：manager_req_work。 等价列表：work 指针小于有效起始地址。 其它说明：覆盖复合判断中 ptr < start 为 true 的短路路径，end <= ptr 不求值。 通过准则：函数正常返回，不访问 Guest。
- 
-⸻
- 
-manager_req_work.002.IN
-Begin User Code
-vcast_manager_prepare_guest_env(0U);
-
-/*
- * start = &vcast_guest_work_store[1]
- * end   = &vcast_guest_work_store[
- *             CONFIG_MAX_GUEST_COUNT]
- *
- * 源码使用 end <= ptr，因此最后一个元素被视为无效。
- */
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[
-        CONFIG_MAX_GUEST_COUNT];
-期望值
-无返回值及状态修改。
-注释
-测试目的：验证 work 指针等于源码计算的 end 地址时，函数执行上边界拒绝路径。 用例类别：接口测试 预置条件：manager work 数组已初始化；work 指向源码中的 end 元素。 测试步骤： step1、准备 manager work 数组环境。 step2、将 work 设置为 vcast_guest_work_store[CONFIG_MAX_GUEST_COUNT]。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：接口分析、边界值分析。 追溯ID：manager_req_work。 等价列表：work 指针等于无效上边界。 其它说明：覆盖复合判断中 ptr < start=false、end <= ptr=true 的路径。 通过准则：函数正常返回，不访问 Guest。
- 
-⸻
- 
-manager_req_work.003.IN
-Begin User Code
-vcast_manager_prepare_guest_env(0U);
-
-vcast_manager_guest_ret = NULL;
-
-/*
- * 对应 mngr.guest_work_array[0]。
- */
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[1];
-Stub Processing
-vmm_manager_guest：
-    返回 NULL
-期望值
-无返回值及状态修改。
-注释
-测试目的：验证 work 指针有效但对应 Guest 无法获取时，函数立即返回。 用例类别：接口测试 预置条件：work 指向有效数组元素；vmm_manager_guest 返回 NULL。 测试步骤： step1、初始化 manager work 数组。 step2、设置有效 work 指针。 step3、设置 Guest 查询返回 NULL。 step4、调用 manager_req_work。 step5、确认函数正常返回。 用例来源：接口分析、无效状态等价类。 追溯ID：manager_req_work。 等价列表：work 对应 Guest 不存在。 其它说明：覆盖 work 地址检查通过和 !guest=true 的提前返回路径。 通过准则：函数正常返回，不访问请求队列。
- 
-⸻
- 
-manager_req_work.004.R
-Begin User Code
-static struct vmm_guest guest;
-
-memset(&guest, 0, sizeof(guest));
-
-vcast_manager_prepare_guest_env(1U);
-
-guest.id = 0U;
-guest.cmpl_suspend = NULL;
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-vcast_manager_guest_ret = &guest;
-vcast_guest_put_ret = VMM_OK;
-
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[1];
-期望值
-guest.req_list.next = &guest.req_list
-guest.req_list.prev = &guest.req_list
-注释
-测试目的：验证 work 对应 Guest 存在但请求队列为空时，函数不执行请求回调并正常释放 Guest 引用。 用例类别：基于需求的测试 预置条件：work 地址有效；Guest 查询成功；Guest 请求链表为空。 测试步骤： step1、初始化 manager 环境和 Guest 请求链表。 step2、设置 Guest 查询返回该 Guest。 step3、调用 manager_req_work。 step4、检查请求链表保持为空。 用例来源：需求分析、有效等价类。 追溯ID：manager_req_work。 等价列表：有效 Guest 无待处理请求。 其它说明：覆盖 Guest 查询成功和 manager_dequeue_req() 返回 NULL 的路径；不使用 Guest put 调用次数作为检查项。 通过准则：函数正常返回，请求链表保持为空。
- 
-⸻
- 
-manager_req_work.005.R
-Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req0;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req0, 0, sizeof(req0));
-
-vcast_manager_prepare_guest_env(1U);
-
-guest.id = 0U;
-guest.cmpl_suspend = NULL;
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-INIT_LIST_HEAD(&req0.head);
-
-/*
- * 使用已有的同签名函数，不新增测试回调。
- * cmpl_suspend=NULL，因此回调不会进入完成量处理。
- */
-req0.func = manager_suspend_request;
-req0.data = NULL;
-
-list_add_tail(&req0.head,
-              &guest.req_list);
-
-vcast_manager_guest_ret = &guest;
-vcast_guest_put_ret = VMM_OK;
-
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[1];
-期望值
-guest.req_list.next = &guest.req_list
-guest.req_list.prev = &guest.req_list
-注释
-测试目的：验证 Guest 请求队列仅有一个请求时，函数出队并执行该请求，随后请求队列为空。 用例类别：基于需求的测试 预置条件：有效 work 对应有效 Guest；请求队列包含一个具有合法回调的请求。 测试步骤： step1、初始化 Guest 和请求链表。 step2、将一个请求加入队列。 step3、设置请求回调为 manager_suspend_request。 step4、调用 manager_req_work。 step5、检查请求链表是否为空。 用例来源：需求分析、有效等价类。 追溯ID：manager_req_work。 等价列表：处理最后一个待处理请求。 其它说明：覆盖请求出队成功、执行请求回调、释放请求和 manager_have_req() 返回 false 的路径。 通过准则：请求处理后 Guest 请求链表为空。
- 
-⸻
- 
-manager_req_work.006.R
-Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req0;
-static struct vmm_guest_request req1;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req0, 0, sizeof(req0));
-memset(&req1, 0, sizeof(req1));
-
-vcast_manager_prepare_guest_env(1U);
-
-guest.id = 0U;
-guest.cmpl_suspend = NULL;
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-INIT_LIST_HEAD(&req0.head);
-INIT_LIST_HEAD(&req1.head);
-
-req0.func = manager_suspend_request;
-req0.data = NULL;
-
-req1.func = manager_suspend_request;
-req1.data = NULL;
-
-list_add_tail(&req0.head,
-              &guest.req_list);
-
-list_add_tail(&req1.head,
-              &guest.req_list);
-
-vcast_manager_guest_ret = &guest;
-vcast_guest_put_ret = VMM_OK;
-
-<<vmm_manager.manager_req_work.work>> =
-    &vcast_guest_work_store[1];
-期望值
-guest.req_list.next = &req1.head
-guest.req_list.prev = &req1.head
-
-req1.head.next = &guest.req_list
-req1.head.prev = &guest.req_list
-注释
-测试目的：验证 Guest 队列中存在多个请求时，单次 work 仅处理一个请求，并在仍有剩余请求时执行重新调度路径。 用例类别：基于需求的测试 预置条件：有效 Guest 请求链表依次包含 req0 和 req1；两个请求回调均有效。 测试步骤： step1、初始化 Guest 和两个请求节点。 step2、按 req0、req1顺序将请求加入队列。 step3、调用 manager_req_work。 step4、检查队首请求已移除，req1仍在队列中。 用例来源：需求分析、有效等价类。 追溯ID：manager_req_work。 等价列表：多个请求时处理一个并重新调度。 其它说明：覆盖请求处理成功后 manager_have_req() 返回 true和 work 重新调度语句；不使用调度调用次数作为检查项。 通过准则：调用后队列中仅保留 req1。
- 
-⸻
- 
-十、
-vmm_manager_guest_request
-最少需要 4 条用例。
- 
-⸻
- 
-vmm_manager_guest_request.001.IN
-Begin User Code
-<<vmm_manager.vmm_manager_guest_request.guest>> =
-    NULL;
-
-<<vmm_manager.vmm_manager_guest_request.req_func>> =
-    manager_suspend_request;
-
-<<vmm_manager.vmm_manager_guest_request.req_data>> =
-    NULL;
-期望值
-return = VMM_EINVALID
-注释
-测试目的：验证 Guest 指针为空时，请求提交接口返回无效参数错误。 用例类别：接口测试 预置条件：Guest 入参为 NULL；请求回调有效。 测试步骤： step1、设置 Guest 指针为 NULL。 step2、设置合法请求回调。 step3、调用 vmm_manager_guest_request。 step4、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_request。 等价列表：Guest 空指针。 其它说明：覆盖参数复合判断中 !guest=true 的短路路径，!req_func 不求值。 通过准则：函数返回 VMM_EINVALID。
- 
-⸻
- 
-vmm_manager_guest_request.002.IN
-Begin User Code
-static struct vmm_guest guest;
-
-memset(&guest, 0, sizeof(guest));
-
-<<vmm_manager.vmm_manager_guest_request.guest>> =
-    &guest;
-
-<<vmm_manager.vmm_manager_guest_request.req_func>> =
-    NULL;
-
-<<vmm_manager.vmm_manager_guest_request.req_data>> =
-    NULL;
-期望值
-return = VMM_EINVALID
-注释
-测试目的：验证 Guest 指针有效但请求回调为空时，函数返回无效参数错误。 用例类别：接口测试 预置条件：Guest 入参有效；req_func=NULL。 测试步骤： step1、初始化 Guest 对象。 step2、设置请求回调为空。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_request。 等价列表：请求回调空指针。 其它说明：覆盖参数复合判断中 !guest=false、!req_func=true 的路径。 通过准则：函数返回 VMM_EINVALID。
- 
-⸻
- 
-vmm_manager_guest_request.003.FI
-Begin User Code
-static struct vmm_guest guest;
-
-memset(&guest, 0, sizeof(guest));
-
-vcast_zalloc_ret = NULL;
-
-<<vmm_manager.vmm_manager_guest_request.guest>> =
-    &guest;
-
-<<vmm_manager.vmm_manager_guest_request.req_func>> =
-    manager_suspend_request;
-
-<<vmm_manager.vmm_manager_guest_request.req_data>> =
-    NULL;
-Stub Processing
-vmm_zalloc：
-    返回 NULL
-期望值
-return = VMM_ENOMEM
-注释
-测试目的：通过故障注入验证请求对象内存分配失败时，函数返回内存不足错误。 用例类别：故障注入测试 预置条件：Guest 和请求回调参数有效；vmm_zalloc 返回 NULL。 测试步骤： step1、初始化 Guest 对象。 step2、设置合法请求回调。 step3、注入请求对象分配失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_request。 等价列表：请求对象分配失败。 其它说明：覆盖参数检查通过和 !req=true 的错误返回路径。 通过准则：函数返回 VMM_ENOMEM。
- 
-⸻
- 
-vmm_manager_guest_request.004.R
-Begin User Code
-static struct vmm_guest guest;
-static struct vmm_guest_request req_storage;
-static int req_data;
-
-memset(&guest, 0, sizeof(guest));
-memset(&req_storage, 0, sizeof(req_storage));
-
-req_data = 0x1234;
-
-vcast_manager_prepare_guest_env(1U);
-
-guest.id = 0U;
-guest.cmpl_suspend = NULL;
-
-INIT_SPIN_LOCK(&guest.req_lock);
-INIT_LIST_HEAD(&guest.req_list);
-
-vcast_zalloc_ret = &req_storage;
-
-<<vmm_manager.vmm_manager_guest_request.guest>> =
-    &guest;
-
-<<vmm_manager.vmm_manager_guest_request.req_func>> =
-    manager_suspend_request;
-
-<<vmm_manager.vmm_manager_guest_request.req_data>> =
-    &req_data;
-期望值
-return = VMM_OK
-
-guest.req_list.next = &req_storage.head
-guest.req_list.prev = &req_storage.head
-
-req_storage.data = &req_data
-注释
-测试目的：验证有效参数且请求对象分配成功时，函数初始化请求内容并将其加入 Guest 请求队列。 用例类别：基于需求的测试 预置条件：Guest 请求链表为空；manager work 数组有效；vmm_zalloc 返回有效请求存储；请求回调和数据有效。 测试步骤： step1、准备 manager work 数组环境。 step2、初始化 Guest 请求锁和空链表。 step3、设置 vmm_zalloc 返回固定请求存储。 step4、设置请求回调和请求数据。 step5、调用 vmm_manager_guest_request。 step6、检查返回值、请求链表及请求数据成员。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_request。 等价列表：Guest 请求正常提交。 其它说明：覆盖请求分配成功、请求节点初始化、回调和数据保存、请求入队及成功返回路径。 通过准则：函数返回 VMM_OK，Guest 请求链表中包含 req_storage，请求数据指针为 &req_data。
- 
-⸻
- 
-十一、本批覆盖汇总
+七、本批覆盖汇总
 函数	用例数量
-manager_have_req	2
-manager_enqueue_req	1
-manager_dequeue_req	2
-manager_flush_req	2
-manager_req_work	6
-vmm_manager_guest_request	4
-合计	17
-下一批从 vmm_manger_vfs_file_open_read 开始，继续覆盖文件打开、缓冲区读取、转义字符识别和 token 解析函数。
+vmm_manger_vfs_file_open_read	5
+vmm_manager_file_buf_read	2
+vmm_manager_vfs_in_esclist	2
+vmm_manager_vfs_next_token	3
+合计	12
+下一批将继续：
+vmm_manager_vfs_load
+vmm_manager_vfs_file_parent_dir
+vmm_manager_guest_load_list
