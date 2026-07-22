@@ -1,0 +1,763 @@
+下面按你重新贴出的源码，一次性给出 vmm_manager_guest_load_list() 完整用例构造。
+为了完整覆盖：
+if (!token || !buf)
+中的两个独立子条件、第二个 token 缺失、镜像加载失败和文件关闭失败，实际需要 12 条用例。之前概括的 10 条不足以完整覆盖这些条件结果。
+ 
+⸻
+ 
+一、测试配置原则
+测试 vmm_manager_guest_load_list() 时建议：
+保持 Actual
+vmm_manager_vfs_next_token
+vmm_manager_vfs_in_esclist
+这样可以真实覆盖 token 解析和地址字符合法性循环。
+设置为 Stub
+vmm_zalloc
+vmm_manager_vfs_file_parent_dir
+vmm_manger_vfs_file_open_read
+vmm_malloc
+vmm_manager_file_buf_read
+vmm_isprintable
+strtoull
+vmm_manager_vfs_load
+vfs_close
+vmm_free
+其中必须注意：
+vmm_manager_file_buf_read() 要设置为 Stub，只返回指定长度，不修改缓冲区。否则它的真实实现会先 memset(buf, 0, VFS_LOAD_BUF_SZ)，将 Begin User Code 中预置的 token 内容清空。
+不需要新增全局 User Code。每条用例使用局部静态存储即可。
+ 
+⸻
+ 
+二、
+vmm_manager_guest_load_list
+vmm_manager_guest_load_list.001.FI
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证当前目录缓冲区分配失败时，函数返回内存不足错误。 用例类别：故障注入测试 预置条件：Guest 指针有效；加载列表路径非空；vmm_zalloc 返回 NULL。 测试步骤： step1、初始化 Guest 对象。 step2、设置 Guest 加载列表路径。 step3、设置 vmm_zalloc 返回 NULL。 step4、调用 vmm_manager_guest_load_list。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：当前目录缓冲区分配失败。 其它说明：覆盖 curdir == NULL 的入口错误返回路径，后续文件处理逻辑均不执行。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.002.FI
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证加载列表父目录解析失败时，函数释放当前目录缓冲区并返回解析错误。 用例类别：故障注入测试 预置条件：当前目录缓冲区分配成功；父目录解析接口返回 VMM_EIO。 测试步骤： step1、初始化 Guest 和当前目录存储。 step2、设置 vmm_zalloc 返回有效存储。 step3、设置父目录解析接口返回 VMM_EIO。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：加载列表父目录解析失败。 其它说明：覆盖第一个内存分配成功，以及 VMM_OK != rc 在父目录解析后为 true 的路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.003.FI
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证加载列表文件打开失败时，函数返回文件打开错误。 用例类别：故障注入测试 预置条件：当前目录分配和父目录解析成功；加载列表文件打开接口返回 VMM_EIO。 测试步骤： step1、初始化 Guest 和当前目录存储。 step2、设置父目录解析成功。 step3、注入加载列表文件打开失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：加载列表文件打开失败。 其它说明：覆盖父目录解析结果为成功，以及第二个 VMM_OK != rc 为 true 的路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.004.FI
+本用例同时覆盖：
+VFS_LOAD_BUF_SZ <= len
+为 true。
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = VFS_LOAD_BUF_SZ
+
+vmm_malloc：
+    return NULL
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证加载列表解析缓冲区分配失败时，函数关闭已打开文件并返回内存不足错误。 用例类别：故障注入测试 预置条件：加载列表文件打开成功；文件长度达到 VFS_LOAD_BUF_SZ；vmm_malloc 返回 NULL。 测试步骤： step1、设置加载列表文件打开成功。 step2、设置文件长度等于加载缓冲区上限。 step3、注入解析缓冲区分配失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入、边界值分析。 追溯ID：vmm_manager_guest_load_list。 等价列表：列表文件达到长度上限且解析缓冲区分配失败。 其它说明：覆盖文件长度告警条件为 true，以及 buf == NULL 的错误返回路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.005.IN
+覆盖：
+!token == true
+此时复合条件的第二项 !buf不求值。
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+/*
+ * 首字符为不可打印字符。
+ * 真实 next_token 将返回 NULL。
+ */
+buf_storage[0] = (char)0x01;
+buf_storage[1] = '\0';
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 1
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 1
+
+vmm_isprintable：
+    return FALSE
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证解析地址 token 时遇到不可打印字符，vmm_manager_vfs_next_token 返回 NULL后函数退出解析循环。 用例类别：接口测试 预置条件：加载列表缓冲区首字符为不可打印值 0x01；文件关闭成功。 测试步骤： step1、初始化 Guest、当前目录和加载缓冲区。 step2、在加载缓冲区首字节写入不可打印字符。 step3、设置 vmm_isprintable 返回 FALSE。 step4、调用 vmm_manager_guest_load_list。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_load_list。 等价列表：地址 token 解析失败。 其它说明：覆盖 !token 为 true 的短路路径。当前源码仅退出循环，文件关闭成功后最终返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.006.IN
+覆盖：
+!token == false
+!buf == true
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+/*
+ * 缓冲区中只有一个地址 token，没有后续文件名。
+ * next_token 返回非 NULL，但将 buf 设置为 NULL。
+ */
+buf_storage[0] = '0';
+buf_storage[1] = '\0';
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 1
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 1
+
+vmm_isprintable：
+    return TRUE
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证第一个地址 token 有效但解析后缓冲区已耗尽时，函数通过 !buf 条件退出循环。 用例类别：接口测试 预置条件：加载列表仅包含一个地址 token，不包含对应文件名。 测试步骤： step1、构造仅含字符 0 的加载列表缓冲区。 step2、设置字符为可打印字符。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_load_list。 等价列表：地址 token 后无剩余内容。 其它说明：覆盖 !token=false、!buf=true 的路径。当前源码将该格式错误记录后返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.007.IN
+本用例的地址 token：
+aA0/xXg
+可覆盖字符合法性表达式中各个子条件的 true 和 false 结果。
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+memcpy(buf_storage,
+       "aA0/xXg file",
+       sizeof("aA0/xXg file"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 12
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 12
+
+vmm_isprintable：
+    所有调用均 return TRUE
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证地址 token 包含不允许字符时，函数判定地址字符串非法并停止解析。 用例类别：接口测试 预置条件：地址 token 为 aA0/xXg；其后存在文件名 token；所有字符均被判断为可打印。 测试步骤： step1、构造地址 token 和文件名 token。 step2、设置 vmm_isprintable 对所有调用返回 TRUE。 step3、调用被测函数。 step4、观察函数返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_load_list。 等价列表：地址字符串包含非法字符。 其它说明：该 token 可覆盖小写十六进制、大写十六进制、数字、x/X 和非法字符的判定组合；覆盖 is_valid_number=false 的路径。当前源码退出循环后返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.008.FI
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+memcpy(buf_storage,
+       "0x1 file",
+       sizeof("0x1 file"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 8
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 8
+
+vmm_isprintable：
+    所有调用均 return TRUE
+
+strtoull：
+    return 1
+    Stub User Code 中执行：errno = ERANGE;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：通过故障注入验证地址转换接口设置 errno 时，函数返回无效参数错误。 用例类别：故障注入测试 预置条件：地址 token 字符合法；strtoull 设置 errno=ERANGE。 测试步骤： step1、构造合法地址 token 0x1 和文件名 token。 step2、设置字符可打印判断返回 TRUE。 step3、在 strtoull Stub 中设置 errno=ERANGE。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：地址数值转换失败。 其它说明：覆盖 is_valid_number=true 和 errno != 0 的直接返回路径。当前源码在该路径直接返回，未释放缓冲区、当前目录，也未关闭文件，应作为资源清理缺陷记录。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.009.IN
+覆盖第二次：
+if (!token)
+为 true。
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+buf_storage[0] = '0';
+buf_storage[1] = 'x';
+buf_storage[2] = '1';
+buf_storage[3] = ' ';
+buf_storage[4] = (char)0x01;
+buf_storage[5] = '\0';
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 5
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 5
+
+vmm_isprintable 连续返回：
+    第1次 TRUE
+    第2次 TRUE
+    第3次 TRUE
+    第4次 FALSE
+
+strtoull：
+    return 1
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证地址 token 转换成功但第二个文件名 token 包含不可打印字符时，函数退出解析循环。 用例类别：接口测试 预置条件：第一个 token 为合法地址 0x1；第二个 token 首字符为不可打印值 0x01。 测试步骤： step1、构造合法地址 token 和非法文件名 token。 step2、设置前三次可打印判断为 TRUE，第四次为 FALSE。 step3、设置地址转换返回 1。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_load_list。 等价列表：镜像文件名 token 解析失败。 其它说明：覆盖第二次 vmm_manager_vfs_next_token() 返回 NULL以及 if(!token) 为 true的路径。当前实现退出循环后返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.010.FI
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+memcpy(buf_storage,
+       "0x1 file",
+       sizeof("0x1 file"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 8
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 8
+
+vmm_isprintable：
+    所有调用均 return TRUE
+
+strtoull：
+    return 1
+
+vmm_manager_vfs_load：
+    return VMM_EIO
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证镜像加载接口返回错误时，函数停止处理当前加载列表。 用例类别：故障注入测试 预置条件：地址和文件名 token 解析成功；vmm_manager_vfs_load 返回 VMM_EIO；文件关闭成功。 测试步骤： step1、构造合法地址和文件名 token。 step2、设置地址转换成功。 step3、注入镜像加载失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：加载列表中的镜像加载失败。 其它说明：覆盖 if(rc) 在镜像加载后为 true的 break 路径。当前源码随后使用 vfs_close 返回值覆盖 rc，因此关闭成功时最终仍返回 VMM_OK。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.011.R
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+memcpy(buf_storage,
+       "0x1 file",
+       sizeof("0x1 file"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 8
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 8
+
+vmm_isprintable：
+    所有调用均 return TRUE
+
+strtoull：
+    return 1
+
+vmm_manager_vfs_load：
+    return VMM_OK
+
+vfs_close：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证包含一组合法地址和镜像文件名的加载列表能够完成解析和镜像加载。 用例类别：基于需求的测试 预置条件：当前目录解析、文件打开、缓冲区分配、token 解析、地址转换、镜像加载和文件关闭均成功。 测试步骤： step1、构造加载列表内容 0x1 file。 step2、设置所有字符为可打印。 step3、设置地址转换返回 1。 step4、设置镜像加载和文件关闭成功。 step5、调用 vmm_manager_guest_load_list。 step6、观察函数返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_load_list。 等价列表：单条合法加载列表记录。 其它说明：覆盖两个 token 解析成功、地址字符检查成功、errno==0、镜像加载结果为 0，以及第二个 token 解析后 buf=NULL、while 条件自然退出的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_load_list.012.FI
+Begin User Code
+static struct vmm_guest guest;
+static char curdir_storage[VFS_MAX_PATH];
+static char buf_storage[VFS_LOAD_BUF_SZ];
+
+memset(&guest, 0, sizeof(guest));
+memset(curdir_storage, 0, sizeof(curdir_storage));
+memset(buf_storage, 0, sizeof(buf_storage));
+
+memcpy(guest.load_list_path,
+       "/boot/load.list",
+       sizeof("/boot/load.list"));
+
+memcpy(buf_storage,
+       "0x1 file",
+       sizeof("0x1 file"));
+
+<<vmm_manager.vmm_manager_guest_load_list.guest>> =
+    &guest;
+Stub Processing
+vmm_zalloc：
+    return curdir_storage
+
+vmm_manager_vfs_file_parent_dir：
+    return VMM_OK
+
+vmm_manger_vfs_file_open_read：
+    return VMM_OK
+    *fdp = 3
+    *len = 8
+
+vmm_malloc：
+    return buf_storage
+
+vmm_manager_file_buf_read：
+    return 8
+
+vmm_isprintable：
+    所有调用均 return TRUE
+
+strtoull：
+    return 1
+
+vmm_manager_vfs_load：
+    return VMM_OK
+
+vfs_close：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证加载列表解析和镜像加载成功后，文件关闭失败会作为函数最终错误返回。 用例类别：故障注入测试 预置条件：加载列表解析和镜像加载成功；vfs_close 返回 VMM_EIO。 测试步骤： step1、构造一条合法加载列表记录。 step2、设置地址解析和镜像加载成功。 step3、注入加载列表文件关闭失败。 step4、调用被测函数。 step5、观察函数返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_load_list。 等价列表：加载列表文件关闭失败。 其它说明：覆盖最终 if(rc) 为 true和文件关闭错误传播路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+三、
+vmm_manager_guest_load_list
+名称汇总
+vmm_manager_guest_load_list.001.FI_当前目录缓冲区分配失败
+vmm_manager_guest_load_list.002.FI_加载列表父目录解析失败
+vmm_manager_guest_load_list.003.FI_加载列表文件打开失败
+vmm_manager_guest_load_list.004.FI_加载列表解析缓冲区分配失败
+vmm_manager_guest_load_list.005.IN_地址Token解析失败
+vmm_manager_guest_load_list.006.IN_地址Token后无剩余内容
+vmm_manager_guest_load_list.007.IN_地址字符串包含非法字符
+vmm_manager_guest_load_list.008.FI_地址数值转换失败
+vmm_manager_guest_load_list.009.IN_镜像文件名Token解析失败
+vmm_manager_guest_load_list.010.FI_加载列表镜像加载失败
+vmm_manager_guest_load_list.011.R_单条加载列表记录解析成功
+vmm_manager_guest_load_list.012.FI_加载列表文件关闭失败
+ 
+⸻
+ 
+四、
+gpio_key_init
+：去掉 
+vmm_cpu_to_be32
+你指出的问题是正确的。被测函数调用的是：
+vmm_be32_to_cpu(...)
+而我之前在 Begin User Code 中调用：
+vmm_cpu_to_be32(...)
+只是为了构造设备树原始值。
+既然 vmm_cpu_to_be32 在 VectorCAST 中被 Stub，最简单的处理是：
+	1.	完全删除 Begin User Code 中对 vmm_cpu_to_be32() 的调用；
+	2.	属性值只需要指向有效的 u32 存储；
+	3.	直接配置被测函数实际调用的 vmm_be32_to_cpu() 连续返回值。
+ 
+⸻
+ 
+1. 统一修改属性原始值构造
+删除：
+irq0_be = vmm_cpu_to_be32(32U);
+timeout_be = vmm_cpu_to_be32(30U);
+irq1_be = vmm_cpu_to_be32(33U);
+改为：
+irq0_be = 0x11111111U;
+timeout_be = 0x22222222U;
+irq1_be = 0x33333333U;
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+irq1_attr.value = &irq1_be;
+原始值本身不参与判断，因为转换结果由 vmm_be32_to_cpu Stub 控制。
+ 
+⸻
+ 
+2. 各用例连续返回值配置
+gpio_key_init.001.FI
+第一个节点为 NULL。
+vmm_be32_to_cpu：
+    不调用
+无需修改。
+ 
+⸻
+ 
+gpio_key_init.002.FI
+主节点存在，但第一个 interrupts 属性为 NULL。
+vmm_be32_to_cpu：
+    不调用
+无需修改。
+ 
+⸻
+ 
+gpio_key_init.003.FI
+调用顺序：
+guest->poweroff_irq =
+    vmm_be32_to_cpu(*(u32 *)irq0_attr.value);
+因此设置：
+vmm_be32_to_cpu 连续返回：
+    第1次：32
+Begin User Code 中改为：
+irq0_be = 0x11111111U;
+irq0_attr.value = &irq0_be;
+期望仍为：
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 0
+guest.suspend_irq = 0
+ 
+⸻
+ 
+gpio_key_init.004.FI
+调用顺序：
+第1次：转换 poweroff_irq
+第2次：转换 timeout_secs
+设置：
+vmm_be32_to_cpu 连续返回：
+    第1次：32
+    第2次：30
+Begin User Code：
+irq0_be = 0x11111111U;
+timeout_be = 0x22222222U;
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+期望：
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 30
+guest.suspend_irq = 0
+ 
+⸻
+ 
+gpio_key_init.005.FI
+调用顺序：
+第1次：转换 poweroff_irq
+第2次：转换 timeout_secs
+设置：
+vmm_be32_to_cpu 连续返回：
+    第1次：32
+    第2次：100
+Begin User Code：
+irq0_be = 0x11111111U;
+timeout_be = 0x22222222U;
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+源码处理后：
+time = 100;
+poweroff_timeout_secs =
+    (100 > 60) ? 60 : 100;
+期望：
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 60
+guest.suspend_irq = 0
+ 
+⸻
+ 
+gpio_key_init.006.R
+调用顺序：
+第1次：转换 poweroff_irq
+第2次：转换 timeout_secs
+第3次：转换 suspend_irq
+设置：
+vmm_be32_to_cpu 连续返回：
+    第1次：32
+    第2次：30
+    第3次：33
+Begin User Code：
+irq0_be = 0x11111111U;
+timeout_be = 0x22222222U;
+irq1_be = 0x33333333U;
+
+irq0_attr.value = &irq0_be;
+timeout_attr.value = &timeout_be;
+irq1_attr.value = &irq1_be;
+期望：
+guest.poweroff_irq = 32
+guest.poweroff_timeout_secs = 30
+guest.suspend_irq = 33
+ 
+⸻
+ 
+五、GPIO 转换返回序列汇总
+用例	vmm_be32_to_cpu 连续返回值
+gpio_key_init.001.FI	不调用
+gpio_key_init.002.FI	不调用
+gpio_key_init.003.FI	32
+gpio_key_init.004.FI	32, 30
+gpio_key_init.005.FI	32, 100
+gpio_key_init.006.R	32, 30, 33
+因此，gpio_key_init 的原用例中不再需要配置或调用 vmm_cpu_to_be32()；只需配置 UUT 实际调用的 vmm_be32_to_cpu() 返回序列。
