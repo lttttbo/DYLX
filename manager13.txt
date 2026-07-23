@@ -1,0 +1,1114 @@
+下面一次性给出 vmm_manager_guest_create() 的完整构造方案。该函数路径很多，基础配置下建议 30 条用例；如果当前环境定义了 CONFIG_TEE，再增加 3 条条件编译用例。
+先说明两个已存在的环境准备函数需要做小幅补充，不新增新的 User Code 函数。
+ 
+⸻
+ 
+一、补充现有 User Code
+1. User Global 增加
+/*
+ * 控制 vcast_manager_prepare_orphan_create_env()
+ * 初始化后的 mngr.vcpu_count。
+ */
+u32 vcast_prepare_vcpu_count;
+
+/*
+ * 控制重定义后的 vmm_cpu_online()。
+ * 0 -> CPU offline
+ * 1 -> CPU online
+ */
+u32 vcast_cpu_online_ret;
+
+/*
+ * 控制 vmm_devtree_for_each_child() 的测试子节点序列。
+ * 本组最多使用一个 VCPU 子节点，数组保留冗余元素。
+ */
+struct vmm_devtree_node *vcast_dt_child_seq[4];
+u32 vcast_dt_child_count;
+u32 vcast_dt_child_idx;
+公共 Test Case Init 增加：
+vcast_prepare_vcpu_count = 0U;
+vcast_cpu_online_ret = 1U;
+
+vcast_dt_child_seq[0] = NULL;
+vcast_dt_child_seq[1] = NULL;
+vcast_dt_child_seq[2] = NULL;
+vcast_dt_child_seq[3] = NULL;
+vcast_dt_child_count = 0U;
+vcast_dt_child_idx = 0U;
+ 
+⸻
+ 
+2. 修改现有 
+vcast_manager_prepare_orphan_create_env
+将原来的：
+mngr.vcpu_count = 0U;
+改为：
+mngr.vcpu_count = vcast_prepare_vcpu_count;
+改写目的：允许测试 CONFIG_MAX_VCPU_COUNT <= mngr.vcpu_count 路径，不新增辅助函数或判断分支。
+已有其他用例保持：
+vcast_prepare_vcpu_count = 0U;
+即可。
+ 
+⸻
+ 
+3. 修改现有 
+vcast_manager_prepare_guest_env
+为了测试 Guest 重复检查，需要使 guest_count 个 Guest 真正进入 mngr.guest_list。
+将该函数的 Guest 初始化部分调整为：
+void vcast_manager_prepare_guest_env(u32 guest_count)
+{
+    u32 g;
+
+    memset(vcast_guest_array,
+           0,
+           sizeof(vcast_guest_array));
+
+    memset(vcast_guest_avail_array,
+           0,
+           sizeof(vcast_guest_avail_array));
+
+    memset(vcast_guest_work_store,
+           0,
+           sizeof(vcast_guest_work_store));
+
+    INIT_LIST_HEAD(&mngr.guest_list);
+
+    for (g = 0U;
+         g < (u32)CONFIG_MAX_GUEST_COUNT;
+         ++g) {
+        INIT_LIST_HEAD(&vcast_guest_array[g].head);
+
+        vcast_guest_array[g].id = g;
+        vcast_guest_avail_array[g] = TRUE;
+
+        /*
+         * guest_count 个 Guest 视为当前已占用，
+         * 同时加入 mngr.guest_list。
+         */
+        if (g < guest_count) {
+            vcast_guest_avail_array[g] = FALSE;
+
+            list_add_tail(
+                &vcast_guest_array[g].head,
+                &mngr.guest_list);
+        }
+    }
+
+    mngr.guest_array = vcast_guest_array;
+    mngr.guest_avail_array =
+        vcast_guest_avail_array;
+    mngr.guest_work_array =
+        &vcast_guest_work_store[1];
+
+    mngr.guest_count = guest_count;
+
+    vcast_expected_guest = NULL;
+}
+已有的：
+vcast_manager_prepare_guest_env.001.R
+若使用 guest_count=2，期望值应同步改为：
+vcast_guest_avail_array[0] = FALSE
+vcast_guest_avail_array[1] = FALSE
+vcast_guest_avail_array[CONFIG_MAX_GUEST_COUNT - 1] = TRUE
+在 CONFIG_MAX_GUEST_COUNT > 2 时，该一条用例已经覆盖新增判断的 true/false 两种结果。
+ 
+⸻
+ 
+二、Unit Prefix User Code
+1. 重定义设备树子节点遍历宏
+#include <vmm_devtree.h>
+#include <vmm_cpumask.h>
+
+extern struct vmm_devtree_node *
+vcast_dt_child_seq[4];
+
+extern u32 vcast_dt_child_count;
+extern u32 vcast_dt_child_idx;
+extern u32 vcast_cpu_online_ret;
+
+/*
+ * 改写目的：
+ * 隔离真实设备树子节点链表，由测试用例控制
+ * vmm_devtree_for_each_child() 的遍历对象。
+ */
+#ifdef vmm_devtree_for_each_child
+#undef vmm_devtree_for_each_child
+#endif
+
+#define vmm_devtree_for_each_child(__child, __parent)          \
+    for (vcast_dt_child_idx = 0U,                              \
+         (__child) = vcast_dt_child_seq[0];                    \
+         vcast_dt_child_idx < vcast_dt_child_count;            \
+         ++vcast_dt_child_idx,                                 \
+         (__child) = vcast_dt_child_seq[vcast_dt_child_idx])
+零子节点用例设置：
+vcast_dt_child_count = 0U;
+单子节点用例设置：
+vcast_dt_child_seq[0] = &vnode;
+vcast_dt_child_seq[1] = NULL;
+vcast_dt_child_count = 1U;
+ 
+⸻
+ 
+2. 重定义 
+vmm_cpumask_set_cpu
+/*
+ * 改写目的：
+ * 避免 vmm_cpumask_set_cpu 展开至平台原子位操作。
+ *
+ * affinity 后续判断由 __bitmap_weight、
+ * __bitmap_subset、__bitmap_equal 的 Stub 控制。
+ */
+#ifdef vmm_cpumask_set_cpu
+#undef vmm_cpumask_set_cpu
+#endif
+
+#define vmm_cpumask_set_cpu(cpu, mask) \
+    do {                               \
+        (void)(cpu);                   \
+        (void)(mask);                  \
+    } while (0)
+ 
+⸻
+ 
+3. 重定义 
+vmm_cpu_online
+/*
+ * 改写目的：
+ * 避免 vmm_cpu_online 展开至真实在线 CPU 掩码访问。
+ */
+#ifdef vmm_cpu_online
+#undef vmm_cpu_online
+#endif
+
+#define vmm_cpu_online(cpu) \
+    ((bool)vcast_cpu_online_ret)
+ 
+⸻
+ 
+三、通用配置
+1. 字符串函数必须使用 Actual
+以下函数不能保留默认返回 0 的 Stub：
+strcmp
+strncmp
+strlcpy
+strlcat
+memset
+memcpy
+至少在本函数测试中设置为 Actual，否则：
+	•	Guest/VCPU 类型判断失真；
+	•	Guest 名称不会真正复制；
+	•	VCPU 名称过长路径无法正确产生；
+	•	最终返回对象内容不正确。
+ 
+⸻
+ 
+2. 建议统一设置为空实现或固定成功
+vmm_manager_lock                         空实现
+vmm_manager_unlock                       空实现
+vmm_devtree_ref_node                     空实现
+vmm_devtree_dref_node                    空实现
+platform_pt_notify_guest_add             空实现
+vmm_scheduler_set_hcpu_raw               空实现
+vmm_scheduler_set_state_raw              空实现
+vmm_free                                 空实现
+arch_vcpu_deinit                         空实现
+vmm_vcpu_irq_deinit                      空实现
+gpio_key_init                            空实现
+vmm_manager_guest_destroy                返回 VMM_OK
+__vmm_manager_good_hcpu                  返回 0
+vmm_timer_timestamp                      返回 0x12345678
+gpio_key_init() 已经单独测试，本 UUT 中应 Stub，避免其设备树调用干扰 getchild/getattr 的返回序列。
+ 
+⸻
+ 
+3. cpumask inline 函数
+以下 inline 函数通过展开后的非 inline 子函数控制：
+vmm_cpumask_weight   -> __bitmap_weight
+vmm_cpumask_subset   -> __bitmap_subset
+vmm_cpumask_equal    -> __bitmap_equal
+不要直接 Stub inline 函数。
+特别注意：
+vmm_devtree_read_u32_atindex
+在返回一次 VMM_OK 后必须再配置一次非零返回值结束循环，否则默认返回 0会导致无限循环。
+ 
+⸻
+ 
+四、公共成功基线
+用例 .021～.030 可先复制下面的 Begin User Code，再按各用例说明修改。
+假定当前版本 struct vmm_devtree_node::name 是指针成员；若实际为字符数组，将赋值改为 strlcpy()。
+static struct vmm_devtree_node gnode;
+static struct vmm_devtree_node vsnode;
+static struct vmm_devtree_node vnode;
+
+static struct vmm_devtree_attr affinity_attr;
+static struct vmm_devtree_attr poweroff_attr;
+static struct vmm_devtree_attr fdt_attr;
+
+static struct vmm_completion cmpl_poweroff;
+static struct vmm_completion cmpl_suspend;
+static struct vmm_completion ioreq_completion;
+
+static unsigned char
+stack_store[CONFIG_IRQ_STACK_SIZE];
+
+static char guest_name[] = "guest0";
+static char vcpus_name[] = "vcpus";
+static char vcpu_name[] = "vcpu0";
+
+memset(&gnode, 0, sizeof(gnode));
+memset(&vsnode, 0, sizeof(vsnode));
+memset(&vnode, 0, sizeof(vnode));
+
+memset(&affinity_attr, 0, sizeof(affinity_attr));
+memset(&poweroff_attr, 0, sizeof(poweroff_attr));
+memset(&fdt_attr, 0, sizeof(fdt_attr));
+
+memset(&cmpl_poweroff, 0, sizeof(cmpl_poweroff));
+memset(&cmpl_suspend, 0, sizeof(cmpl_suspend));
+memset(&ioreq_completion, 0, sizeof(ioreq_completion));
+memset(stack_store, 0, sizeof(stack_store));
+
+gnode.name = guest_name;
+vsnode.name = vcpus_name;
+vnode.name = vcpu_name;
+
+vcast_manager_prepare_guest_env(0U);
+
+vcast_prepare_vcpu_count = 0U;
+vcast_manager_prepare_orphan_create_env(0);
+
+vcast_dt_child_seq[0] = &vnode;
+vcast_dt_child_seq[1] = NULL;
+vcast_dt_child_count = 1U;
+vcast_dt_child_idx = 0U;
+
+memset(&cpu_domains[0], 0,
+       sizeof(cpu_domains[0]));
+
+cpu_domains[0].is_valid = TRUE;
+
+vcast_cpu_online_ret = 1U;
+
+vcast_expected_guest =
+    &vcast_guest_array[0];
+
+<<vmm_manager.vmm_manager_guest_create.gnode>> =
+    &gnode;
+公共成功 Stub 基线：
+vmm_devtree_read_string：
+    第1次 return VMM_OK
+          *str = VMM_DEVTREE_DEVICE_TYPE_VAL_GUEST
+
+    第2次 return VMM_EFAIL
+          （跳过 Guest endianness 属性）
+
+    第3次 return VMM_OK
+          *str = VMM_DEVTREE_DEVICE_TYPE_VAL_VCPU
+
+vmm_zalloc：
+    第1次 return &cmpl_poweroff
+    第2次 return &cmpl_suspend
+    第3次 return &ioreq_completion
+
+vmm_devtree_getchild：
+    第1次 return &vsnode
+
+vmm_devtree_read_u32：
+    第1次 return VMM_OK，*out = 0
+          （cpu_domain_id）
+
+    第2次 return VMM_OK，
+          *out = VMM_VCPU_DEF_PRIORITY
+
+vmm_devtree_getattr：
+    第1次 return NULL    （affinity）
+    第2次 return NULL    （poweroff）
+    第3次 return NULL    （guest fdt）
+
+vmm_devtree_read_virtaddr：
+    第1次 return VMM_OK，*out = 0x1000
+
+vmm_malloc：
+    return stack_store
+
+vmm_devtree_read_u64：
+    第1次 return VMM_OK，*out = 100
+    第2次 return VMM_OK，*out = 200
+    第3次 return VMM_OK，*out = 300
+
+arch_vcpu_init：
+    return VMM_OK
+
+vmm_vcpu_irq_init：
+    return VMM_OK
+
+vmm_manager_vcpu_set_state：
+    return VMM_OK
+
+arch_guest_init：
+    return VMM_OK
+
+vmm_guest_aspace_init：
+    return VMM_OK
+
+vmm_guest_aspace_reset：
+    return VMM_OK
+ 
+⸻
+ 
+五、Guest 参数和实例分配
+vmm_manager_guest_create.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_create.gnode>> =
+    NULL;
+期望值
+return = NULL
+注释
+测试目的：验证 Guest 设备树节点为空时，函数立即返回 NULL。 用例类别：接口测试 预置条件：Guest 节点入参为 NULL。 测试步骤：step1、设置 gnode=NULL；step2、调用被测函数；step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 节点空指针。 其它说明：覆盖第一个参数检查分支，不访问设备树或 manager 环境。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.002.IN
+Begin User Code
+static struct vmm_devtree_node gnode;
+static char guest_name[] = "guest0";
+
+memset(&gnode, 0, sizeof(gnode));
+gnode.name = guest_name;
+
+<<vmm_manager.vmm_manager_guest_create.gnode>> =
+    &gnode;
+Stub Processing
+vmm_devtree_read_string：
+    第1次 return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：验证读取 Guest 节点 device_type 属性失败时，函数返回 NULL。 用例类别：接口测试 预置条件：Guest 节点有效；device_type 读取接口返回错误。 测试步骤：step1、构造 Guest 节点；step2、设置属性读取失败；step3、调用函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：Guest device_type 属性缺失或读取失败。 其它说明：覆盖第二个入口检查分支。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.003.IN
+Begin User Code
+static struct vmm_devtree_node gnode;
+static char guest_name[] = "guest0";
+static char invalid_type[] = "device";
+
+memset(&gnode, 0, sizeof(gnode));
+gnode.name = guest_name;
+
+<<vmm_manager.vmm_manager_guest_create.gnode>> =
+    &gnode;
+Stub Processing
+vmm_devtree_read_string：
+    第1次 return VMM_OK
+          *str = invalid_type
+期望值
+return = NULL
+注释
+测试目的：验证节点 device_type 不等于 Guest 类型时，函数拒绝创建。 用例类别：接口测试 预置条件：device_type 属性读取成功，但内容不是 Guest 类型。 测试步骤：step1、构造 Guest 节点；step2、返回无效 device_type；step3、调用函数；step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_create。 等价列表：无效 Guest 节点类型。 其它说明：strcmp 必须使用 Actual。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.004.IN
+Begin User Code
+复制公共基线，然后改为：
+vcast_manager_prepare_guest_env(1U);
+
+/* 已存在 Guest 的 node 与输入 gnode 相同。 */
+vcast_guest_array[0].node = &gnode;
+
+strlcpy(vcast_guest_array[0].name,
+        "old-guest",
+        sizeof(vcast_guest_array[0].name));
+期望值
+return = NULL
+注释
+测试目的：验证 manager 中已存在使用相同设备树节点的 Guest 时，函数拒绝重复创建。 用例类别：接口测试 预置条件：Guest 列表中已有一个 Guest，其 node 与输入节点相同。 测试步骤：step1、准备一个已存在 Guest；step2、设置其节点等于输入节点；step3、调用创建函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 节点重复。 其它说明：覆盖重复判断第一个子条件为 true，名称比较不执行。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.005.IN
+Begin User Code
+复制公共基线，然后改为：
+static struct vmm_devtree_node other_node;
+
+memset(&other_node, 0, sizeof(other_node));
+
+vcast_manager_prepare_guest_env(1U);
+
+vcast_guest_array[0].node = &other_node;
+
+strlcpy(vcast_guest_array[0].name,
+        guest_name,
+        sizeof(vcast_guest_array[0].name));
+期望值
+return = NULL
+注释
+测试目的：验证已存在 Guest 的名称与待创建节点名称相同时，函数拒绝重复创建。 用例类别：接口测试 预置条件：已有 Guest 使用不同节点，但 Guest 名称与输入节点名称相同。 测试步骤：step1、准备已存在 Guest；step2、设置不同 node 和相同名称；step3、调用创建函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 名称重复。 其它说明：覆盖重复判断第一个子条件为 false、第二个子条件为 true。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.006.FI
+Begin User Code
+复制公共基线，然后改为：
+/*
+ * 将全部 Guest 槽位设置为已使用。
+ * 名称保持为空，不与 guest0 重复。
+ */
+vcast_manager_prepare_guest_env(
+    (u32)CONFIG_MAX_GUEST_COUNT);
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证没有可用 Guest 实例时，函数返回 NULL。 用例类别：故障注入测试 预置条件：所有 Guest 槽位均已占用，且不存在名称或节点重复。 测试步骤：step1、将全部 Guest 槽位置为已使用；step2、调用创建函数；step3、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 实例资源耗尽。 其它说明：覆盖 Guest 分配循环完整执行以及 gnum==CONFIG_MAX_GUEST_COUNT 的失败路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.007.FI
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_zalloc：
+    第1次 return NULL
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证关机完成量内存分配失败时，Guest 创建失败。 用例类别：故障注入测试 预置条件：存在可用 Guest 实例；cmpl_poweroff 分配返回 NULL。 测试步骤：step1、准备空闲 Guest 槽位；step2、注入第一次 vmm_zalloc 失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：关机完成量分配失败。 其它说明：覆盖第一个完成量空指针判断。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.008.FI
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_zalloc：
+    第1次 return &cmpl_poweroff
+    第2次 return NULL
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证挂起完成量内存分配失败时，Guest 创建失败。 用例类别：故障注入测试 预置条件：关机完成量分配成功；挂起完成量分配失败。 测试步骤：step1、设置第一次分配成功；step2、设置第二次分配失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：挂起完成量分配失败。 其它说明：覆盖第二个完成量空指针判断。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+六、Guest 属性及 VCPU 子节点检查
+vmm_manager_guest_create.009.FI
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_devtree_read_string：
+    第1次 VMM_OK，*str = Guest 类型
+    第2次 VMM_EIO
+
+vmm_devtree_getchild：
+    第1次 return NULL
+期望值
+return = NULL
+注释
+测试目的：验证 Guest endianness 属性读取失败时使用默认配置，并在 vcpus 节点不存在时销毁 Guest。 用例类别：故障注入测试 预置条件：Guest 类型有效；endianness 属性读取失败；vcpus 节点不存在。 测试步骤：step1、配置 endianness 读取失败；step2、设置 vcpus 节点为空；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：VCPU 容器节点缺失。 其它说明：覆盖 endianness 外层判断为 false和 !vsnode 路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.010.IN
+Begin User Code
+复制公共基线，然后设置：
+vcast_dt_child_count = 0U;
+Stub Processing
+vmm_devtree_read_string：
+    第1次 VMM_OK，*str = Guest 类型
+    第2次 VMM_OK，
+          *str = VMM_DEVTREE_ENDIANNESS_VAL_LITTLE
+
+vmm_devtree_getchild：
+    第1次 return &vsnode
+期望值
+return = NULL
+注释
+测试目的：验证 Guest endianness 配置为小端且 vcpus 节点没有任何 VCPU 子节点时，函数创建失败。 用例类别：接口测试 预置条件：Guest 类型和小端属性有效；vcpus 节点存在但无子节点。 测试步骤：step1、配置小端属性；step2、设置子节点数量为 0；step3、调用函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 未配置 VCPU。 其它说明：覆盖 endianness 第一个字符串比较为 true、子节点循环零次执行和 VCPU 链表为空路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.011.FI
+Begin User Code
+复制公共基线，在调用 VCPU 环境准备前设置：
+vcast_prepare_vcpu_count =
+    (u32)CONFIG_MAX_VCPU_COUNT;
+
+vcast_manager_prepare_orphan_create_env(0);
+Stub Processing
+vmm_devtree_read_string：
+    第1次 VMM_OK，*str = Guest 类型
+    第2次 VMM_OK，
+          *str = VMM_DEVTREE_ENDIANNESS_VAL_BIG
+    第3次 VMM_OK，*str = VCPU 类型
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证当前 VCPU 数量已经达到上限时，函数拒绝创建新的 VCPU。 用例类别：故障注入测试 预置条件：Guest endianness 为大端；存在一个 VCPU 子节点；manager VCPU 数量等于最大值。 测试步骤：step1、设置大端属性；step2、设置 manager VCPU 数量达到上限；step3、调用函数；step4、观察返回值。 用例来源：故障注入、边界值分析。 追溯ID：vmm_manager_guest_create。 等价列表：VCPU 总数达到上限。 其它说明：覆盖 endianness 第二个字符串比较为 true和 VCPU 数量边界失败路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.012.IN
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_devtree_read_string：
+    第1次 VMM_OK，*str = Guest 类型
+    第2次 VMM_OK，*str = "unknown-endian"
+    第3次 VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：验证 Guest endianness 属性为未知字符串时保持默认端序，并在 VCPU device_type 读取失败时返回 NULL。 用例类别：接口测试 预置条件：Guest 类型有效；endianness 既不是 little也不是 big；VCPU device_type 读取失败。 测试步骤：step1、设置未知 endianness；step2、注入 VCPU 类型读取失败；step3、调用函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：未知端序及 VCPU 类型属性缺失。 其它说明：覆盖两个 endianness 字符串比较均为 false，以及 VCPU 类型读取失败路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.013.IN
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_devtree_read_string：
+    第1次 VMM_OK，*str = Guest 类型
+    第2次 VMM_EIO
+    第3次 VMM_OK，*str = "device"
+期望值
+return = NULL
+注释
+测试目的：验证 VCPU 子节点 device_type 不等于 VCPU 类型时，函数拒绝该配置。 用例类别：接口测试 预置条件：Guest 类型有效；VCPU device_type 读取成功但内容无效。 测试步骤：step1、设置无效 VCPU 类型字符串；step2、调用函数；step3、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_guest_create。 等价列表：VCPU 子节点类型无效。 其它说明：覆盖 VCPU 类型比较不相等路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+七、HCPU domain 和 affinity 校验
+vmm_manager_guest_create.014.FI
+Begin User Code
+复制公共基线，然后改为：
+vcast_manager_prepare_orphan_create_env(-1);
+Stub Processing
+vmm_devtree_read_u32：
+    第1次 return VMM_EIO
+          （domain ID 读取失败，使用 0）
+
+vmm_devtree_getattr：
+    第1次 return NULL
+          （未配置 affinity）
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证 domain ID 未配置时使用默认 domain，并在没有可用 VCPU 实例时创建失败。 用例类别：故障注入测试 预置条件：默认 domain 有效；affinity 属性不存在；所有 VCPU 槽位均不可用。 测试步骤：step1、设置 domain ID 读取失败；step2、设置 affinity 不存在；step3、设置无可用 VCPU；step4、调用函数；step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：默认 domain 且 VCPU 实例耗尽。 其它说明：覆盖 domain 读取失败、affinity 缺失后复制 domain 掩码，以及 !vcpu 返回路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.015.IN
+Begin User Code
+复制公共基线，并增加：
+memset(&cpu_domains[1], 0,
+       sizeof(cpu_domains[1]));
+
+cpu_domains[1].is_valid = FALSE;
+cpu_domains[0].is_valid = TRUE;
+Stub Processing
+vmm_devtree_read_u32：
+    第1次 VMM_OK，*out = 1
+
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 return VMM_OK，
+          *cpu = CONFIG_CPU_COUNT
+期望值
+return = NULL
+注释
+测试目的：验证配置的 domain 无效时回退至默认 domain，并在 affinity CPU 编号越界时创建失败。 用例类别：接口测试 预置条件：domain 1无效、domain 0有效；affinity 属性存在；CPU 编号等于 CONFIG_CPU_COUNT。 测试步骤：step1、配置无效 domain 1；step2、设置 affinity CPU 为第一个越界值；step3、调用函数；step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_guest_create。 等价列表：无效 domain 回退及 CPU 编号越界。 其它说明：覆盖 cpu_domains[id].is_valid=false、cpu<CONFIG_CPU_COUNT=false，在线判断因短路不执行。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.016.IN
+Begin User Code
+复制公共基线，并设置：
+vcast_cpu_online_ret = 0U;
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 return VMM_OK，*cpu = 0
+期望值
+return = NULL
+注释
+测试目的：验证 affinity 中 CPU 编号合法但 CPU 不在线时，函数拒绝创建 VCPU。 用例类别：接口测试 预置条件：CPU 编号为 0；重定义后的 vmm_cpu_online 返回 FALSE。 测试步骤：step1、配置 affinity CPU0；step2、设置 CPU offline；step3、调用函数；step4、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：affinity CPU 不在线。 其它说明：覆盖 CPU 边界判断为 true、CPU 在线判断为 false。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.017.IN
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 return VMM_EFAIL
+
+__bitmap_weight：
+    return 0
+期望值
+return = NULL
+注释
+测试目的：验证 affinity 属性存在但未读取到任何有效 CPU 时，函数判定 affinity 掩码为空。 用例类别：接口测试 预置条件：affinity 属性存在；第一个索引读取即失败；掩码权重返回 0。 测试步骤：step1、设置 affinity 属性存在；step2、设置索引读取无数据；step3、设置权重为 0；step4、调用函数；step5、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：空 affinity 掩码。 其它说明：覆盖 affinity 读取循环零次执行和权重小于 1的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.018.IN
+Begin User Code
+复制公共基线。
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 VMM_OK，*cpu = 0
+    第2次 VMM_EFAIL
+
+__bitmap_weight：
+    return 1
+
+__bitmap_subset：
+    return 0
+
+__bitmap_equal：
+    return 0
+期望值
+return = NULL
+注释
+测试目的：验证 VCPU affinity 既不是 domain 掩码的子集，也不与 domain 掩码相等时，函数拒绝配置。 用例类别：接口测试 预置条件：affinity 至少包含一个在线 CPU；权重非零；subset 和 equal 均返回 false。 测试步骤：step1、配置一个有效 CPU；step2、结束 affinity 索引读取；step3、设置 subset/equal 均失败；step4、调用函数；step5、观察返回值。 用例来源：接口分析。 追溯ID：vmm_manager_guest_create。 等价列表：affinity 超出 domain。 其它说明：覆盖复合条件 !subset && !equal 整体为 true。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.019.FI
+Begin User Code
+复制公共基线，然后改为：
+vcast_manager_prepare_orphan_create_env(-1);
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 VMM_OK，*cpu = 0
+    第2次 VMM_EFAIL
+
+__bitmap_weight：
+    return 1
+
+__bitmap_subset：
+    return 0
+
+__bitmap_equal：
+    return 1
+期望值
+return = NULL
+注释
+测试目的：通过故障注入构造 subset 返回 false、equal 返回 true的依赖异常组合，覆盖 domain 复合判断后继续执行的路径。 用例类别：故障注入测试 预置条件：affinity 权重非零；subset 返回 0；equal 返回 1；无可用 VCPU 实例。 测试步骤：step1、配置有效 affinity CPU；step2、注入 subset/equal 异常组合；step3、设置无可用 VCPU；step4、调用函数；step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：subset 失败但 equal 成功的异常依赖返回。 其它说明：该组合不符合真实集合关系，仅用于覆盖 !subset=true、!equal=false 的条件结果。 通过准则：函数继续越过 affinity 检查，最终因无可用 VCPU 返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.020.FI
+Begin User Code
+复制公共基线，然后改为：
+vcast_manager_prepare_orphan_create_env(-1);
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return &affinity_attr
+
+vmm_devtree_read_u32_atindex：
+    第1次 VMM_OK，*cpu = 0
+    第2次 VMM_EFAIL
+
+__bitmap_weight：
+    return 1
+
+__bitmap_subset：
+    return 1
+__bitmap_equal 不调用。
+期望值
+return = NULL
+注释
+测试目的：验证 affinity 是 domain 子集时通过 domain 检查，并在 VCPU 实例耗尽时返回 NULL。 用例类别：故障注入测试 预置条件：affinity 权重非零；subset 返回 true；所有 VCPU 槽位不可用。 测试步骤：step1、配置一个在线 CPU；step2、设置 subset 成功；step3、设置无可用 VCPU；step4、调用函数；step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：有效 affinity 但 VCPU 实例耗尽。 其它说明：覆盖 subset 为 true导致 equal 短路不执行的路径。 通过准则：函数最终返回 NULL。
+ 
+⸻
+ 
+八、VCPU 分配和初始化失败路径
+vmm_manager_guest_create.021.IN
+Begin User Code
+复制公共成功基线，将 Guest 名称替换为超长字符串：
+static char long_guest_name[
+    VMM_FIELD_NAME_SIZE + 16U];
+
+memset(long_guest_name,
+       'A',
+       sizeof(long_guest_name));
+
+long_guest_name[
+    sizeof(long_guest_name) - 1U] = '\0';
+
+gnode.name = long_guest_name;
+Stub Processing
+vmm_devtree_read_u32：
+    第1次 VMM_OK，*out = 0
+    第2次 VMM_EIO
+          （priority 使用默认值）
+期望值
+return = NULL
+注释
+测试目的：验证拼接 Guest/VCPU 名称后的长度超过 VCPU 名称缓冲区时，函数恢复 VCPU 可用状态并返回 NULL。 用例类别：接口测试 预置条件：存在可用 VCPU；Guest 节点名称长度超过 VCPU 名称缓冲区。 测试步骤：step1、构造超长 Guest 名称；step2、使优先级读取失败以使用默认值；step3、调用函数；step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_guest_create。 等价列表：VCPU 名称拼接溢出。 其它说明：覆盖优先级读取失败和最终 strlcat 返回长度越界路径。字符串函数必须使用 Actual。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.022.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_read_u32：
+    第1次 VMM_OK，*out = 0
+    第2次 VMM_OK，
+          *out = VMM_VCPU_MAX_PRIORITY + 1
+
+vmm_malloc：
+    return NULL
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证优先级超过上限时被限制到最大值，并在 VCPU 栈分配失败时执行清理。 用例类别：故障注入测试 预置条件：VCPU 优先级配置为最大值加 1；栈分配返回 NULL。 测试步骤：step1、配置超上限优先级；step2、注入栈分配失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入、边界值分析。 追溯ID：vmm_manager_guest_create。 等价列表：优先级上限修正及 VCPU 栈分配失败。 其它说明：覆盖最大优先级修正分支和栈地址为空路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.023.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_read_u64：
+    第1次 return VMM_EIO
+    第2次 return VMM_EIO
+    第3次 return VMM_EIO
+
+arch_vcpu_init：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证调度时间参数读取失败时使用默认值，并在架构 VCPU 初始化失败时执行清理。 用例类别：故障注入测试 预置条件：三个 u64调度属性读取均失败；栈分配成功；arch_vcpu_init 返回错误。 测试步骤：step1、注入三个时间属性读取失败；step2、注入架构初始化失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：默认调度参数及架构初始化失败。 其它说明：覆盖三个属性读取失败分支；默认 deadline 和 periodicity 不需要向上修正。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.024.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_read_u64：
+    第1次 VMM_OK，*out = 0
+    第2次 VMM_OK，*out = 1
+    第3次 VMM_OK，*out = 0
+
+arch_vcpu_init：
+    return VMM_OK
+
+vmm_vcpu_irq_init：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：验证时间片为 0时使用默认时间片，deadline 和 periodicity 小于下限时向上修正，并在虚拟 IRQ 初始化失败时清理 VCPU。 用例类别：故障注入测试 预置条件：time_slice=0、deadline=1、periodicity=0；架构初始化成功；IRQ 初始化失败。 测试步骤：step1、配置需要修正的时间参数；step2、注入 IRQ 初始化失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入、边界值分析。 追溯ID：vmm_manager_guest_create。 等价列表：调度时间参数下限修正及 IRQ 初始化失败。 其它说明：覆盖 time_slice==0、deadline<time_slice 和 periodicity<deadline 三个 true 路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.025.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_read_u64：
+    第1次 VMM_OK，*out = 100
+    第2次 VMM_OK，*out = 200
+    第3次 VMM_OK，*out = 300
+
+arch_vcpu_init：
+    return VMM_OK
+
+vmm_vcpu_irq_init：
+    return VMM_OK
+
+vmm_manager_vcpu_set_state：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证合法调度参数不需要修正，并在 VCPU RESET 状态设置失败时执行 IRQ、架构和栈清理。 用例类别：故障注入测试 预置条件：时间参数满足递增关系；架构和 IRQ 初始化成功；状态设置返回错误。 测试步骤：step1、配置合法时间参数；step2、注入 RESET 状态设置失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：合法调度参数及 VCPU 状态设置失败。 其它说明：覆盖三个时间修正判断的 false 路径和状态设置错误路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.026.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return NULL
+          （affinity）
+
+    第2次 return &poweroff_attr
+          （VCPU poweroff）
+
+vmm_zalloc：
+    第1次 return &cmpl_poweroff
+    第2次 return &cmpl_suspend
+    第3次 return NULL
+期望值
+return = NULL
+注释
+测试目的：验证 VCPU 配置 poweroff 属性时设置关机标志，并在 I/O 请求完成量分配失败时销毁 Guest。 用例类别：故障注入测试 预置条件：VCPU 初始化及 RESET 状态设置成功；poweroff 属性存在；第三次 vmm_zalloc 返回 NULL。 测试步骤：step1、配置 poweroff 属性；step2、注入 I/O 请求完成量分配失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：关机 VCPU 的 I/O 完成量分配失败。 其它说明：覆盖 poweroff 属性为 true和 vmm_u_io_req_wait==NULL 的直接返回路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+九、Guest 后期初始化
+vmm_manager_guest_create.027.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return NULL
+          （affinity）
+
+    第2次 return NULL
+          （poweroff）
+
+    第3次 return &fdt_attr
+          （guest fdt）
+
+vmm_devtree_read_virtaddr：
+    第1次 VMM_OK，*out = 0x1000
+    第2次 VMM_OK，*out = 0x90000000
+
+arch_guest_init：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：验证非 poweroff VCPU 配置 FDT 地址时，函数将 FDT 地址写入启动上下文，并在架构 Guest 初始化失败时销毁 Guest。 用例类别：故障注入测试 预置条件：VCPU 初始化完整成功；FDT 属性存在；arch_guest_init 返回错误。 测试步骤：step1、配置 FDT 属性和地址；step2、注入 Guest 架构初始化失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：带 FDT 的 Guest 架构初始化失败。 其它说明：覆盖 poweroff=false、FDT 属性=true、VCPU 链表非空和架构 Guest 初始化错误路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.028.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+vmm_devtree_getattr：
+    第1次 return NULL
+    第2次 return NULL
+    第3次 return NULL
+
+arch_guest_init：
+    return VMM_OK
+
+vmm_guest_aspace_init：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：验证 VCPU 未配置 poweroff 和 FDT 属性时继续初始化，并在 Guest 地址空间初始化失败时销毁 Guest。 用例类别：故障注入测试 预置条件：VCPU 初始化成功；poweroff 和 FDT 属性均不存在；架构 Guest 初始化成功；地址空间初始化失败。 测试步骤：step1、设置两个可选属性为空；step2、注入地址空间初始化失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：无 FDT VCPU 的地址空间初始化失败。 其它说明：覆盖 FDT 属性判断为 false和 vmm_guest_aspace_init 错误路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.029.FI
+Begin User Code
+使用公共成功基线。
+Stub Processing
+arch_guest_init：
+    return VMM_OK
+
+vmm_guest_aspace_init：
+    return VMM_OK
+
+vmm_guest_aspace_reset：
+    return VMM_EIO
+期望值
+return = NULL
+注释
+测试目的：通过故障注入验证 Guest 地址空间初始化成功但首次 reset 失败时，函数销毁 Guest并返回 NULL。 用例类别：故障注入测试 预置条件：VCPU 和架构 Guest 初始化成功；地址空间初始化成功；地址空间 reset 返回错误。 测试步骤：step1、配置前置初始化成功；step2、注入地址空间 reset 失败；step3、调用函数；step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：Guest 地址空间 reset 失败。 其它说明：覆盖地址空间初始化判断为 false和地址空间 reset 判断为 true的路径。 通过准则：函数返回 NULL。
+ 
+⸻
+ 
+vmm_manager_guest_create.030.R
+Begin User Code
+使用公共成功基线。
+Stub Processing
+使用公共成功 Stub 基线。
+若定义了 CONFIG_TEE，本条增加：
+tee_get_type：
+    return TEE_TYPE_NONE
+期望值
+return = vcast_expected_guest
+
+vcast_expected_guest->state = RESET
+vcast_expected_guest->vcpu_count = 1
+
+vcast_orphan_vcpu_array[0].is_normal = TRUE
+vcast_orphan_vcpu_array[0].is_poweroff = FALSE
+vcast_orphan_vcpu_array[0].guest =
+    vcast_expected_guest
+
+vcast_orphan_vcpu_array[0].start_pc = 0x1000
+vcast_orphan_vcpu_array[0].time_slice = 100
+vcast_orphan_vcpu_array[0].deadline = 200
+vcast_orphan_vcpu_array[0].periodicity = 300
+注释
+测试目的：验证合法 Guest 和单个 VCPU 配置下，函数完成 Guest、VCPU、IRQ、地址空间和调度上下文初始化并返回 Guest 地址。 用例类别：基于需求的测试 预置条件：存在可用 Guest 和 VCPU 实例；设备树配置合法；所有内存分配及下层初始化接口均成功。 测试步骤：step1、构造合法 Guest/VCPU 节点；step2、设置所有依赖成功；step3、调用 vmm_manager_guest_create；step4、检查返回指针和关键 Guest/VCPU 成员。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_create。 等价列表：单 VCPU Guest 正常创建。 其它说明：覆盖 Guest 创建完整成功路径；gpio_key_init 在本 UUT 中使用空 Stub。 通过准则：函数返回 vcast_expected_guest，Guest 状态为 RESET，关联 VCPU 数量和关键初始化成员正确。
+ 
+⸻
+ 
+十、
+CONFIG_TEE
+条件用例
+仅在当前环境定义 CONFIG_TEE 时增加。
+公共成功基线中的 gpio_key_init 继续为空 Stub。
+vmm_manager_guest_create.031.R
+选择一个与 OP-TEE 目标 ID 不同的 Guest 槽位：
+u32 target_id;
+u32 other_id;
+u32 g;
+
+target_id =
+    (u32)OPTEE_SINGLE_GUEST_CLIENT_ID - 1U;
+
+other_id =
+    (target_id == 0U) ? 1U : 0U;
+
+vcast_manager_prepare_guest_env(0U);
+
+for (g = 0U;
+     g < (u32)CONFIG_MAX_GUEST_COUNT;
+     ++g) {
+    vcast_guest_avail_array[g] = FALSE;
+}
+
+vcast_guest_avail_array[other_id] = TRUE;
+vcast_expected_guest =
+    &vcast_guest_array[other_id];
+Stub Processing
+tee_get_type：
+    return TEE_TYPE_NONE + 1
+期望值
+return = vcast_expected_guest
+注释
+测试目的：验证 TEE 类型有效但 Guest ID 不是 OP-TEE 单 Guest 客户端 ID 时，不执行 TEE Guest 初始化。 用例类别：基于需求的测试 预置条件：定义 CONFIG_TEE；TEE 类型非 NONE；创建的 Guest ID 与 OP-TEE 目标 ID 不同。 测试步骤：step1、选择非目标 Guest 槽位；step2、设置有效 TEE 类型；step3、执行完整创建；step4、检查返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_create。 等价列表：非 OP-TEE 客户端 Guest。 其它说明：覆盖 TEE 复合条件第一个子条件为 true、第二个为 false。 通过准则：Guest 创建成功并返回预期地址。
+ 
+⸻
+ 
+vmm_manager_guest_create.032.FI
+选择目标 Guest 槽位：
+u32 target_id;
+u32 g;
+
+target_id =
+    (u32)OPTEE_SINGLE_GUEST_CLIENT_ID - 1U;
+
+vcast_manager_prepare_guest_env(0U);
+
+for (g = 0U;
+     g < (u32)CONFIG_MAX_GUEST_COUNT;
+     ++g) {
+    vcast_guest_avail_array[g] = FALSE;
+}
+
+vcast_guest_avail_array[target_id] = TRUE;
+vcast_expected_guest =
+    &vcast_guest_array[target_id];
+Stub Processing
+tee_get_type：
+    return TEE_TYPE_NONE + 1
+
+tee_guest_init：
+    return VMM_EIO
+期望值
+return = vcast_expected_guest
+注释
+测试目的：通过故障注入验证 OP-TEE 目标 Guest 的 TEE 初始化失败时，函数记录错误但仍返回已创建 Guest。 用例类别：故障注入测试 预置条件：TEE 类型有效；Guest ID 匹配 OP-TEE 目标；tee_guest_init 返回错误。 测试步骤：step1、选择目标 Guest 槽位；step2、设置有效 TEE 类型；step3、注入 TEE 初始化失败；step4、调用函数；step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_create。 等价列表：OP-TEE Guest 初始化失败。 其它说明：当前源码只输出错误，不撤销 Guest 创建。 通过准则：函数仍返回 vcast_expected_guest。
+ 
+⸻
+ 
+vmm_manager_guest_create.033.R
+使用与 .032.FI 相同的目标 Guest 槽位设置。
+Stub Processing
+tee_get_type：
+    return TEE_TYPE_NONE + 1
+
+tee_guest_init：
+    return VMM_OK
+期望值
+return = vcast_expected_guest
+注释
+测试目的：验证 OP-TEE 目标 Guest 的 TEE 初始化成功后，函数返回已创建 Guest。 用例类别：基于需求的测试 预置条件：TEE 类型有效；Guest ID 匹配 OP-TEE 目标；TEE 初始化成功。 测试步骤：step1、选择目标 Guest 槽位；step2、设置有效 TEE 类型；step3、设置 TEE 初始化成功；step4、调用函数；step5、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_create。 等价列表：OP-TEE Guest 初始化成功。 其它说明：覆盖 TEE 复合条件整体为 true和内部初始化成功路径。 通过准则：函数返回 vcast_expected_guest。
+ 
+⸻
+ 
+十一、不可达或需说明的路径
+1. 最小优先级判断 true 不可达
+if (vcpu->priority < VMM_VCPU_MIN_PRIORITY)
+当前定义：
+#define VMM_VCPU_MIN_PRIORITY 0
+而：
+vcpu->priority
+类型为 u8，最小值也是 0，因此不存在：
+priority < 0
+的输入。该判断 true 路径结构性不可达。
+ 
+⸻
+ 
+2. Guest 分配失败复合条件
+if (!guest ||
+    gnum == CONFIG_MAX_GUEST_COUNT)
+由于前面使用：
+list_for_each_entry(guest, ...)
+部分链表宏在循环结束后会使 guest 保留为内部哨兵计算地址，而不是 NULL。因此无可用槽位时，实际常通过：
+!guest == false
+gnum == CONFIG_MAX_GUEST_COUNT == true
+进入失败路径。
+若覆盖报告显示 !guest=true 缺失，这通常是链表迭代宏语义导致，不是输入遗漏。
+ 
+⸻
+ 
+十二、名称汇总
+基础配置：
+vmm_manager_guest_create.001.IN_Guest节点为空
+vmm_manager_guest_create.002.IN_Guest类型属性读取失败
+vmm_manager_guest_create.003.IN_Guest节点类型无效
+vmm_manager_guest_create.004.IN_Guest节点重复
+vmm_manager_guest_create.005.IN_Guest名称重复
+vmm_manager_guest_create.006.FI_Guest实例资源耗尽
+vmm_manager_guest_create.007.FI_关机完成量分配失败
+vmm_manager_guest_create.008.FI_挂起完成量分配失败
+vmm_manager_guest_create.009.FI_VCPU容器节点不存在
+vmm_manager_guest_create.010.IN_Guest未配置VCPU
+vmm_manager_guest_create.011.FI_VCPU总数达到上限
+vmm_manager_guest_create.012.IN_VCPU类型属性读取失败
+vmm_manager_guest_create.013.IN_VCPU节点类型无效
+vmm_manager_guest_create.014.FI_默认Domain下VCPU实例耗尽
+vmm_manager_guest_create.015.IN_Affinity的CPU编号越界
+vmm_manager_guest_create.016.IN_Affinity的CPU不在线
+vmm_manager_guest_create.017.IN_Affinity掩码为空
+vmm_manager_guest_create.018.IN_Affinity超出Domain范围
+vmm_manager_guest_create.019.FI_Subset失败但Equal成功
+vmm_manager_guest_create.020.FI_有效Affinity下VCPU实例耗尽
+vmm_manager_guest_create.021.IN_VCPU名称拼接溢出
+vmm_manager_guest_create.022.FI_VCPU栈分配失败
+vmm_manager_guest_create.023.FI_架构VCPU初始化失败
+vmm_manager_guest_create.024.FI_虚拟IRQ初始化失败
+vmm_manager_guest_create.025.FI_VCPU状态设置失败
+vmm_manager_guest_create.026.FI_IO请求完成量分配失败
+vmm_manager_guest_create.027.FI_架构Guest初始化失败
+vmm_manager_guest_create.028.FI_Guest地址空间初始化失败
+vmm_manager_guest_create.029.FI_Guest地址空间Reset失败
+vmm_manager_guest_create.030.R_单VCPUGuest创建成功
+定义 CONFIG_TEE 时追加：
+vmm_manager_guest_create.031.R_非OPTEE目标Guest创建成功
+vmm_manager_guest_create.032.FI_OPTEETEE初始化失败
+vmm_manager_guest_create.033.R_OPTEETEE初始化成功
