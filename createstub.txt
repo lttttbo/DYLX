@@ -1,0 +1,506 @@
+对，vmm_devtree_read_u32()、vmm_devtree_read_u64() 和 vmm_devtree_read_virtaddr() 都是 static inline，真正需要改写的是它们展开后调用的底层 Stub。
+针对 vmm_manager_guest_create()，最终需要统一处理这 5 个 Stub：
+vmm_devtree_read_string
+vmm_devtree_read_u32_array
+vmm_devtree_read_u32_atindex
+vmm_devtree_read_u64_array
+vmm_devtree_read_virtaddr_array
+核心赋值方式如下：
+/* const char **：修改调用者的字符串指针 */
+*out = string_pointer;
+
+/* u32 *、u64 *、virtual_addr_t *：写输出对象 */
+out[0] = value;
+不需要 memcpy()，也不能修改 Stub 自己的局部形参 out。
+ 
+⸻
+ 
+一、User Global 最终补充
+已有同名变量时不要重复定义。
+/*
+ * vmm_devtree_read_string
+ *
+ * guest_create 中最多调用三次：
+ * 1. Guest device_type
+ * 2. Guest endianness
+ * 3. VCPU device_type
+ */
+u32 vcast_dt_read_string_count;
+
+const char *
+vcast_dt_read_string_out_seq[3];
+
+
+/*
+ * vmm_devtree_read_u32_array
+ *
+ * vmm_devtree_read_u32 是 inline 函数，展开后调用该函数，
+ * 且 sz 固定为 1。
+ *
+ * guest_create 中通常调用两次：
+ * 1. hcpu_domain_id
+ * 2. priority
+ */
+u32 vcast_dt_read_u32_array_count;
+
+u32 vcast_dt_read_u32_array_out_seq[3];
+
+
+/*
+ * vmm_devtree_read_u32_atindex
+ *
+ * 用于依次读取 affinity CPU。
+ * 最后一次通常配置为错误返回，以结束 while 循环。
+ */
+u32 vcast_dt_read_u32_atindex_count;
+
+u32 vcast_dt_read_u32_atindex_out_seq[
+    CONFIG_CPU_COUNT + 1U];
+
+
+/*
+ * vmm_devtree_read_u64_array
+ *
+ * vmm_devtree_read_u64 是 inline 函数，展开后调用该函数，
+ * 且 sz 固定为 1。
+ *
+ * guest_create 中调用顺序：
+ * 1. time_slice
+ * 2. deadline
+ * 3. periodicity
+ */
+u32 vcast_dt_read_u64_array_count;
+
+u64 vcast_dt_read_u64_array_out_seq[3];
+
+
+/*
+ * vmm_devtree_read_virtaddr_array
+ *
+ * vmm_devtree_read_virtaddr 是 inline 函数，展开后调用该函数，
+ * 且 sz 固定为 1。
+ *
+ * guest_create 中调用顺序：
+ * 1. start_pc
+ * 2. 可选的 guest fdt 地址
+ */
+u32 vcast_dt_read_virtaddr_array_count;
+
+virtual_addr_t
+vcast_dt_read_virtaddr_array_out_seq[3];
+这些只是变量，没有新增函数，不会增加辅助函数覆盖统计。
+ 
+⸻
+ 
+二、每条测试用例执行前统一复位
+建议放在每条用例都会执行的 Test Case Initialization User Code 中，而不是放进 Stub 本身。
+vcast_dt_read_string_count = 0U;
+
+vcast_dt_read_string_out_seq[0] = NULL;
+vcast_dt_read_string_out_seq[1] = NULL;
+vcast_dt_read_string_out_seq[2] = NULL;
+
+
+vcast_dt_read_u32_array_count = 0U;
+
+vcast_dt_read_u32_array_out_seq[0] = 0U;
+vcast_dt_read_u32_array_out_seq[1] = 0U;
+vcast_dt_read_u32_array_out_seq[2] = 0U;
+
+
+vcast_dt_read_u32_atindex_count = 0U;
+
+memset(vcast_dt_read_u32_atindex_out_seq,
+       0,
+       sizeof(vcast_dt_read_u32_atindex_out_seq));
+
+
+vcast_dt_read_u64_array_count = 0U;
+
+vcast_dt_read_u64_array_out_seq[0] = (u64)0;
+vcast_dt_read_u64_array_out_seq[1] = (u64)0;
+vcast_dt_read_u64_array_out_seq[2] = (u64)0;
+
+
+vcast_dt_read_virtaddr_array_count = 0U;
+
+vcast_dt_read_virtaddr_array_out_seq[0] =
+    (virtual_addr_t)0;
+
+vcast_dt_read_virtaddr_array_out_seq[1] =
+    (virtual_addr_t)0;
+
+vcast_dt_read_virtaddr_array_out_seq[2] =
+    (virtual_addr_t)0;
+计数器不能在 Beginning of Stub 中清零。否则每次调用都会重新从第一个输出值开始。
+ 
+⸻
+ 
+三、5 个 Stub 的最终 User Code
+放置位置
+最安全的放置位置是：
+End of Stub User Code
+并确保位于生成的 return 之前。这样可以避免 VectorCAST 的公共 Stub 参数处理覆盖你的输出赋值。
+若只能使用：
+Beginning of Stub User Code
+则不要再通过 VectorCAST 参数树配置 out 的输出内容；只通过 VectorCAST 设置函数返回码。
+ 
+⸻
+ 
+1. 
+vmm_devtree_read_string
+函数原型：
+int vmm_devtree_read_string(
+    const struct vmm_devtree_node *node,
+    const char *attrib,
+    const char **out);
+Stub User Code：
+/*
+ * out 指向 UUT 中的 const char *str。
+ *
+ *     *out = xxx;
+ *
+ * 等价于：
+ *
+ *     str = xxx;
+ *
+ * 第3次及后续调用统一使用序列下标2，
+ * 避免数组越界。
+ */
+if (out != NULL) {
+    *out =
+        vcast_dt_read_string_out_seq[
+            (vcast_dt_read_string_count < 3U) ?
+            vcast_dt_read_string_count : 2U];
+}
+
+/*
+ * 无论本次最终返回成功还是失败，
+ * 都是真实发生了一次调用。
+ */
+vcast_dt_read_string_count++;
+最安全的输出值来源是：
+字符串常量
+工程中的字符串宏
+static char 数组
+例如：
+vcast_dt_read_string_out_seq[0] =
+    VMM_DEVTREE_DEVICE_TYPE_VAL_GUEST;
+不要这样写：
+out = &some_pointer;        /* 只修改 Stub 局部形参 */
+strcpy((char *)*out, ...);  /* *out 可能未初始化或指向只读区 */
+ 
+⸻
+ 
+2. 
+vmm_devtree_read_u32_array
+函数原型：
+int vmm_devtree_read_u32_array(
+    const struct vmm_devtree_node *node,
+    const char *attrib,
+    u32 *out,
+    size_t sz);
+Stub User Code：
+/*
+ * guest_create 中通过 inline 的 vmm_devtree_read_u32
+ * 调用本函数，sz 固定为1。
+ *
+ * out[0] = value 等价于修改调用者的：
+ *
+ *     cpu_domain_id
+ *     priority
+ */
+if ((out != NULL) &&
+    (sz >= (size_t)1U)) {
+    out[0] =
+        vcast_dt_read_u32_array_out_seq[
+            (vcast_dt_read_u32_array_count < 3U) ?
+            vcast_dt_read_u32_array_count : 2U];
+}
+
+vcast_dt_read_u32_array_count++;
+这里不需要、也不能改写：
+vmm_devtree_read_u32()
+因为它已经在 UUT 中展开。
+当前方案只保证：
+sz == 1
+的单元素读取。对于以后直接测试多元素 read_u32_array()，再另行扩展为写入多个 out[i]。
+ 
+⸻
+ 
+3. 
+vmm_devtree_read_u32_atindex
+函数原型：
+int vmm_devtree_read_u32_atindex(
+    const struct vmm_devtree_node *node,
+    const char *attrib,
+    u32 *out,
+    int index);
+Stub User Code：
+/*
+ * 每次调用输出一个 affinity CPU 编号。
+ *
+ * 最后一项作为调用次数超出预期时的兜底，
+ * 避免访问数组边界之外。
+ */
+if (out != NULL) {
+    out[0] =
+        vcast_dt_read_u32_atindex_out_seq[
+            (vcast_dt_read_u32_atindex_count <
+             ((u32)CONFIG_CPU_COUNT + 1U)) ?
+            vcast_dt_read_u32_atindex_count :
+            (u32)CONFIG_CPU_COUNT];
+}
+
+vcast_dt_read_u32_atindex_count++;
+例如读取一个 CPU0，然后结束循环：
+vcast_dt_read_u32_atindex_out_seq[0] = 0U;
+vcast_dt_read_u32_atindex_out_seq[1] = 0U;
+VectorCAST 返回值序列配置：
+第1次：VMM_OK
+第2次：VMM_EFAIL
+第2次虽然也会写 out[0]，但源码看到返回错误后不会使用该值。
+读取两个 CPU：
+vcast_dt_read_u32_atindex_out_seq[0] = 0U;
+vcast_dt_read_u32_atindex_out_seq[1] = 1U;
+vcast_dt_read_u32_atindex_out_seq[2] = 0U;
+返回值序列：
+第1次：VMM_OK
+第2次：VMM_OK
+第3次：VMM_EFAIL
+必须配置最终的非零返回值，否则默认 Stub 返回 0会导致 while 循环无法结束。
+ 
+⸻
+ 
+4. 
+vmm_devtree_read_u64_array
+函数原型：
+int vmm_devtree_read_u64_array(
+    const struct vmm_devtree_node *node,
+    const char *attrib,
+    u64 *out,
+    size_t sz);
+Stub User Code：
+/*
+ * guest_create 中通过 inline 的 vmm_devtree_read_u64
+ * 调用本函数，sz 固定为1。
+ */
+if ((out != NULL) &&
+    (sz >= (size_t)1U)) {
+    out[0] =
+        vcast_dt_read_u64_array_out_seq[
+            (vcast_dt_read_u64_array_count < 3U) ?
+            vcast_dt_read_u64_array_count : 2U];
+}
+
+vcast_dt_read_u64_array_count++;
+不需要改写 inline 的：
+vmm_devtree_read_u64()
+ 
+⸻
+ 
+5. 
+vmm_devtree_read_virtaddr_array
+函数原型：
+int vmm_devtree_read_virtaddr_array(
+    const struct vmm_devtree_node *node,
+    const char *attrib,
+    virtual_addr_t *out,
+    size_t sz);
+Stub User Code：
+/*
+ * guest_create 中通过 inline 的 vmm_devtree_read_virtaddr
+ * 调用本函数，sz 固定为1。
+ */
+if ((out != NULL) &&
+    (sz >= (size_t)1U)) {
+    out[0] =
+        vcast_dt_read_virtaddr_array_out_seq[
+            (vcast_dt_read_virtaddr_array_count < 3U) ?
+            vcast_dt_read_virtaddr_array_count : 2U];
+}
+
+vcast_dt_read_virtaddr_array_count++;
+不需要改写 inline 的：
+vmm_devtree_read_virtaddr()
+ 
+⸻
+ 
+四、
+guest_create
+成功路径的完整输出配置示例
+放进成功用例的 Begin User Code。
+1. 字符串输出
+调用顺序：
+第1次：Guest device_type
+第2次：Guest endianness
+第3次：VCPU device_type
+vcast_dt_read_string_count = 0U;
+
+vcast_dt_read_string_out_seq[0] =
+    VMM_DEVTREE_DEVICE_TYPE_VAL_GUEST;
+
+/*
+ * 本次配置第2次读取返回错误，
+ * 输出值设为 NULL。
+ */
+vcast_dt_read_string_out_seq[1] =
+    NULL;
+
+vcast_dt_read_string_out_seq[2] =
+    VMM_DEVTREE_DEVICE_TYPE_VAL_VCPU;
+VectorCAST 返回值：
+vmm_devtree_read_string：
+
+    第1次 return VMM_OK
+    第2次 return VMM_EIO
+    第3次 return VMM_OK
+ 
+⸻
+ 
+2. u32 输出
+调用顺序：
+第1次：cpu_domain_id
+第2次：priority
+vcast_dt_read_u32_array_count = 0U;
+
+vcast_dt_read_u32_array_out_seq[0] =
+    0U;
+
+vcast_dt_read_u32_array_out_seq[1] =
+    (u32)VMM_VCPU_DEF_PRIORITY;
+
+vcast_dt_read_u32_array_out_seq[2] =
+    0U;
+VectorCAST 返回值：
+vmm_devtree_read_u32_array：
+
+    第1次 return VMM_OK
+    第2次 return VMM_OK
+ 
+⸻
+ 
+3. affinity 索引输出
+成功基线未配置 affinity，因此该函数不调用：
+vcast_dt_read_u32_atindex_count = 0U;
+对于包含一个 affinity CPU 的用例：
+vcast_dt_read_u32_atindex_count = 0U;
+
+vcast_dt_read_u32_atindex_out_seq[0] =
+    0U;
+
+vcast_dt_read_u32_atindex_out_seq[1] =
+    0U;
+返回值：
+第1次 return VMM_OK
+第2次 return VMM_EFAIL
+ 
+⸻
+ 
+4. u64 调度参数输出
+vcast_dt_read_u64_array_count = 0U;
+
+vcast_dt_read_u64_array_out_seq[0] =
+    (u64)100;
+
+vcast_dt_read_u64_array_out_seq[1] =
+    (u64)200;
+
+vcast_dt_read_u64_array_out_seq[2] =
+    (u64)300;
+返回值：
+vmm_devtree_read_u64_array：
+
+    第1次 return VMM_OK
+    第2次 return VMM_OK
+    第3次 return VMM_OK
+ 
+⸻
+ 
+5. 虚拟地址输出
+普通成功基线仅调用一次，用于 start_pc：
+vcast_dt_read_virtaddr_array_count = 0U;
+
+vcast_dt_read_virtaddr_array_out_seq[0] =
+    (virtual_addr_t)0x1000;
+
+vcast_dt_read_virtaddr_array_out_seq[1] =
+    (virtual_addr_t)0;
+
+vcast_dt_read_virtaddr_array_out_seq[2] =
+    (virtual_addr_t)0;
+返回值：
+vmm_devtree_read_virtaddr_array：
+
+    第1次 return VMM_OK
+对于 FDT 用例：
+vcast_dt_read_virtaddr_array_out_seq[0] =
+    (virtual_addr_t)0x1000;
+
+vcast_dt_read_virtaddr_array_out_seq[1] =
+    (virtual_addr_t)0x90000000;
+返回值：
+第1次 return VMM_OK
+第2次 return VMM_OK
+ 
+⸻
+ 
+五、错误返回时的规则
+这些输出计数器按真实调用次数递增，与函数最终返回成功还是失败无关。
+例如：
+read_string 第1次：成功
+read_string 第2次：失败
+read_string 第3次：成功
+计数仍然依次使用：
+out_seq[0]
+out_seq[1]
+out_seq[2]
+所以失败调用不能不递增计数器。
+错误调用的输出值可统一设为确定值：
+字符串：NULL
+u32：0
+u64：0
+virtual_addr_t：0
+虽然调用者通常不会使用错误调用的输出，但这样可以避免保留未初始化数据。
+ 
+⸻
+ 
+六、不需要额外改写的函数
+以下函数虽然也会多次调用，但只需要直接配置连续返回值，不涉及输出形参写回，因此不需要增加 User Code：
+vmm_devtree_getchild
+vmm_devtree_getattr
+vmm_zalloc
+vmm_malloc
+arch_vcpu_init
+vmm_vcpu_irq_init
+vmm_manager_vcpu_set_state
+同样不需要改写这三个 inline 包装函数：
+vmm_devtree_read_u32
+vmm_devtree_read_u64
+vmm_devtree_read_virtaddr
+真正生效的是它们展开后的三个 array Stub。
+ 
+⸻
+ 
+七、最终汇总
+需要增加 User Code 的最终 5 个 Stub：
+1. vmm_devtree_read_string
+   const char **out
+   使用：*out = const char *
+
+2. vmm_devtree_read_u32_array
+   u32 *out
+   使用：out[0] = u32
+
+3. vmm_devtree_read_u32_atindex
+   u32 *out
+   使用：out[0] = u32
+
+4. vmm_devtree_read_u64_array
+   u64 *out
+   使用：out[0] = u64
+
+5. vmm_devtree_read_virtaddr_array
+   virtual_addr_t *out
+   使用：out[0] = virtual_addr_t
+返回码仍由 VectorCAST 的连续 Stub 返回值控制；输出值由以上 User Code 序列控制。最安全的做法是把赋值逻辑放在 End of Stub、return 之前，避免被 VectorCAST 的自动参数处理覆盖。
