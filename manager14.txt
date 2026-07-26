@@ -1,0 +1,1005 @@
+下面继续这 4 个函数：
+vmm_manager_guest_destroy_exec
+vmm_manager_guest_put
+vmm_manager_guest_destroy
+vmm_manager_init
+本批保持现有约定：
+	•	用例类别仅使用：基于需求的测试、接口测试、故障注入测试；
+	•	每条用例提供完整注释；
+	•	正式名称保留 .R、.IN、.FI 后缀；
+	•	不增加辅助函数，使用可重复复制的 Begin User Code 基线；
+	•	非本 .c 文件函数通过 VectorCAST Stub 控制；
+	•	同一 .c 文件中的 vmm_manager_guest_reset()、manager_flush_req()、vmm_manager_vcpu_resource_flush()、vmm_manager_vcpu_clear_trap_cnt()按照实际函数执行。
+ 
+⸻
+ 
+一、
+vmm_manager_guest_destroy_exec
+的公共准备
+1. D0-UC：无 VCPU Guest 销毁基线
+该基线用于：
+.001
+.002
+.007
+CONFIG_TEE 条件用例
+static struct vmm_guest guest;
+static struct vmm_devtree_node guest_node;
+
+static bool
+vcpu_avail_store[CONFIG_MAX_VCPU_COUNT];
+
+static bool
+guest_avail_store[CONFIG_MAX_GUEST_COUNT];
+
+memset(&guest, 0, sizeof(guest));
+memset(&guest_node, 0, sizeof(guest_node));
+
+memset(vcpu_avail_store,
+       0,
+       sizeof(vcpu_avail_store));
+
+memset(guest_avail_store,
+       0,
+       sizeof(guest_avail_store));
+
+memset(&mngr, 0, sizeof(mngr));
+memset(old_cnt, 0, sizeof(old_cnt));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+strlcpy(guest_node.name,
+        "guest-node",
+        sizeof(guest_node.name));
+
+INIT_MUTEX(&mngr.lock);
+INIT_LIST_HEAD(&mngr.guest_list);
+INIT_LIST_HEAD(&mngr.orphan_vcpu_list);
+
+mngr.vcpu_avail_array =
+    vcpu_avail_store;
+
+mngr.guest_avail_array =
+    guest_avail_store;
+
+mngr.vcpu_count = 0U;
+mngr.guest_count = 1U;
+
+guest.id = 0U;
+guest.node = &guest_node;
+
+INIT_LIST_HEAD(&guest.head);
+
+INIT_SPIN_LOCK(&guest.req_lock);
+INIT_LIST_HEAD(&guest.req_list);
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+guest.vcpu_count = 0U;
+
+guest.cmpl_poweroff = NULL;
+guest.guest_poweroff_thread = NULL;
+
+guest.cmpl_suspend = NULL;
+guest.guest_suspend_thread = NULL;
+
+guest.io_shared_pgd = 0UL;
+
+/*
+ * 当前 Guest 为已使用状态。
+ */
+guest_avail_store[guest.id] = FALSE;
+
+list_add_tail(&guest.head,
+              &mngr.guest_list);
+
+<<vmm_manager.vmm_manager_guest_destroy_exec.guest>> =
+    &guest;
+ 
+⸻
+ 
+2. D1-UC：单 VCPU Guest 销毁基线
+先复制 D0-UC，再增加：
+static struct vmm_vcpu vcpu;
+static struct vmm_devtree_node vcpu_node;
+
+memset(&vcpu, 0, sizeof(vcpu));
+memset(&vcpu_node, 0, sizeof(vcpu_node));
+
+strlcpy(vcpu.name,
+        "guest0/vcpu0",
+        sizeof(vcpu.name));
+
+strlcpy(vcpu_node.name,
+        "vcpu0",
+        sizeof(vcpu_node.name));
+
+vcpu.id = 0U;
+vcpu.guest = &guest;
+vcpu.node = &vcpu_node;
+
+/*
+ * 用非空值验证状态清理前成员有效。
+ */
+vcpu.sched_priv = (void *)0x1000UL;
+
+vcpu.stack_va = (virtual_addr_t)0;
+vcpu.vmm_u_io_req_wait = NULL;
+
+INIT_LIST_HEAD(&vcpu.head);
+
+INIT_RW_LOCK(&vcpu.sched_lock);
+
+INIT_SPIN_LOCK(&vcpu.res_lock);
+INIT_LIST_HEAD(&vcpu.res_head);
+
+list_add_tail(&vcpu.head,
+              &guest.vcpu_list);
+
+guest.vcpu_count = 1U;
+
+mngr.vcpu_count = 1U;
+vcpu_avail_store[0] = FALSE;
+
+old_cnt[0] = NULL;
+ 
+⸻
+ 
+3. 公共 Stub 设置
+这些设置用于所有能执行到相应位置的销毁用例：
+vmm_waitqueue_forced_remove：
+    空实现
+
+vmm_timer_timestamp：
+    return 0
+
+/*
+ * guest_reset 在处理 VCPU 时，使 RESET 状态切换安全失败，
+ * 其结果在 destroy_exec 中本来就被忽略。
+ */
+vmm_scheduler_get_hcpu：
+    return VMM_EFAIL
+
+arch_guest_init：
+    return VMM_OK
+
+vmm_guest_aspace_reset：
+    return VMM_OK
+
+vmm_devtree_delnode：
+    空实现
+
+vmm_devtree_dref_node：
+    空实现
+
+platform_pt_notify_guest_del：
+    空实现
+
+vmm_free：
+    空实现
+
+vmm_threads_destroy：
+    return VMM_OK
+
+vmm_pagepool_free：
+    按实际原型配置为空实现或返回 VMM_OK
+定义 CONFIG_TEE 时，普通基础用例统一设置：
+tee_get_type：
+    return TEE_TYPE_NONE
+ 
+⸻
+ 
+二、
+vmm_manager_guest_destroy_exec
+vmm_manager_guest_destroy_exec.001.FI
+Begin User Code
+复制 D0-UC。
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_EIO
+arch_guest_deinit 不调用。
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 Guest 地址空间反初始化失败时，函数释放 manager 锁并返回对应错误。 用例类别：故障注入测试 预置条件：Guest 有效；请求队列和 VCPU 链表为空；Guest 地址空间反初始化返回 VMM_EIO。 测试步骤： step1、构造无 VCPU 的有效 Guest。 step2、设置 vmm_guest_aspace_deinit 返回 VMM_EIO。 step3、调用 vmm_manager_guest_destroy_exec。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：Guest 地址空间反初始化失败。 其它说明：覆盖第一个反初始化错误提前返回路径；后续架构 Guest、VCPU 和 Guest 实例清理均不执行。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.002.FI
+Begin User Code
+复制 D0-UC。
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 Guest 架构上下文反初始化失败时，函数释放 manager 锁并返回对应错误。 用例类别：故障注入测试 预置条件：Guest 地址空间反初始化成功；架构 Guest 反初始化返回 VMM_EIO。 测试步骤： step1、构造无 VCPU 的有效 Guest。 step2、设置地址空间反初始化成功。 step3、设置架构 Guest 反初始化失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：Guest 架构上下文反初始化失败。 其它说明：覆盖地址空间反初始化成功和架构 Guest 反初始化失败路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.003.FI
+Begin User Code
+复制 D1-UC。
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+
+vmm_scheduler_state_change：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证销毁 VCPU 时，将其状态设置为 UNKNOWN 失败会终止销毁并返回错误。 用例类别：故障注入测试 预置条件：Guest 包含一个 VCPU；Guest 地址空间和架构上下文反初始化成功；调度器状态切换返回 VMM_EIO。 测试步骤： step1、构造包含一个 VCPU 的 Guest。 step2、设置 Guest 前置反初始化成功。 step3、注入 VCPU UNKNOWN 状态设置失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：VCPU UNKNOWN 状态设置失败。 其它说明：覆盖 VCPU 销毁循环进入、VCPU 从 Guest 链表移除以及状态设置错误提前返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.004.FI
+Begin User Code
+复制 D1-UC。
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+
+vmm_scheduler_state_change：
+    return VMM_OK
+
+vmm_vcpu_irq_deinit：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证虚拟 IRQ 上下文反初始化失败时，函数终止 VCPU 销毁并返回错误。 用例类别：故障注入测试 预置条件：VCPU 状态设置成功；虚拟 IRQ 反初始化返回 VMM_EIO。 测试步骤： step1、构造单 VCPU Guest。 step2、设置 VCPU UNKNOWN 状态切换成功。 step3、注入虚拟 IRQ 反初始化失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：VCPU 虚拟 IRQ 反初始化失败。 其它说明：覆盖 vcpu->sched_priv=NULL 和虚拟 IRQ 反初始化错误路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.005.FI
+Begin User Code
+复制 D1-UC，然后修改：
+/*
+ * 构造非法 VCPU ID，使实际函数
+ * vmm_manager_vcpu_clear_trap_cnt() 返回 VMM_EFAIL。
+ *
+ * 该分支返回后不会继续使用此 ID 访问 mngr 数组。
+ */
+vcpu.id =
+    (u32)CONFIG_MAX_VCPU_COUNT;
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+
+vmm_scheduler_state_change：
+    return VMM_OK
+
+vmm_vcpu_irq_deinit：
+    return VMM_OK
+vmm_manager_vcpu_clear_trap_cnt() 使用实际实现。
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证清理 VCPU Trap 统计信息失败时，函数终止销毁并返回错误。 用例类别：故障注入测试 预置条件：VCPU 状态切换和虚拟 IRQ 反初始化成功；VCPU ID 被设置为超出有效范围。 测试步骤： step1、构造单 VCPU Guest。 step2、将 VCPU ID 设置为 CONFIG_MAX_VCPU_COUNT。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：VCPU Trap 统计清理失败。 其它说明：实际 vmm_manager_vcpu_clear_trap_cnt 在 ID 越界时返回 VMM_EFAIL；函数在访问可用数组前已经返回，不产生数组越界。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.006.FI
+Begin User Code
+复制 D1-UC。
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+
+vmm_scheduler_state_change：
+    return VMM_OK
+
+vmm_vcpu_irq_deinit：
+    return VMM_OK
+
+arch_vcpu_deinit：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：通过故障注入验证 VCPU 架构上下文反初始化失败时，函数终止销毁并返回错误。 用例类别：故障注入测试 预置条件：VCPU 状态、IRQ 和 Trap 统计清理成功；架构 VCPU 反初始化返回 VMM_EIO。 测试步骤： step1、构造单 VCPU Guest。 step2、设置前置 VCPU 清理接口成功。 step3、注入架构 VCPU 反初始化失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：VCPU 架构上下文反初始化失败。 其它说明：覆盖 Trap 统计清理成功和 arch_vcpu_deinit 错误返回路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.007.R
+Begin User Code
+复制 D0-UC。
+以下字段保持为空：
+guest.cmpl_poweroff = NULL;
+guest.guest_poweroff_thread = NULL;
+
+guest.cmpl_suspend = NULL;
+guest.guest_suspend_thread = NULL;
+
+guest.io_shared_pgd = 0UL;
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+期望值
+return = VMM_OK
+
+mngr.guest_count = 0
+
+guest_avail_store[0] = TRUE
+
+guest.node = NULL
+guest.name[0] = '\0'
+
+guest.vcpu_count = 0
+
+list_empty(&guest.vcpu_list) = TRUE
+list_empty(&mngr.guest_list) = TRUE
+注释
+测试目的：验证不包含 VCPU且没有可选资源的 Guest 能够完成正常销毁。 用例类别：基于需求的测试 预置条件：Guest VCPU 链表为空；完成量、线程和共享页表字段均为空；所有反初始化接口成功。 测试步骤： step1、构造无 VCPU、无可选资源的 Guest。 step2、设置 Guest 反初始化接口成功。 step3、调用被测函数。 step4、检查返回值、Guest 成员和 manager 计数。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：无 VCPU Guest 正常销毁。 其它说明：覆盖 VCPU 销毁 while 循环不进入，以及五个 Guest 可选资源判断均为 false的路径。 通过准则：函数返回 VMM_OK，Guest 被标记可用，Guest 数量减为 0，节点和名称被清理。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec.008.R
+Begin User Code
+先复制 D0-UC，然后增加：
+static struct vmm_vcpu vcpu0;
+static struct vmm_vcpu vcpu1;
+
+static struct vmm_devtree_node vcpu_node0;
+static struct vmm_devtree_node vcpu_node1;
+
+static unsigned char stack_store0[256];
+
+static struct vmm_completion io_wait0;
+static struct vmm_completion cmpl_poweroff;
+static struct vmm_completion cmpl_suspend;
+
+static struct vmm_thread poweroff_thread;
+static struct vmm_thread suspend_thread;
+
+memset(&vcpu0, 0, sizeof(vcpu0));
+memset(&vcpu1, 0, sizeof(vcpu1));
+
+memset(&vcpu_node0, 0, sizeof(vcpu_node0));
+memset(&vcpu_node1, 0, sizeof(vcpu_node1));
+
+memset(stack_store0, 0, sizeof(stack_store0));
+
+memset(&io_wait0, 0, sizeof(io_wait0));
+memset(&cmpl_poweroff, 0, sizeof(cmpl_poweroff));
+memset(&cmpl_suspend, 0, sizeof(cmpl_suspend));
+
+memset(&poweroff_thread, 0, sizeof(poweroff_thread));
+memset(&suspend_thread, 0, sizeof(suspend_thread));
+
+strlcpy(vcpu0.name,
+        "guest0/vcpu0",
+        sizeof(vcpu0.name));
+
+strlcpy(vcpu1.name,
+        "guest0/vcpu1",
+        sizeof(vcpu1.name));
+
+vcpu0.id = 0U;
+vcpu1.id = 1U;
+
+vcpu0.guest = &guest;
+vcpu1.guest = &guest;
+
+vcpu0.node = &vcpu_node0;
+vcpu1.node = &vcpu_node1;
+
+vcpu0.sched_priv = (void *)0x1000UL;
+vcpu1.sched_priv = (void *)0x2000UL;
+
+/*
+ * 分别覆盖 stack_va 非空和为空。
+ */
+vcpu0.stack_va =
+    (virtual_addr_t)&stack_store0[0];
+
+vcpu1.stack_va =
+    (virtual_addr_t)0;
+
+/*
+ * 分别覆盖 I/O 完成量非空和为空。
+ */
+vcpu0.vmm_u_io_req_wait = &io_wait0;
+vcpu1.vmm_u_io_req_wait = NULL;
+
+INIT_LIST_HEAD(&vcpu0.head);
+INIT_LIST_HEAD(&vcpu1.head);
+
+INIT_RW_LOCK(&vcpu0.sched_lock);
+INIT_RW_LOCK(&vcpu1.sched_lock);
+
+INIT_SPIN_LOCK(&vcpu0.res_lock);
+INIT_SPIN_LOCK(&vcpu1.res_lock);
+
+INIT_LIST_HEAD(&vcpu0.res_head);
+INIT_LIST_HEAD(&vcpu1.res_head);
+
+list_add_tail(&vcpu0.head,
+              &guest.vcpu_list);
+
+list_add_tail(&vcpu1.head,
+              &guest.vcpu_list);
+
+guest.vcpu_count = 2U;
+
+mngr.vcpu_count = 2U;
+
+vcpu_avail_store[0] = FALSE;
+vcpu_avail_store[1] = FALSE;
+
+old_cnt[0] = NULL;
+old_cnt[1] = NULL;
+
+/*
+ * 覆盖全部 Guest 可选资源为非空。
+ */
+guest.cmpl_poweroff = &cmpl_poweroff;
+guest.guest_poweroff_thread =
+    &poweroff_thread;
+
+guest.cmpl_suspend = &cmpl_suspend;
+guest.guest_suspend_thread =
+    &suspend_thread;
+
+guest.io_shared_pgd =
+    (virtual_addr_t)0x80000000UL;
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+
+vmm_scheduler_state_change：
+    两次均 return VMM_OK
+
+vmm_vcpu_irq_deinit：
+    两次均 return VMM_OK
+
+arch_vcpu_deinit：
+    两次均 return VMM_OK
+
+vmm_threads_destroy：
+    两次均 return VMM_OK
+期望值
+return = VMM_OK
+
+guest.vcpu_count = 0
+mngr.vcpu_count = 0
+mngr.guest_count = 0
+
+vcpu_avail_store[0] = TRUE
+vcpu_avail_store[1] = TRUE
+
+vcpu0.node = NULL
+vcpu1.node = NULL
+
+vcpu0.sched_priv = NULL
+vcpu1.sched_priv = NULL
+
+guest.node = NULL
+guest.name[0] = '\0'
+guest.io_shared_pgd = 0
+
+guest_avail_store[0] = TRUE
+
+list_empty(&guest.vcpu_list) = TRUE
+list_empty(&mngr.guest_list) = TRUE
+注释
+测试目的：验证包含两个 VCPU及全部可选资源的 Guest 能够完成完整销毁。 用例类别：基于需求的测试 预置条件：Guest 包含两个 VCPU；其中一个 VCPU具有栈和 I/O 完成量，另一个相应字段为空；Guest 完成量、线程和共享页表均有效。 测试步骤： step1、构造包含两个 VCPU 的 Guest。 step2、为两个 VCPU 配置不同的可选资源状态。 step3、为 Guest 配置全部可选清理资源。 step4、设置所有反初始化接口成功。 step5、调用被测函数。 step6、检查 manager 计数、可用数组和关键成员。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：多 VCPU Guest 完整销毁。 其它说明：覆盖 VCPU 销毁循环多次迭代；覆盖 VCPU 栈和 I/O 完成量判断的 true/false；覆盖 Guest 完成量、线程和共享页表判断的 true路径。 通过准则：函数返回 VMM_OK，全部 VCPU 和 Guest 均被标记可用，计数归零，关键成员完成清理。
+ 
+⸻
+ 
+CONFIG_TEE
+：
+vmm_manager_guest_destroy_exec.009.R
+仅定义 CONFIG_TEE 时增加。
+Begin User Code
+复制 D0-UC，然后设置一个非 OP-TEE 目标 ID：
+u32 target_id;
+u32 other_id;
+
+target_id =
+    (u32)OPTEE_SINGLE_GUEST_CLIENT_ID - 1U;
+
+other_id =
+    (target_id == 0U) ? 1U : 0U;
+
+guest_avail_store[guest.id] = TRUE;
+
+guest.id = other_id;
+
+guest_avail_store[guest.id] = FALSE;
+Stub Processing
+tee_get_type：
+    return TEE_TYPE_NONE + 1
+
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 TEE 类型有效但 Guest ID 不是 OP-TEE 目标 ID 时，不执行 TEE Guest 资源释放。 用例类别：基于需求的测试 预置条件：定义 CONFIG_TEE；TEE 类型非 NONE；Guest ID 与 OP-TEE 目标 ID 不同。 测试步骤： step1、设置有效 TEE 类型。 step2、选择非 OP-TEE 目标 Guest ID。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：非 OP-TEE 目标 Guest 销毁。 其它说明：覆盖 TEE 复合条件第一个子条件为 true、第二个子条件为 false。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+CONFIG_TEE
+：
+vmm_manager_guest_destroy_exec.010.R
+Begin User Code
+复制 D0-UC，然后设置：
+u32 target_id;
+
+target_id =
+    (u32)OPTEE_SINGLE_GUEST_CLIENT_ID - 1U;
+
+guest_avail_store[guest.id] = TRUE;
+
+guest.id = target_id;
+
+guest_avail_store[guest.id] = FALSE;
+Stub Processing
+tee_get_type：
+    return TEE_TYPE_NONE + 1
+
+tee_guest_teardown：
+    空实现
+
+tee_relinquish_resources：
+    空实现
+
+vmm_guest_aspace_deinit：
+    return VMM_OK
+
+arch_guest_deinit：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 OP-TEE 目标 Guest 销毁时，函数执行 TEE Guest 拆卸和资源归还流程。 用例类别：基于需求的测试 预置条件：TEE 类型有效；Guest ID 匹配 OP-TEE 目标 ID；后续 Guest 清理接口成功。 测试步骤： step1、设置 Guest ID 为 OP-TEE 目标 ID。 step2、设置有效 TEE 类型。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_destroy_exec。 等价列表：OP-TEE 目标 Guest 正常销毁。 其它说明：覆盖 TEE 复合条件整体为 true以及两个 TEE 资源释放调用。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_destroy_exec
+名称汇总
+vmm_manager_guest_destroy_exec.001.FI_Guest地址空间反初始化失败
+vmm_manager_guest_destroy_exec.002.FI_Guest架构上下文反初始化失败
+vmm_manager_guest_destroy_exec.003.FI_VCPU状态设置失败
+vmm_manager_guest_destroy_exec.004.FI_VCPU虚拟IRQ反初始化失败
+vmm_manager_guest_destroy_exec.005.FI_VCPUTrap统计清理失败
+vmm_manager_guest_destroy_exec.006.FI_VCPU架构上下文反初始化失败
+vmm_manager_guest_destroy_exec.007.R_无VCPUGuest正常销毁
+vmm_manager_guest_destroy_exec.008.R_多VCPUGuest完整销毁
+定义 CONFIG_TEE 时追加：
+vmm_manager_guest_destroy_exec.009.R_非OPTEE目标Guest销毁
+vmm_manager_guest_destroy_exec.010.R_OPTEE目标Guest资源释放
+ 
+⸻
+ 
+三、原子操作隔离 User Code
+vmm_manager_guest_put() 和 vmm_manager_guest_destroy() 使用原子操作。若这些接口是宏或 inline，可在原定义完成后使用同名宏遮蔽。
+User Global
+long vcast_atomic_sub_return_ret;
+long vcast_atomic_cmpxchg_ret;
+公共 Test Case Init：
+vcast_atomic_sub_return_ret = 1L;
+vcast_atomic_cmpxchg_ret = 0L;
+Unit Prefix User Code
+/*
+ * arch_atomic_sub_return 可能是宏或 inline。
+ */
+#ifdef arch_atomic_sub_return
+#undef arch_atomic_sub_return
+#endif
+
+#define arch_atomic_sub_return(atom, value)  \
+    ((void)(atom),                           \
+     (void)(value),                          \
+     (long)vcast_atomic_sub_return_ret)
+
+
+/*
+ * arch_atomic_cmpxchg 可能是宏或 inline。
+ */
+#ifdef arch_atomic_cmpxchg
+#undef arch_atomic_cmpxchg
+#endif
+
+#define arch_atomic_cmpxchg(atom, oldval, newval) \
+    ((void)(atom),                                 \
+     (void)(oldval),                               \
+     (void)(newval),                               \
+     (long)vcast_atomic_cmpxchg_ret)
+这两个宏只控制被测函数使用的返回结果，不依赖底层 AArch64 原子汇编。
+ 
+⸻
+ 
+四、
+vmm_manager_guest_put
+vmm_manager_guest_put.001.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+vcast_atomic_sub_return_ret = 1L;
+
+<<vmm_manager.vmm_manager_guest_put.guest>> =
+    &guest;
+期望值
+return = VMM_OK
+注释
+测试目的：验证 Guest 引用计数递减后仍非零时，函数直接返回成功，不执行实际销毁。 用例类别：基于需求的测试 预置条件：Guest 指针有效；重定义后的 arch_atomic_sub_return 返回 1。 测试步骤： step1、构造有效 Guest。 step2、设置引用计数递减结果为 1。 step3、调用 vmm_manager_guest_put。 step4、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_put。 等价列表：Guest 仍有其他引用。 其它说明：覆盖 arch_atomic_sub_return() 返回非零和直接返回 VMM_OK 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_put.002.FI
+Begin User Code
+复制 D0-UC，但将被测函数入参改为：
+vcast_atomic_sub_return_ret = 0L;
+
+<<vmm_manager.vmm_manager_guest_put.guest>> =
+    &guest;
+Stub Processing
+vmm_guest_aspace_deinit：
+    return VMM_EIO
+期望值
+return = VMM_EIO
+注释
+测试目的：验证 Guest 引用计数递减为零时，函数调用实际销毁流程并传播其错误码。 用例类别：故障注入测试 预置条件：引用计数递减结果为 0；Guest 地址空间反初始化返回 VMM_EIO。 测试步骤： step1、构造有效 Guest 销毁环境。 step2、设置引用计数递减结果为 0。 step3、注入 Guest 地址空间反初始化失败。 step4、调用 vmm_manager_guest_put。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_guest_put。 等价列表：最后一个 Guest 引用释放时销毁失败。 其它说明：覆盖原子递减返回 0和调用 vmm_manager_guest_destroy_exec 的路径。 通过准则：函数返回 VMM_EIO。
+ 
+⸻
+ 
+vmm_manager_guest_put
+名称汇总
+vmm_manager_guest_put.001.R_Guest仍有其他引用
+vmm_manager_guest_put.002.FI_最后引用释放时销毁失败
+ 
+⸻
+ 
+五、
+vmm_manager_guest_destroy
+vmm_manager_guest_destroy.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_destroy.guest>> =
+    NULL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 Guest 指针为空时，销毁接口返回失败。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 Guest 入参为 NULL。 step2、调用 vmm_manager_guest_destroy。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_destroy。 等价列表：Guest 空指针。 其它说明：覆盖复合条件第一个子条件为 true；原子比较交换因短路不执行。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_destroy.002.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+/*
+ * 模拟 destroy_pending 已经不是 0，
+ * 即其他执行流已经提交销毁。
+ */
+vcast_atomic_cmpxchg_ret = 1L;
+
+<<vmm_manager.vmm_manager_guest_destroy.guest>> =
+    &guest;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 Guest 已经处于销毁待处理状态时，重复销毁请求返回失败。 用例类别：基于需求的测试 预置条件：Guest 指针有效；arch_atomic_cmpxchg 返回非零旧值。 测试步骤： step1、构造有效 Guest。 step2、设置原子比较交换返回 1。 step3、调用销毁接口。 step4、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_destroy。 等价列表：Guest 重复销毁请求。 其它说明：覆盖第一个子条件为 false、销毁 pending 判断为 true的路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_guest_destroy.003.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+/*
+ * cmpxchg 返回0表示成功将 destroy_pending 从0改为1。
+ */
+vcast_atomic_cmpxchg_ret = 0L;
+
+/*
+ * guest_put 中引用计数递减后仍非零，
+ * 因而不进入实际 destroy_exec。
+ */
+vcast_atomic_sub_return_ret = 1L;
+
+<<vmm_manager.vmm_manager_guest_destroy.guest>> =
+    &guest;
+期望值
+return = VMM_OK
+注释
+测试目的：验证首次提交 Guest 销毁且 Guest 仍存在其他引用时，函数成功完成销毁请求提交。 用例类别：基于需求的测试 预置条件：Guest 指针有效；比较交换返回 0；引用计数递减结果非零。 测试步骤： step1、构造有效 Guest。 step2、设置销毁 pending 比较交换成功。 step3、设置 Guest 仍有其他引用。 step4、调用 vmm_manager_guest_destroy。 step5、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_guest_destroy。 等价列表：首次提交 Guest 销毁请求。 其它说明：覆盖销毁参数检查整体为 false以及调用 vmm_manager_guest_put 的路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_guest_destroy
+名称汇总
+vmm_manager_guest_destroy.001.IN_Guest为空
+vmm_manager_guest_destroy.002.R_Guest重复销毁请求
+vmm_manager_guest_destroy.003.R_首次提交Guest销毁请求
+ 
+⸻
+ 
+六、
+vmm_manager_init
+的公共 Begin User Code
+I0-UC：manager 初始化存储基线
+static struct vmm_cpumask
+affinity_store[CONFIG_MAX_VCPU_COUNT];
+
+static u32
+domain_id_store[CONFIG_MAX_VCPU_COUNT];
+
+static struct vmm_vcpu
+vcpu_store[CONFIG_MAX_VCPU_COUNT];
+
+static bool
+vcpu_avail_store[CONFIG_MAX_VCPU_COUNT];
+
+static struct vmm_guest
+guest_store[CONFIG_MAX_GUEST_COUNT];
+
+static bool
+guest_avail_store[CONFIG_MAX_GUEST_COUNT];
+
+static struct vmm_work
+guest_work_store[CONFIG_MAX_GUEST_COUNT];
+
+memset(affinity_store,
+       0,
+       sizeof(affinity_store));
+
+memset(domain_id_store,
+       0,
+       sizeof(domain_id_store));
+
+memset(vcpu_store,
+       0,
+       sizeof(vcpu_store));
+
+memset(vcpu_avail_store,
+       0,
+       sizeof(vcpu_avail_store));
+
+memset(guest_store,
+       0,
+       sizeof(guest_store));
+
+memset(guest_avail_store,
+       0,
+       sizeof(guest_avail_store));
+
+memset(guest_work_store,
+       0,
+       sizeof(guest_work_store));
+公共 Stub：
+vmm_free：
+    空实现
+
+vmm_scheduler_set_state_raw：
+    空实现
+ 
+⸻
+ 
+七、
+vmm_manager_init
+vmm_manager_init.001.FI
+Begin User Code
+无额外存储要求。
+Stub Processing
+vmm_zalloc：
+    第1次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 VCPU affinity 数组分配失败时，manager 初始化返回内存不足。 用例类别：故障注入测试 预置条件：第一次 vmm_zalloc 返回 NULL。 测试步骤： step1、注入第一次内存分配失败。 step2、调用 vmm_manager_init。 step3、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：VCPU affinity 数组分配失败。 其它说明：覆盖第一个分配失败路径，后续内存分配和实例初始化均不执行。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.002.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 VCPU HCPU domain ID 数组分配失败时，函数释放已分配 affinity 数组并返回内存不足。 用例类别：故障注入测试 预置条件：第一次分配成功；第二次分配失败。 测试步骤： step1、设置 affinity 数组分配成功。 step2、注入 domain ID 数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：VCPU domain ID 数组分配失败。 其它说明：覆盖第二次分配失败及前置 affinity 数组释放路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.003.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 VCPU 实例数组分配失败时，函数返回内存不足。 用例类别：故障注入测试 预置条件：前两个数组分配成功；VCPU 实例数组分配失败。 测试步骤： step1、设置 affinity 和 domain ID 数组分配成功。 step2、注入 VCPU 实例数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：VCPU 实例数组分配失败。 其它说明：覆盖第三次分配失败和前两个数组清理路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.004.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return vcpu_store
+    第4次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 VCPU 可用状态数组分配失败时，函数释放已分配资源并返回内存不足。 用例类别：故障注入测试 预置条件：前三次分配成功；第四次分配失败。 测试步骤： step1、设置前三个 manager 数组分配成功。 step2、注入 VCPU 可用状态数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：VCPU 可用状态数组分配失败。 其它说明：覆盖第四次分配失败及前置资源释放路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.005.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return vcpu_store
+    第4次 return vcpu_avail_store
+    第5次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 Guest 实例数组分配失败时，manager 初始化返回内存不足。 用例类别：故障注入测试 预置条件：VCPU 相关四个数组分配成功；Guest 实例数组分配失败。 测试步骤： step1、设置 VCPU 相关数组分配成功。 step2、注入 Guest 实例数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：Guest 实例数组分配失败。 其它说明：覆盖第五次分配失败和前置 VCPU 资源释放路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.006.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return vcpu_store
+    第4次 return vcpu_avail_store
+    第5次 return guest_store
+    第6次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 Guest 可用状态数组分配失败时，函数释放前置资源并返回内存不足。 用例类别：故障注入测试 预置条件：前五次分配成功；Guest 可用状态数组分配失败。 测试步骤： step1、设置前五个数组分配成功。 step2、注入 Guest 可用状态数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：Guest 可用状态数组分配失败。 其它说明：覆盖第六次分配失败和 Guest/VCPU 前置资源释放路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.007.FI
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return vcpu_store
+    第4次 return vcpu_avail_store
+    第5次 return guest_store
+    第6次 return guest_avail_store
+    第7次 return NULL
+期望值
+return = VMM_ENOMEM
+注释
+测试目的：通过故障注入验证 Guest 工作结构数组分配失败时，函数释放全部前置数组并返回内存不足。 用例类别：故障注入测试 预置条件：前六次分配成功；Guest work 数组分配失败。 测试步骤： step1、设置前六个数组分配成功。 step2、注入 Guest work 数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_init。 等价列表：Guest work 数组分配失败。 其它说明：覆盖最后一次内存分配失败和全部前置数组释放路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+vmm_manager_init.008.R
+Begin User Code
+复制 I0-UC。
+Stub Processing
+vmm_zalloc：
+
+    第1次 return affinity_store
+    第2次 return domain_id_store
+    第3次 return vcpu_store
+    第4次 return vcpu_avail_store
+    第5次 return guest_store
+    第6次 return guest_avail_store
+    第7次 return guest_work_store
+期望值
+return = VMM_OK
+
+mngr.vcpu_count = 0
+mngr.guest_count = 0
+
+mngr.vcpu_affinity_mask =
+    affinity_store
+
+mngr.vcpu_hcpu_domain_id =
+    domain_id_store
+
+mngr.vcpu_array =
+    vcpu_store
+
+mngr.vcpu_avail_array =
+    vcpu_avail_store
+
+mngr.guest_array =
+    guest_store
+
+mngr.guest_avail_array =
+    guest_avail_store
+
+mngr.guest_work_array =
+    guest_work_store
+
+list_empty(&mngr.orphan_vcpu_list) = TRUE
+list_empty(&mngr.guest_list) = TRUE
+
+guest_store[0].id = 0
+guest_store[CONFIG_MAX_GUEST_COUNT - 1].id =
+    CONFIG_MAX_GUEST_COUNT - 1
+
+guest_store[0].node = NULL
+guest_store[0].vcpu_count = 0
+guest_avail_store[0] = TRUE
+
+list_empty(&guest_store[0].vcpu_list) = TRUE
+
+vcpu_store[0].id = 0
+vcpu_store[CONFIG_MAX_VCPU_COUNT - 1].id =
+    CONFIG_MAX_VCPU_COUNT - 1
+
+vcpu_store[0].name[0] = '\0'
+vcpu_store[0].node = NULL
+vcpu_store[0].is_normal = FALSE
+
+vcpu_avail_store[0] = TRUE
+vcpu_avail_store[CONFIG_MAX_VCPU_COUNT - 1] = TRUE
+注释
+测试目的：验证全部 manager 内存分配成功时，函数正确初始化 Guest、VCPU 数组、可用状态、链表和基础计数。 用例类别：基于需求的测试 预置条件：七次 vmm_zalloc 均返回有效且已清零的存储。 测试步骤： step1、准备七类 manager 静态存储。 step2、设置七次内存分配依次返回对应存储。 step3、调用 vmm_manager_init。 step4、检查 manager 指针、计数、链表和数组首尾元素。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_init。 等价列表：manager 正常初始化。 其它说明：覆盖 Guest 和 VCPU 两个初始化循环的进入、多次迭代和自然退出路径。 通过准则：函数返回 VMM_OK，manager 所有存储指针正确，Guest/VCPU ID和可用状态完成初始化。
+ 
+⸻
+ 
+vmm_manager_init
+名称汇总
+vmm_manager_init.001.FI_VCPUAffinity数组分配失败
+vmm_manager_init.002.FI_VCPUDomainID数组分配失败
+vmm_manager_init.003.FI_VCPU实例数组分配失败
+vmm_manager_init.004.FI_VCPU可用状态数组分配失败
+vmm_manager_init.005.FI_Guest实例数组分配失败
+vmm_manager_init.006.FI_Guest可用状态数组分配失败
+vmm_manager_init.007.FI_GuestWork数组分配失败
+vmm_manager_init.008.R_Manager初始化成功
