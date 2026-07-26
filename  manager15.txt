@@ -1,0 +1,1209 @@
+下面继续这批函数。测试设计保持现有约定：
+	•	用例类别仅使用：基于需求的测试、接口测试、故障注入测试；
+	•	每条用例提供独立完整注释；
+	•	正式名称保留 .R、.IN、.FI 后缀；
+	•	非本 .c 文件中的函数由 VectorCAST Stub 控制；
+	•	同一文件内的函数原则上按实际实现执行；
+	•	输出参数通过 Stub User Code 写回；
+	•	以最少用例完成语句、分支及复合条件覆盖。
+ 
+⸻
+ 
+一、本批公共 User Code
+1. User Global
+/*
+ * 控制物理 CPU ID 和 Boot CPU ID。
+ */
+u32 vcast_smp_processor_id_ret;
+u32 vcast_smp_bootcpu_id_ret;
+
+/*
+ * 控制重定义后的 for_each_present_cpu。
+ * 测试中按 CPU0、CPU1……连续遍历。
+ */
+u32 vcast_present_cpu_count;
+
+/*
+ * 为 str_cpu_down 中的 vmm_cpumask_of 提供安全对象。
+ */
+struct vmm_cpumask vcast_cpumask_of_store;
+
+/*
+ * vmm_scheduler_get_hcpu 的输出值。
+ */
+u32 vcast_scheduler_hcpu_out;
+
+/*
+ * vmm_host_va2pa 的输出值。
+ */
+physical_addr_t vcast_host_va2pa_out;
+
+/*
+ * IOMMU 回调返回值。
+ */
+int vcast_iommu_suspend_ret;
+int vcast_iommu_resume_ret;
+每条相关用例开始前建议统一初始化：
+vcast_smp_processor_id_ret = 0U;
+vcast_smp_bootcpu_id_ret = 0U;
+vcast_present_cpu_count = 1U;
+
+memset(&vcast_cpumask_of_store,
+       0,
+       sizeof(vcast_cpumask_of_store));
+
+vcast_scheduler_hcpu_out = 0U;
+vcast_host_va2pa_out =
+    (physical_addr_t)0x100000UL;
+
+vcast_iommu_suspend_ret = VMM_OK;
+vcast_iommu_resume_ret = VMM_OK;
+ 
+⸻
+ 
+2. Unit Prefix User Code
+#include <vmm_cpumask.h>
+#include <vmm_smp.h>
+
+/*
+ * 控制当前物理 CPU。
+ */
+#ifdef vmm_smp_processor_id
+#undef vmm_smp_processor_id
+#endif
+
+#define vmm_smp_processor_id() \
+    ((u32)vcast_smp_processor_id_ret)
+
+/*
+ * 控制 Boot CPU。
+ */
+#ifdef vmm_smp_bootcpu_id
+#undef vmm_smp_bootcpu_id
+#endif
+
+#define vmm_smp_bootcpu_id() \
+    ((u32)vcast_smp_bootcpu_id_ret)
+
+/*
+ * 隔离真实 present CPU 掩码。
+ *
+ * vcast_present_cpu_count=1：
+ *     仅遍历 CPU0。
+ *
+ * vcast_present_cpu_count=2：
+ *     遍历 CPU0、CPU1。
+ */
+#ifdef for_each_present_cpu
+#undef for_each_present_cpu
+#endif
+
+#define for_each_present_cpu(cpu)             \
+    for ((cpu) = 0U;                          \
+         (cpu) < vcast_present_cpu_count;     \
+         ++(cpu))
+
+/*
+ * 避免 vmm_cpumask_of 展开后访问真实 per-CPU 掩码。
+ */
+#ifdef vmm_cpumask_of
+#undef vmm_cpumask_of
+#endif
+
+#define vmm_cpumask_of(cpu)                   \
+    ((void)(cpu),                             \
+     (const struct vmm_cpumask *)             \
+     &vcast_cpumask_of_store)
+
+/*
+ * hypervisor_suspend 中屏蔽系统寄存器写入。
+ */
+#ifdef msr_sync
+#undef msr_sync
+#endif
+
+#define msr_sync(reg, val)                    \
+    do {                                      \
+        (void)(val);                          \
+    } while (0)
+ 
+⸻
+ 
+3. 
+vmm_scheduler_get_hcpu
+输出参数
+假定 Stub 原型为：
+int vmm_scheduler_get_hcpu(
+    struct vmm_vcpu *vcpu,
+    u32 *hcpu);
+在该 Stub 的 End of Stub 中写：
+if (hcpu != NULL) {
+    *hcpu = vcast_scheduler_hcpu_out;
+}
+返回值仍通过 VectorCAST 设置。
+ 
+⸻
+ 
+4. 
+vmm_host_va2pa
+输出参数
+假定原型为：
+int vmm_host_va2pa(
+    virtual_addr_t va,
+    physical_addr_t *pa);
+在 End of Stub 中写：
+if (pa != NULL) {
+    *pa = vcast_host_va2pa_out;
+}
+ 
+⸻
+ 
+二、
+wait_guest_powerff
+int wait_guest_powerff(
+    struct vmm_guest *guest,
+    u64 timeout);
+该函数在检查前直接访问：
+guest->name
+因此不构造 guest == NULL 用例，否则会在参数检查前崩溃。
+公共 Begin User Code：WP0-UC
+static struct vmm_guest guest;
+static struct vmm_completion completion;
+
+memset(&guest, 0, sizeof(guest));
+memset(&completion, 0, sizeof(completion));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+guest.state = RUNNING;
+guest.poweroff_irq = 32U;
+guest.cmpl_poweroff = &completion;
+
+<<vmm_manager.wait_guest_powerff.guest>> =
+    &guest;
+
+<<vmm_manager.wait_guest_powerff.timeout>> =
+    (u64)2;
+ 
+⸻
+ 
+wait_guest_powerff.001.IN
+Begin User Code
+复制 WP0-UC，修改：
+guest.state = PAUSED;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证 Guest 不处于 RUNNING 状态时，函数拒绝等待优雅关机。 用例类别：接口测试 预置条件：Guest 指针有效；Guest 状态为 PAUSED。 测试步骤： step1、构造有效 Guest。 step2、将 Guest 状态设置为 PAUSED。 step3、调用 wait_guest_powerff。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：wait_guest_powerff。 等价列表：非运行态 Guest 请求关机等待。 其它说明：覆盖 guest->state != RUNNING 为 true 的提前返回路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+wait_guest_powerff.002.IN
+未定义 CONFIG_T517_REBOOT 时使用该名称。
+Begin User Code
+复制 WP0-UC，修改：
+guest.poweroff_irq = 0U;
+
+<<vmm_manager.wait_guest_powerff.timeout>> =
+    (u64)0;
+期望值
+未定义 CONFIG_T517_REBOOT：
+return = VMM_EINVALID
+定义 CONFIG_T517_REBOOT：
+return = VMM_OK
+注释
+测试目的：验证 Guest 未配置关机中断且等待超时也为 0时，函数按照当前编译配置执行对应返回。 用例类别：接口测试 预置条件：Guest 处于 RUNNING；poweroff_irq=0；timeout=0。 测试步骤： step1、设置 Guest 为运行态。 step2、将关机中断号和等待超时均设置为 0。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：wait_guest_powerff。 等价列表：无关机中断且无等待超时。 其它说明：覆盖复合条件 poweroff_irq==0 && timeout==0 整体为 true；返回值由 CONFIG_T517_REBOOT 决定。 通过准则：未定义 T517 重启配置时返回 VMM_EINVALID；定义时返回 VMM_OK。
+定义 CONFIG_T517_REBOOT 时正式名称可改为：
+wait_guest_powerff.002.R_T517无中断无超时直接返回成功
+ 
+⸻
+ 
+wait_guest_powerff.003.FI
+Begin User Code
+复制 WP0-UC，修改：
+guest.poweroff_irq = 0U;
+
+<<vmm_manager.wait_guest_powerff.timeout>> =
+    (u64)2;
+Stub Processing
+vmm_completion_wait_timeout：
+    return VMM_EFAIL
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证未配置关机中断但配置了等待超时时，函数进入完成量等待并传播等待失败结果。 用例类别：故障注入测试 预置条件：Guest 处于 RUNNING；关机中断号为 0；等待超时为 2秒；完成量等待返回失败。 测试步骤： step1、设置关机中断号为 0。 step2、设置超时为 2秒。 step3、注入完成量等待失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：wait_guest_powerff。 等价列表：无关机中断时等待失败。 其它说明：覆盖复合条件第一个子条件为 true、第二个子条件为 false；覆盖 poweroff_irq != 0 为 false及 ret==VMM_OK 为 false。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+wait_guest_powerff.004.R
+Begin User Code
+复制 WP0-UC。
+Stub Processing
+vmm_devemu_emulate_irq2：
+    空实现
+
+vmm_completion_wait_timeout：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 Guest 配置关机中断时，函数注入关机中断并成功等待 Guest 完成优雅关机。 用例类别：基于需求的测试 预置条件：Guest 处于 RUNNING；关机中断号为 32；完成量等待成功。 测试步骤： step1、构造有效关机中断配置。 step2、设置完成量等待返回 VMM_OK。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：wait_guest_powerff。 等价列表：关机中断注入及等待成功。 其它说明：覆盖复合条件第一个子条件为 false、关机中断注入分支为 true及 ret==VMM_OK 为 true。 通过准则：函数返回 VMM_OK。
+名称汇总
+wait_guest_powerff.001.IN_Guest非运行态
+wait_guest_powerff.002.IN_无关机中断且超时为零
+wait_guest_powerff.003.FI_无关机中断时等待失败
+wait_guest_powerff.004.R_注入关机中断并等待成功
+ 
+⸻
+ 
+三、
+manager_suspend_request
+static void manager_suspend_request(
+    struct vmm_guest *guest,
+    void *data);
+manager_suspend_request.001.R
+Begin User Code
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+guest.cmpl_suspend = NULL;
+
+<<vmm_manager.manager_suspend_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_suspend_request.data>> =
+    NULL;
+期望结果
+函数正常返回。
+注释
+测试目的：验证 Guest 未配置挂起完成量时，函数不执行完成量通知并正常返回。 用例类别：基于需求的测试 预置条件：Guest 有效；cmpl_suspend=NULL。 测试步骤： step1、构造有效 Guest。 step2、将挂起完成量设置为 NULL。 step3、调用 manager_suspend_request。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_suspend_request。 等价列表：Guest 未配置挂起完成量。 其它说明：覆盖复合条件第一个子条件为 false，第二个子条件因短路不执行。 通过准则：函数正常返回。
+ 
+⸻
+ 
+manager_suspend_request.002.R
+Begin User Code
+static struct vmm_guest guest;
+static struct vmm_completion completion;
+
+memset(&guest, 0, sizeof(guest));
+memset(&completion, 0, sizeof(completion));
+
+guest.cmpl_suspend = &completion;
+
+<<vmm_manager.manager_suspend_request.guest>> =
+    &guest;
+
+<<vmm_manager.manager_suspend_request.data>> =
+    NULL;
+Stub Processing
+vmm_completion_vcpu_count：
+    return 0
+期望结果
+函数正常返回。
+注释
+测试目的：验证挂起完成量有效但没有 VCPU 等待时，函数不发送完成通知。 用例类别：基于需求的测试 预置条件：挂起完成量有效；完成量等待 VCPU 数量为 0。 测试步骤： step1、构造有效完成量。 step2、设置完成量等待者数量为 0。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_suspend_request。 等价列表：挂起完成量无等待者。 其它说明：覆盖复合条件第一个子条件为 true、第二个子条件为 false。 通过准则：函数正常返回。
+ 
+⸻
+ 
+manager_suspend_request.003.R
+Begin User Code
+与 .002.R 相同。
+Stub Processing
+vmm_completion_vcpu_count：
+    return 1
+
+vmm_completion_complete：
+    return VMM_OK
+期望结果
+函数正常返回。
+注释
+测试目的：验证挂起完成量存在等待 VCPU 时，函数通知完成量完成。 用例类别：基于需求的测试 预置条件：挂起完成量有效；至少一个 VCPU 正在等待。 测试步骤： step1、构造有效完成量。 step2、设置等待 VCPU 数量为 1。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：manager_suspend_request。 等价列表：通知 Guest 挂起完成。 其它说明：覆盖复合条件整体为 true和完成量通知路径；vmm_completion_complete 返回值在源码中被忽略。 通过准则：函数正常返回。
+名称汇总
+manager_suspend_request.001.R_挂起完成量为空
+manager_suspend_request.002.R_挂起完成量无等待者
+manager_suspend_request.003.R_通知挂起完成量
+ 
+⸻
+ 
+四、
+vmm_manager_guest_suspend_request
+公共成功环境 SR0-UC
+static struct vmm_guest guest;
+static struct vmm_guest_request req_store;
+
+static struct vmm_work
+work_store[CONFIG_MAX_GUEST_COUNT];
+
+memset(&guest, 0, sizeof(guest));
+memset(&req_store, 0, sizeof(req_store));
+memset(work_store, 0, sizeof(work_store));
+
+guest.id = 0U;
+guest.state = RUNNING;
+
+INIT_SPIN_LOCK(&guest.req_lock);
+INIT_LIST_HEAD(&guest.req_list);
+
+mngr.guest_work_array = work_store;
+
+<<vmm_manager.vmm_manager_guest_suspend_request.guest>> =
+    &guest;
+ 
+⸻
+ 
+vmm_manager_guest_suspend_request.001.IN
+Begin User Code
+<<vmm_manager.vmm_manager_guest_suspend_request.guest>> =
+    NULL;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证 Guest 指针为空时，挂起请求接口返回无效参数错误。 用例类别：接口测试 预置条件：Guest 入参为 NULL。 测试步骤： step1、设置 Guest 入参为 NULL。 step2、调用 vmm_manager_guest_suspend_request。 step3、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_guest_suspend_request。 等价列表：Guest 空指针。 其它说明：覆盖参数检查提前返回路径。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+vmm_manager_guest_suspend_request.002.R
+Begin User Code
+复制 SR0-UC。
+Stub Processing
+vmm_zalloc：
+    return &req_store
+
+vmm_workqueue_schedule_work：
+    return VMM_OK
+期望值
+return = VMM_OK
+guest.state = PAUSED
+list_empty(&guest.req_list) = FALSE
+注释
+测试目的：验证有效 Guest 提交挂起请求时，函数将 Guest 状态更新为 PAUSED并将挂起请求加入请求队列。 用例类别：基于需求的测试 预置条件：Guest 有效；请求结构分配成功；工作队列调度接口正常。 测试步骤： step1、初始化 Guest 请求队列。 step2、设置请求结构分配成功。 step3、调用被测函数。 step4、检查返回值、Guest 状态和请求队列。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_suspend_request。 等价列表：Guest 挂起请求正常提交。 其它说明：vmm_manager_guest_request 使用实际实现，最终将 manager_suspend_request 放入 Guest 请求队列。 通过准则：函数返回 VMM_OK，Guest 状态为 PAUSED，请求队列非空。
+名称汇总
+vmm_manager_guest_suspend_request.001.IN_Guest为空
+vmm_manager_guest_suspend_request.002.R_Guest挂起请求提交成功
+ 
+⸻
+ 
+五、
+wait_guest_suspend
+公共环境 WS0-UC
+static struct vmm_guest guest;
+static struct vmm_completion completion;
+
+memset(&guest, 0, sizeof(guest));
+memset(&completion, 0, sizeof(completion));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+guest.state = RUNNING;
+guest.suspend_irq = 33U;
+guest.cmpl_suspend = &completion;
+
+<<vmm_manager.wait_guest_suspend.guest>> =
+    &guest;
+ 
+⸻
+ 
+wait_guest_suspend.001.IN
+Begin User Code
+复制 WS0-UC，修改：
+guest.state = PAUSED;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证 Guest 不处于 RUNNING 状态时，挂起等待接口返回无效参数错误。 用例类别：接口测试 预置条件：Guest 状态为 PAUSED；挂起中断号非零。 测试步骤： step1、设置 Guest 为 PAUSED。 step2、调用 wait_guest_suspend。 step3、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：wait_guest_suspend。 等价列表：非运行态 Guest 请求挂起等待。 其它说明：覆盖复合条件第一个子条件为 true，第二个子条件因短路不执行。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+wait_guest_suspend.002.IN
+Begin User Code
+复制 WS0-UC，修改：
+guest.suspend_irq = 0U;
+期望值
+return = VMM_EINVALID
+注释
+测试目的：验证 Guest 处于运行态但未配置挂起中断时，函数返回无效参数错误。 用例类别：接口测试 预置条件：Guest 处于 RUNNING；suspend_irq=0。 测试步骤： step1、设置 Guest 为运行态。 step2、将挂起中断号设置为 0。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：wait_guest_suspend。 等价列表：Guest 未配置挂起中断。 其它说明：覆盖复合条件第一个子条件为 false、第二个子条件为 true。 通过准则：函数返回 VMM_EINVALID。
+ 
+⸻
+ 
+wait_guest_suspend.003.R
+Begin User Code
+复制 WS0-UC。
+Stub Processing
+vmm_devemu_emulate_irq2：
+    空实现
+
+vmm_completion_wait：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证运行态 Guest 配置有效挂起中断时，函数注入挂起中断并成功等待挂起完成。 用例类别：基于需求的测试 预置条件：Guest 处于 RUNNING；挂起中断号有效；完成量等待成功。 测试步骤： step1、构造有效挂起配置。 step2、设置完成量等待返回成功。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：wait_guest_suspend。 等价列表：Guest 挂起等待成功。 其它说明：覆盖复合条件整体为 false和后续完整等待路径。 通过准则：函数返回 VMM_OK。
+名称汇总
+wait_guest_suspend.001.IN_Guest非运行态
+wait_guest_suspend.002.IN_Guest未配置挂起中断
+wait_guest_suspend.003.R_Guest挂起等待成功
+ 
+⸻
+ 
+六、
+hypervisor_suspend
+1. 必须进行的测试编译隔离
+save_current_registers() 和 restore_saved_registers() 会直接修改全部通用寄存器及 SP，不应在 VectorCAST 驱动上下文中真实执行，否则可能破坏驱动栈和返回地址。
+建议仅在单元测试编译中增加：
+#if defined(VCAST_UNIT_TEST)
+
+#define restore_saved_registers() \
+    do { } while (0)
+
+#define save_current_registers() \
+    do { } while (0)
+
+#else
+
+/* 保留原来的 restore_saved_registers 定义 */
+/* 保留原来的 save_current_registers 定义 */
+
+#endif
+生产构建不定义 VCAST_UNIT_TEST，原实现不变。
+如链接器缺少以下符号，再在 Unit Appendix 中提供：
+u8 _bringup_boot_cpu;
+u32 vectors[1];
+ 
+⸻
+ 
+hypervisor_suspend.001.FI
+Begin User Code
+boot_cpu_resume = 0UL;
+
+vcast_host_va2pa_out =
+    (physical_addr_t)0x100000UL;
+Stub Processing
+smp_write_logical_id：
+    空实现
+
+vmm_host_va2pa：
+    return VMM_EFAIL
+期望结果
+函数正常返回。
+boot_cpu_resume != 0
+注释
+测试目的：通过故障注入验证启动入口虚拟地址转换为物理地址失败时，函数记录错误并提前返回。 用例类别：故障注入测试 预置条件：寄存器保存和恢复宏在测试构建中为空操作；vmm_host_va2pa 返回失败。 测试步骤： step1、将 boot_cpu_resume 初始化为 0。 step2、注入虚实地址转换失败。 step3、调用 hypervisor_suspend。 step4、确认函数正常返回。 用例来源：故障注入。 追溯ID：hypervisor_suspend。 等价列表：Boot CPU 恢复入口地址转换失败。 其它说明：覆盖第一个 if(rc) 为 true的提前返回路径；源码该路径不会执行寄存器恢复。 通过准则：函数正常返回，boot_cpu_resume 已被设置为恢复标签地址。
+ 
+⸻
+ 
+hypervisor_suspend.002.FI
+Begin User Code
+boot_cpu_resume = 0UL;
+
+vcast_host_va2pa_out =
+    (physical_addr_t)0x100000UL;
+Stub Processing
+smp_write_logical_id：
+    空实现
+
+vmm_host_va2pa：
+    return VMM_OK
+
+psci_system_suspend：
+    return VMM_EFAIL
+期望结果
+函数正常返回。
+注释
+测试目的：通过故障注入验证 PSCI SYSTEM_SUSPEND 返回失败时，函数记录错误并继续执行 Boot CPU 恢复流程。 用例类别：故障注入测试 预置条件：入口地址转换成功；PSCI 系统挂起接口返回失败。 测试步骤： step1、设置地址转换成功。 step2、注入 PSCI 系统挂起失败。 step3、调用被测函数。 step4、确认函数完成恢复流程并正常返回。 用例来源：故障注入。 追溯ID：hypervisor_suspend。 等价列表：PSCI 系统挂起失败。 其它说明：覆盖地址转换判断为 false及 PSCI 返回值判断为 true。 通过准则：函数正常返回。
+ 
+⸻
+ 
+hypervisor_suspend.003.R
+Begin User Code
+与 .002.FI 相同。
+Stub Processing
+smp_write_logical_id：
+    空实现
+
+vmm_host_va2pa：
+    return VMM_OK
+
+psci_system_suspend：
+    return VMM_OK
+期望结果
+函数正常返回。
+注释
+测试目的：验证 Boot CPU 恢复入口转换成功且 PSCI 系统挂起成功时，函数完成完整挂起恢复流程。 用例类别：基于需求的测试 预置条件：入口地址转换成功；PSCI SYSTEM_SUSPEND 返回成功。 测试步骤： step1、设置地址转换成功并提供物理入口。 step2、设置 PSCI 系统挂起成功。 step3、调用被测函数。 step4、确认函数正常返回。 用例来源：需求分析、有效等价类。 追溯ID：hypervisor_suspend。 等价列表：Hypervisor 系统挂起恢复成功。 其它说明：覆盖两个错误判断均为 false的完整路径。 通过准则：函数正常返回。
+名称汇总
+hypervisor_suspend.001.FI_恢复入口地址转换失败
+hypervisor_suspend.002.FI_PSCI系统挂起失败
+hypervisor_suspend.003.R_Hypervisor挂起恢复成功
+ 
+⸻
+ 
+七、
+disable_nonboot_cpu
+公共环境 DN0-UC
+static struct vmm_vcpu vcpu;
+
+memset(&vcpu, 0, sizeof(vcpu));
+
+vcast_smp_processor_id_ret = 1U;
+vcast_scheduler_hcpu_out = 1U;
+
+<<vmm_manager.disable_nonboot_cpu.arg0>> =
+    NULL;
+公共 Stub：
+vmm_scheduler_current_vcpu：
+    return &vcpu
+
+vmm_scheduler_get_hcpu：
+    return VMM_OK
+ 
+⸻
+ 
+disable_nonboot_cpu.001.IN
+Begin User Code
+复制 DN0-UC，修改：
+vcast_smp_processor_id_ret = 1U;
+vcast_scheduler_hcpu_out = 2U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证当前 VCPU 绑定的 HCPU 与实际当前 CPU 不一致时，函数拒绝关闭 CPU。 用例类别：接口测试 预置条件：当前 CPU 为 1；VCPU HCPU 为 2。 测试步骤： step1、设置当前 CPU 为 1。 step2、设置 VCPU HCPU 为 2。 step3、调用 disable_nonboot_cpu。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：disable_nonboot_cpu。 等价列表：VCPU HCPU 与当前 CPU 不一致。 其它说明：覆盖复合条件第一个子条件为 true，第二个子条件因短路不执行。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+disable_nonboot_cpu.002.IN
+Begin User Code
+复制 DN0-UC，修改：
+vcast_smp_processor_id_ret = 0U;
+vcast_scheduler_hcpu_out = 0U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证当前 CPU 为 Boot CPU0时，函数拒绝执行非 Boot CPU 关闭流程。 用例类别：接口测试 预置条件：当前 CPU 和 VCPU HCPU 均为 0。 测试步骤： step1、设置当前 CPU 为 0。 step2、设置 VCPU HCPU 为 0。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：disable_nonboot_cpu。 等价列表：尝试关闭 Boot CPU。 其它说明：覆盖复合条件第一个子条件为 false、第二个子条件为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+disable_nonboot_cpu.003.R
+Begin User Code
+复制 DN0-UC。
+Stub Processing
+vmm_timer_stop：
+    空实现
+
+vmm_cpuhp_set_state：
+    return VMM_OK
+
+psci_cpu_off：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证非 Boot CPU 上运行的 VCPU 与当前 CPU 匹配时，函数停止本地定时器、切换 CPUHP 状态并调用 PSCI CPU_OFF。 用例类别：基于需求的测试 预置条件：当前 CPU 为 1；VCPU HCPU 为 1；CPUHP 和 PSCI 操作成功。 测试步骤： step1、设置当前 CPU 和 VCPU HCPU 均为 1。 step2、设置 CPUHP 下线和 PSCI CPU_OFF 成功。 step3、调用被测函数。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：disable_nonboot_cpu。 等价列表：非 Boot CPU 正常下线。 其它说明：覆盖复合条件整体为 false和完整 CPU 下线路径；函数最终返回 PSCI CPU_OFF 的结果。 通过准则：函数返回 VMM_OK。
+名称汇总
+disable_nonboot_cpu.001.IN_VCPU绑定CPU与当前CPU不一致
+disable_nonboot_cpu.002.IN_禁止关闭BootCPU
+disable_nonboot_cpu.003.R_非BootCPU正常关闭
+ 
+⸻
+ 
+八、
+str_cpu_down
+str_cpu_down.001.FI
+Begin User Code
+<<vmm_manager.str_cpu_down.cpu>> = 1U;
+Stub Processing
+vmm_threads_create：
+    return NULL
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证非 Boot CPU 下线线程创建失败时，函数返回失败。 用例类别：故障注入测试 预置条件：目标 CPU 为 1；线程创建接口返回 NULL。 测试步骤： step1、设置目标 CPU 为 1。 step2、注入线程创建失败。 step3、调用 str_cpu_down。 step4、观察返回值。 用例来源：故障注入。 追溯ID：str_cpu_down。 等价列表：CPU 下线线程创建失败。 其它说明：覆盖 !cpu_down_thread 为 true的提前返回路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+str_cpu_down.002.R
+Begin User Code
+static struct vmm_thread thread;
+
+memset(&thread, 0, sizeof(thread));
+
+<<vmm_manager.str_cpu_down.cpu>> = 1U;
+Stub Processing
+vmm_threads_create：
+    return &thread
+
+vmm_threads_set_affinity：
+    return VMM_OK
+
+vmm_threads_start：
+    return VMM_OK
+
+vmm_msleep：
+    空实现
+
+vmm_threads_stop：
+    return VMM_OK
+
+vmm_threads_destroy：
+    return VMM_OK
+期望值
+return = VMM_OK
+注释
+测试目的：验证 CPU 下线线程创建成功时，函数完成亲和性设置、线程启动、停止和销毁流程。 用例类别：基于需求的测试 预置条件：线程创建成功；后续线程管理接口均返回成功。 测试步骤： step1、构造线程对象。 step2、设置所有线程操作成功。 step3、调用 str_cpu_down。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：str_cpu_down。 等价列表：CPU 下线线程正常执行。 其它说明：函数中间接口返回值会被后续调用覆盖，最终返回 vmm_threads_destroy 的结果。 通过准则：函数返回 VMM_OK。
+名称汇总
+str_cpu_down.001.FI_CPU下线线程创建失败
+str_cpu_down.002.R_CPU下线线程正常执行
+ 
+⸻
+ 
+九、
+guest_resume_str
+公共环境 GR0-UC
+static struct vmm_guest guest;
+
+memset(&guest, 0, sizeof(guest));
+
+strlcpy(guest.name,
+        "guest0",
+        sizeof(guest.name));
+
+INIT_RW_LOCK(&guest.vcpu_lock);
+INIT_LIST_HEAD(&guest.vcpu_list);
+
+guest.vcpu_count = 0U;
+
+<<vmm_manager.guest_resume_str.guest>> =
+    &guest;
+
+<<vmm_manager.guest_resume_str.priv>> =
+    NULL;
+ 
+⸻
+ 
+guest_resume_str.001.R
+Begin User Code
+复制 GR0-UC，设置：
+guest.id = SERVERVM_ID;
+guest.state = RUNNING;
+期望值
+return = VMM_OK
+注释
+测试目的：验证 ServerVM 已经处于 RUNNING 状态时，恢复回调直接返回成功。 用例类别：基于需求的测试 预置条件：Guest ID 为 SERVERVM_ID；状态为 RUNNING。 测试步骤： step1、设置 Guest 为 ServerVM。 step2、设置 Guest 已运行。 step3、调用 guest_resume_str。 step4、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：guest_resume_str。 等价列表：已运行 ServerVM 无需重复恢复。 其它说明：覆盖第一个复合条件整体为 true的提前返回路径。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+guest_resume_str.002.IN
+Begin User Code
+复制 GR0-UC，设置：
+guest.id = SERVERVM_ID + 1U;
+guest.state = RUNNING;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证非 ServerVM 且状态不是 PAUSED 时，函数拒绝执行恢复。 用例类别：接口测试 预置条件：Guest ID 不是 ServerVM；状态为 RUNNING。 测试步骤： step1、构造非 ServerVM Guest。 step2、设置状态为 RUNNING。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：guest_resume_str。 等价列表：非暂停态普通 Guest 请求恢复。 其它说明：覆盖第一个复合条件第一个子条件为 false，以及第二个状态判断为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+guest_resume_str.003.R
+Begin User Code
+复制 GR0-UC，设置：
+guest.id = SERVERVM_ID;
+guest.state = PAUSED;
+期望值
+return = VMM_OK
+guest.state = RUNNING
+注释
+测试目的：验证处于 PAUSED 状态且没有 VCPU 的 Guest 能够通过 Guest kick 流程恢复为 RUNNING。 用例类别：基于需求的测试 预置条件：Guest 状态为 PAUSED；VCPU 链表为空。 测试步骤： step1、设置 Guest 为 PAUSED。 step2、保持 Guest VCPU 链表为空。 step3、调用 guest_resume_str。 step4、检查返回值和 Guest 状态。 用例来源：需求分析、有效等价类。 追溯ID：guest_resume_str。 等价列表：暂停态 Guest 正常恢复。 其它说明：第一个复合条件中 ID 判断为 true、RUNNING 判断为 false；第二个状态判断为 false；实际 vmm_manager_guest_kick 在空 VCPU 链表上返回成功。 通过准则：函数返回 VMM_OK，Guest 状态变为 RUNNING。
+ 
+⸻
+ 
+guest_resume_str.004.FI
+Begin User Code
+复制 GR0-UC，设置：
+guest.id = SERVERVM_ID + 1U;
+guest.state = PAUSED;
+
+strlcpy(guest.name,
+        "user-android",
+        sizeof(guest.name));
+
+/*
+ * vmm_manager_guest_kick 在找不到 VCPU 时会调用 guest_put。
+ * 引用计数设置为2，递减后仍非零，避免进入销毁流程。
+ */
+arch_atomic_write(&guest.refcnt, 2L);
+期望值
+return = VMM_ENOTAVAIL
+注释
+测试目的：通过故障注入验证暂停态 user-android Guest 找不到启动 VCPU 时，恢复回调传播 Guest kick 的不可用错误。 用例类别：故障注入测试 预置条件：Guest 名称为 user-android；状态为 PAUSED；VCPU 链表为空；引用计数为 2。 测试步骤： step1、构造暂停态 user-android Guest。 step2、保持 VCPU 链表为空。 step3、调用 guest_resume_str。 step4、观察返回值。 用例来源：故障注入。 追溯ID：guest_resume_str。 等价列表：恢复 user-android 时缺少主 VCPU。 其它说明：覆盖第一个复合条件第一个子条件为 false、状态检查通过及 if(!rc) 为 false。 通过准则：函数返回 VMM_ENOTAVAIL。
+名称汇总
+guest_resume_str.001.R_ServerVM已运行
+guest_resume_str.002.IN_非暂停态Guest恢复失败
+guest_resume_str.003.R_暂停态Guest恢复成功
+guest_resume_str.004.FI_UserAndroid缺少启动VCPU
+ 
+⸻
+ 
+十、
+vmm_manager_guest_resume_from_suspend
+vmm_manager_guest_resume_from_suspend.001.R
+Begin User Code
+/*
+ * 所有 Guest 槽位均可用，iterate 不调用回调。
+ * guest_resume_str 已由独立用例覆盖。
+ */
+vcast_manager_prepare_guest_env(0U);
+Stub Processing
+vmm_mutex_lock：
+    空实现
+
+vmm_mutex_unlock：
+    空实现
+期望值
+return = VMM_OK
+注释
+测试目的：验证当前没有已使用 Guest 时，系统挂起恢复遍历接口正常返回。 用例类别：基于需求的测试 预置条件：manager 中全部 Guest 槽位均为空闲。 测试步骤： step1、准备空 Guest manager 环境。 step2、调用 vmm_manager_guest_resume_from_suspend。 step3、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_guest_resume_from_suspend。 等价列表：无 Guest 需要恢复。 其它说明：本函数仅封装 vmm_manager_guest_iterate，回调函数已单独测试。 通过准则：函数返回 VMM_OK。
+正式名称
+vmm_manager_guest_resume_from_suspend.001.R_无Guest需要恢复
+ 
+⸻
+ 
+十一、
+vmm_timer_resume
+vmm_timer_resume.001.R
+Stub Processing
+generic_timer_cpu_reg_restore：
+    空实现
+
+vmm_timer_start：
+    空实现
+期望结果
+函数正常返回。
+注释
+测试目的：验证系统恢复阶段函数依次恢复 Generic Timer CPU 寄存器并启动 VMM 定时器。 用例类别：基于需求的测试 预置条件：定时器恢复和启动接口可正常执行。 测试步骤： step1、调用 vmm_timer_resume。 step2、确认函数正常返回。 用例来源：需求分析。 追溯ID：vmm_timer_resume。 等价列表：VMM 定时器正常恢复。 其它说明：函数无条件分支，单条用例即可覆盖全部语句。 通过准则：函数正常返回。
+正式名称
+vmm_timer_resume.001.R_VMM定时器恢复
+ 
+⸻
+ 
+十二、
+vmm_manager_system_suspend
+1. IOMMU User Code
+int vcast_iommu_suspend_callback(void)
+{
+    return vcast_iommu_suspend_ret;
+}
+
+int vcast_iommu_resume_callback(void)
+{
+    return vcast_iommu_resume_ret;
+}
+2. 公共 Begin User Code：SYS0-UC
+static struct vmm_guest guest;
+static struct vmm_completion completion;
+static struct vmm_thread cpu_down_thread;
+static struct vmm_iommu_ops iommu_ops;
+
+memset(&guest, 0, sizeof(guest));
+memset(&completion, 0, sizeof(completion));
+memset(&cpu_down_thread, 0, sizeof(cpu_down_thread));
+memset(&iommu_ops, 0, sizeof(iommu_ops));
+
+strlcpy(guest.name,
+        "serverVM",
+        sizeof(guest.name));
+
+guest.id = SERVERVM_ID;
+guest.state = RUNNING;
+guest.suspend_irq = 33U;
+guest.cmpl_suspend = &completion;
+
+iommu_ops.suspend =
+    vcast_iommu_suspend_callback;
+
+iommu_ops.resume =
+    vcast_iommu_resume_callback;
+
+platform_bus.iommu_ops = &iommu_ops;
+
+/*
+ * 供 guest_resume_from_suspend 使用空 manager 环境。
+ */
+vcast_manager_prepare_guest_env(0U);
+
+vcast_smp_processor_id_ret = 0U;
+vcast_smp_bootcpu_id_ret = 0U;
+vcast_present_cpu_count = 2U;
+
+vcast_iommu_suspend_ret = VMM_OK;
+vcast_iommu_resume_ret = VMM_OK;
+
+vcast_host_va2pa_out =
+    (physical_addr_t)0x100000UL;
+
+boot_cpu_resume = 0UL;
+
+<<vmm_manager.vmm_manager_system_suspend.guest>> =
+    &guest;
+公共成功 Stub：
+vmm_devemu_emulate_irq2：
+    空实现
+
+vmm_completion_wait：
+    return VMM_OK
+
+vmm_threads_create：
+    return &cpu_down_thread
+
+vmm_threads_set_affinity：
+    return VMM_OK
+
+vmm_threads_start：
+    return VMM_OK
+
+vmm_msleep：
+    空实现
+
+vmm_threads_stop：
+    return VMM_OK
+
+vmm_threads_destroy：
+    return VMM_OK
+
+vmm_host_irqdomain_suspend：
+    return VMM_OK
+
+vmm_host_irqdomain_resume：
+    空实现或 return VMM_OK
+
+serial_suspend：
+    空实现
+
+serial_resume：
+    空实现
+
+vmm_timer_stop：
+    空实现
+
+generic_timer_cpu_reg_restore：
+    空实现
+
+vmm_timer_start：
+    空实现
+
+vmm_host_va2pa：
+    return VMM_OK
+
+psci_system_suspend：
+    return VMM_OK
+
+smp_write_logical_id：
+    空实现
+
+arch_smp_start_cpu：
+    return VMM_OK
+
+vmm_mutex_lock：
+    空实现
+
+vmm_mutex_unlock：
+    空实现
+定义 CONFIG_UFS_ZTE_A1 时增加：
+ufs_suspend：
+    空实现
+
+ufs_resume：
+    空实现
+ 
+⸻
+ 
+vmm_manager_system_suspend.001.IN
+Begin User Code
+复制 SYS0-UC，修改：
+vcast_smp_processor_id_ret = 1U;
+vcast_smp_bootcpu_id_ret = 0U;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证系统挂起操作不是在 Boot CPU 上执行时，函数返回失败。 用例类别：接口测试 预置条件：当前 CPU 为 1；Boot CPU 为 0。 测试步骤： step1、设置当前 CPU 与 Boot CPU 不同。 step2、调用 vmm_manager_system_suspend。 step3、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vmm_manager_system_suspend。 等价列表：非 Boot CPU 发起系统挂起。 其它说明：覆盖第一个 CPU 检查为 true的提前返回路径。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_system_suspend.002.IN
+Begin User Code
+复制 SYS0-UC，修改输入：
+<<vmm_manager.vmm_manager_system_suspend.guest>> =
+    NULL;
+期望值
+return = VMM_ENOTAVAIL
+注释
+测试目的：验证 Boot CPU 上未找到目标 Guest 时，系统挂起接口返回 Guest 不可用错误。 用例类别：接口测试 预置条件：当前 CPU 等于 Boot CPU；Guest 指针为 NULL。 测试步骤： step1、设置当前 CPU 为 Boot CPU。 step2、设置 Guest 入参为 NULL。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、空指针等价类。 追溯ID：vmm_manager_system_suspend。 等价列表：系统挂起目标 Guest 不存在。 其它说明：覆盖 CPU 检查为 false和 Guest 空指针检查为 true。 通过准则：函数返回 VMM_ENOTAVAIL。
+ 
+⸻
+ 
+vmm_manager_system_suspend.003.FI
+Begin User Code
+复制 SYS0-UC。
+Stub Processing
+vmm_completion_wait：
+    return VMM_EFAIL
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证 Guest 挂起等待失败时，函数跳转至 Guest 恢复阶段并返回挂起错误。 用例类别：故障注入测试 预置条件：当前 CPU 为 Boot CPU；Guest 有效；完成量等待返回失败。 测试步骤： step1、注入 Guest 挂起等待失败。 step2、调用系统挂起函数。 step3、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_system_suspend。 等价列表：Guest 挂起失败。 其它说明：覆盖 if(ret) 在 Guest 挂起后为 true；直接跳至 guest_resume，不执行 CPU 和设备挂起。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_system_suspend.004.FI
+Begin User Code
+复制 SYS0-UC。
+Stub Processing
+vmm_completion_wait：
+    return VMM_OK
+
+vmm_threads_create：
+    return NULL
+
+arch_smp_start_cpu：
+    return VMM_EFAIL
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证非 Boot CPU 下线线程创建失败时，函数进入非 Boot CPU 恢复路径。 用例类别：故障注入测试 预置条件：Guest 挂起成功；present CPU 包含 CPU0和CPU1；CPU1下线线程创建失败。 测试步骤： step1、设置 Guest 挂起成功。 step2、注入 CPU1下线线程创建失败。 step3、设置 CPU1重新启动返回失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_system_suspend。 等价列表：非 Boot CPU 下线失败。 其它说明：覆盖第一个 CPU 遍历中 Boot CPU continue 和非 Boot CPU 处理路径、下线结果判断为 true，以及第二个 CPU 恢复循环。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_system_suspend.005.FI
+Begin User Code
+复制 SYS0-UC。
+Stub Processing
+使用公共成功 Stub，但修改：
+vmm_host_irqdomain_suspend：
+    return VMM_EFAIL
+
+arch_smp_start_cpu：
+    return VMM_EFAIL
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证 IRQ Domain 挂起失败时，函数跳过后续设备挂起并恢复非 Boot CPU。 用例类别：故障注入测试 预置条件：Guest 挂起和非 Boot CPU 下线成功；IRQ Domain 挂起返回失败。 测试步骤： step1、设置 Guest 和 CPU 挂起前置操作成功。 step2、注入 IRQ Domain 挂起失败。 step3、设置非 Boot CPU 重新启动返回失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_system_suspend。 等价列表：IRQ Domain 挂起失败。 其它说明：覆盖 CPU 下线结果判断为 false及 IRQ Domain 结果判断为 true。 通过准则：函数返回 VMM_EFAIL。
+ 
+⸻
+ 
+vmm_manager_system_suspend.006.FI
+Begin User Code
+复制 SYS0-UC，设置：
+vcast_iommu_suspend_ret = VMM_EFAIL;
+vcast_iommu_resume_ret = VMM_OK;
+Stub Processing
+公共成功 Stub。
+期望值
+return = VMM_OK
+注释
+测试目的：通过故障注入验证 IOMMU 挂起失败时，函数进入设备恢复路径并继续恢复 CPU 和 Guest。 用例类别：故障注入测试 预置条件：Guest、CPU、IRQ Domain 和串口挂起成功；IOMMU 挂起失败；IOMMU 恢复和 CPU 恢复成功。 测试步骤： step1、注入 IOMMU suspend 返回失败。 step2、设置 IOMMU resume 和 CPU 恢复成功。 step3、调用系统挂起函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_system_suspend。 等价列表：IOMMU 挂起失败后恢复。 其它说明：覆盖 IOMMU suspend 结果判断为 true和 IOMMU resume 结果判断为 false。当前源码的原始 suspend 错误会被后续 resume/CPU启动结果覆盖。 通过准则：函数最终返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_system_suspend.007.R
+Begin User Code
+复制 SYS0-UC。
+Stub Processing
+完整使用公共成功 Stub。
+期望值
+return = VMM_OK
+注释
+测试目的：验证 Guest、非 Boot CPU、IRQ Domain、IOMMU 和 Hypervisor 均能完成完整系统挂起与恢复流程。 用例类别：基于需求的测试 预置条件：当前 CPU 为 Boot CPU；Guest 有效；present CPU包含 CPU0和CPU1；所有挂起和恢复接口成功。 测试步骤： step1、设置 Guest 挂起成功。 step2、设置非 Boot CPU 下线成功。 step3、设置设备和 Hypervisor 挂起恢复成功。 step4、设置非 Boot CPU 重新启动成功。 step5、调用被测函数。 step6、观察返回值。 用例来源：需求分析、有效等价类。 追溯ID：vmm_manager_system_suspend。 等价列表：系统完整挂起恢复成功。 其它说明：覆盖 IOMMU suspend 结果为 false、Hypervisor 挂起路径、IOMMU resume 结果为 false及两个 CPU 遍历中的 Boot/非 Boot CPU 分支。 通过准则：函数返回 VMM_OK。
+ 
+⸻
+ 
+vmm_manager_system_suspend.008.FI
+Begin User Code
+复制 SYS0-UC，修改：
+/*
+ * 仅遍历 Boot CPU，避免后续 arch_smp_start_cpu
+ * 覆盖 IOMMU resume 的错误码。
+ */
+vcast_present_cpu_count = 1U;
+
+vcast_iommu_suspend_ret = VMM_OK;
+vcast_iommu_resume_ret = VMM_EFAIL;
+Stub Processing
+其余使用公共成功 Stub。
+期望值
+return = VMM_EFAIL
+注释
+测试目的：通过故障注入验证 IOMMU 恢复失败时，函数记录恢复错误并返回该错误。 用例类别：故障注入测试 预置条件：仅存在 Boot CPU；Guest、IRQ Domain、IOMMU挂起和 Hypervisor挂起成功；IOMMU恢复失败。 测试步骤： step1、设置 present CPU 数量为 1。 step2、注入 IOMMU resume 返回失败。 step3、调用系统挂起函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：vmm_manager_system_suspend。 等价列表：IOMMU 恢复失败。 其它说明：覆盖 IOMMU resume 结果判断为 true；由于没有非 Boot CPU，返回值不会被 arch_smp_start_cpu 覆盖。 通过准则：函数返回 VMM_EFAIL。
+名称汇总
+vmm_manager_system_suspend.001.IN_非BootCPU发起系统挂起
+vmm_manager_system_suspend.002.IN_系统挂起Guest为空
+vmm_manager_system_suspend.003.FI_Guest挂起失败
+vmm_manager_system_suspend.004.FI_非BootCPU下线失败
+vmm_manager_system_suspend.005.FI_IRQDomain挂起失败
+vmm_manager_system_suspend.006.FI_IOMMU挂起失败
+vmm_manager_system_suspend.007.R_系统挂起恢复成功
+vmm_manager_system_suspend.008.FI_IOMMU恢复失败
+ 
+⸻
+ 
+十三、IOMMU User Code 辅助函数用例
+若 VectorCAST 将 Unit Appendix 中两个回调统计为函数，需要各增加一条。
+vcast_iommu_suspend_callback.001.R
+Begin User Code
+vcast_iommu_suspend_ret = VMM_EFAIL;
+期望值
+return = VMM_EFAIL
+注释
+测试目的：验证 IOMMU suspend 测试回调返回当前配置的模拟结果。 用例类别：基于需求的测试 预置条件：模拟返回值为 VMM_EFAIL。 测试步骤： step1、设置 vcast_iommu_suspend_ret=VMM_EFAIL。 step2、调用回调函数。 step3、观察返回值。 用例来源：测试环境设计。 追溯ID：vcast_iommu_suspend_callback。 等价列表：IOMMU suspend 模拟回调。 其它说明：辅助函数无条件分支。 通过准则：函数返回 VMM_EFAIL。
+vcast_iommu_resume_callback.001.R
+配置和注释同上，将变量和函数名替换为 resume。
+ 
+⸻
+ 
+十四、同步寄存器和虚拟中断超时接口
+这些函数可直接使用实际 arch_atomic_read()、arch_atomic_write()。测试 Begin User Code 可以访问同一单元内的静态原子变量。
+ 
+⸻
+ 
+vmm_manager_sync_regs_in_excep
+.001.R_同步寄存器标志关闭
+arch_atomic_write(&sync_regs_in_excep, 0);
+期望：
+return = FALSE
+注释：
+测试目的：验证异常上下文寄存器同步标志为 0时，查询接口返回 FALSE。 用例类别：基于需求的测试 预置条件：sync_regs_in_excep=0。 测试步骤：step1、清零同步标志；step2、调用查询函数；step3、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_sync_regs_in_excep。 等价列表：同步功能关闭。 其它说明：覆盖原子值向 bool 的零值转换。 通过准则：函数返回 FALSE。
+.002.R_同步寄存器标志开启
+arch_atomic_write(&sync_regs_in_excep, 1);
+期望 TRUE，其余注释按开启状态填写。
+ 
+⸻
+ 
+vmm_manager_enable_sync_regs_in_excep.001.R
+Begin User Code
+arch_atomic_write(&sync_regs_in_excep, 0);
+期望值
+调用后：
+arch_atomic_read(&sync_regs_in_excep) = 1
+注释
+测试目的：验证启用接口将异常上下文寄存器同步标志写为 1。 用例类别：基于需求的测试 预置条件：同步标志初值为 0。 测试步骤：step1、清零同步标志；step2、调用启用接口；step3、读取标志值。 用例来源：需求分析。 追溯ID：vmm_manager_enable_sync_regs_in_excep。 等价列表：启用异常寄存器同步。 其它说明：函数无条件分支。 通过准则：标志值为 1。
+ 
+⸻
+ 
+vmm_manager_detect_virq_timeout
+.001.R_虚拟中断超时检测关闭
+arch_atomic_write(&detect_virq_timeout, 0);
+期望 FALSE。
+.002.R_虚拟中断超时检测开启
+arch_atomic_write(&detect_virq_timeout, 1);
+期望 TRUE。
+每条均使用完整注释，分别说明关闭和开启状态查询。
+ 
+⸻
+ 
+vmm_manager_virq_timeout_msecs.001.R
+Begin User Code
+arch_atomic_write(&virq_timeout_msecs, 1234);
+期望值
+return = 1234
+注释
+测试目的：验证虚拟中断超时查询接口返回当前配置的毫秒值。 用例类别：基于需求的测试 预置条件：超时时间设置为 1234毫秒。 测试步骤：step1、写入超时值；step2、调用查询接口；step3、观察返回值。 用例来源：需求分析。 追溯ID：vmm_manager_virq_timeout_msecs。 等价列表：读取有效超时配置。 其它说明：函数无条件分支。 通过准则：函数返回 1234。
+ 
+⸻
+ 
+vmm_manager_enable_detect_virq_timeout
+.001.IN_超时值为零
+输入：
+timeout_msecs = 0U;
+期望：
+return = VMM_EINVALID
+注释：
+测试目的：验证超时值为 0时，启用接口返回无效参数错误。 用例类别：接口测试 预置条件：输入超时值为 0。 测试步骤：step1、设置输入为 0；step2、调用函数；step3、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vmm_manager_enable_detect_virq_timeout。 等价列表：低于最小超时值。 其它说明：覆盖复合条件中 0U < timeout_msecs 为 false，第二个子条件短路。 通过准则：函数返回 VMM_EINVALID。
+.002.IN_超时值超过上限
+输入：
+timeout_msecs = 10001U;
+期望 VMM_EINVALID。
+注释中说明覆盖第一个子条件 true、第二个子条件 false。
+.003.R_启用虚拟中断超时检测
+Begin User Code：
+arch_atomic_write(&detect_virq_timeout, 0);
+arch_atomic_write(&virq_timeout_msecs, 1);
+输入：
+timeout_msecs = 10000U;
+期望：
+return = VMM_OK
+arch_atomic_read(&virq_timeout_msecs) = 10000
+arch_atomic_read(&detect_virq_timeout) = 1
+注释：
+测试目的：验证输入位于有效上边界时，函数更新超时时间并启用虚拟中断超时检测。 用例类别：基于需求的测试 预置条件：检测标志为关闭；输入超时值为 10000毫秒。 测试步骤：step1、初始化标志和超时值；step2、调用启用接口；step3、检查返回值和两个原子变量。 用例来源：需求分析、边界值分析。 追溯ID：vmm_manager_enable_detect_virq_timeout。 等价列表：有效超时上边界。 其它说明：覆盖两个有效性子条件均为 true以及错误判断整体为 false。 通过准则：函数返回 VMM_OK，超时值为 10000，检测标志为 1。
+ 
+⸻
+ 
+vmm_manager_disable_detect_virq_timeout.001.R
+Begin User Code
+arch_atomic_write(&detect_virq_timeout, 1);
+期望值
+arch_atomic_read(&detect_virq_timeout) = 0
+注释
+测试目的：验证关闭接口将虚拟中断超时检测标志清零。 用例类别：基于需求的测试 预置条件：检测标志初值为 1。 测试步骤：step1、设置检测标志为 1；step2、调用关闭接口；step3、读取标志值。 用例来源：需求分析。 追溯ID：vmm_manager_disable_detect_virq_timeout。 等价列表：关闭虚拟中断超时检测。 其它说明：函数无条件分支。 通过准则：检测标志值为 0。
+ 
+⸻
+ 
+十五、最终名称汇总
+wait_guest_powerff.001.IN_Guest非运行态
+wait_guest_powerff.002.IN_无关机中断且超时为零
+wait_guest_powerff.003.FI_无关机中断时等待失败
+wait_guest_powerff.004.R_注入关机中断并等待成功
+
+manager_suspend_request.001.R_挂起完成量为空
+manager_suspend_request.002.R_挂起完成量无等待者
+manager_suspend_request.003.R_通知挂起完成量
+
+vmm_manager_guest_suspend_request.001.IN_Guest为空
+vmm_manager_guest_suspend_request.002.R_Guest挂起请求提交成功
+
+wait_guest_suspend.001.IN_Guest非运行态
+wait_guest_suspend.002.IN_Guest未配置挂起中断
+wait_guest_suspend.003.R_Guest挂起等待成功
+
+hypervisor_suspend.001.FI_恢复入口地址转换失败
+hypervisor_suspend.002.FI_PSCI系统挂起失败
+hypervisor_suspend.003.R_Hypervisor挂起恢复成功
+
+disable_nonboot_cpu.001.IN_VCPU绑定CPU与当前CPU不一致
+disable_nonboot_cpu.002.IN_禁止关闭BootCPU
+disable_nonboot_cpu.003.R_非BootCPU正常关闭
+
+str_cpu_down.001.FI_CPU下线线程创建失败
+str_cpu_down.002.R_CPU下线线程正常执行
+
+guest_resume_str.001.R_ServerVM已运行
+guest_resume_str.002.IN_非暂停态Guest恢复失败
+guest_resume_str.003.R_暂停态Guest恢复成功
+guest_resume_str.004.FI_UserAndroid缺少启动VCPU
+
+vmm_manager_guest_resume_from_suspend.001.R_无Guest需要恢复
+vmm_timer_resume.001.R_VMM定时器恢复
+
+vmm_manager_system_suspend.001.IN_非BootCPU发起系统挂起
+vmm_manager_system_suspend.002.IN_系统挂起Guest为空
+vmm_manager_system_suspend.003.FI_Guest挂起失败
+vmm_manager_system_suspend.004.FI_非BootCPU下线失败
+vmm_manager_system_suspend.005.FI_IRQDomain挂起失败
+vmm_manager_system_suspend.006.FI_IOMMU挂起失败
+vmm_manager_system_suspend.007.R_系统挂起恢复成功
+vmm_manager_system_suspend.008.FI_IOMMU恢复失败
+
+vmm_manager_sync_regs_in_excep.001.R_同步寄存器标志关闭
+vmm_manager_sync_regs_in_excep.002.R_同步寄存器标志开启
+vmm_manager_enable_sync_regs_in_excep.001.R_启用同步寄存器标志
+
+vmm_manager_detect_virq_timeout.001.R_虚拟中断超时检测关闭
+vmm_manager_detect_virq_timeout.002.R_虚拟中断超时检测开启
+vmm_manager_virq_timeout_msecs.001.R_读取虚拟中断超时值
+
+vmm_manager_enable_detect_virq_timeout.001.IN_超时值为零
+vmm_manager_enable_detect_virq_timeout.002.IN_超时值超过上限
+vmm_manager_enable_detect_virq_timeout.003.R_启用虚拟中断超时检测
+vmm_manager_disable_detect_virq_timeout.001.R_关闭虚拟中断超时检测
