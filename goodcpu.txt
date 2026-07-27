@@ -1,0 +1,543 @@
+明白。这里不恢复真实位图，也不新增 __bitmap_and() 输出参数写回方案，而是沿用你当前已经完成的改写：
+#define vmm_cpumask_test_cpu(cpu, cpumask) \
+    ((vcast_cpumask_test_cpu_ret != 0U) ? 1 : 0)
+其余 cpumask 结果通过展开后的底层函数 Stub 返回值控制：
+vmm_cpumask_and()       → __bitmap_and()
+vmm_cpumask_weight()    → __bitmap_weight()
+vmm_cpumask_first()     → 当前已有改写，或其下层 find_first/find_next 函数
+vmm_cpumask_test_cpu()  → vcast_cpumask_test_cpu_ret
+在不增加多次调用序列 User Code 的前提下，使用 6 条用例完成 __vmm_manager_good_hcpu() 的完整路径覆盖。
+ 
+⸻
+ 
+一、先确认当前 cpumask 控制关系
+1. 
+vmm_cpumask_and
+当前展开为：
+static inline int vmm_cpumask_and(
+    struct vmm_cpumask *dstp,
+    const struct vmm_cpumask *src1p,
+    const struct vmm_cpumask *src2p)
+{
+    return bitmap_and(vmm_cpumask_bits(dstp),
+                      vmm_cpumask_bits(src1p),
+                      vmm_cpumask_bits(src2p),
+                      vmm_cpu_count);
+}
+由于 vmm_cpu_count 是运行期变量，不是编译期常量：
+small_const_nbits(vmm_cpu_count)
+应当为 false，最终调用：
+__bitmap_and(dst, src1, src2, nbits);
+因此在 VectorCAST 中直接配置：
+__bitmap_and：
+    return 0 或 1
+即可。
+不过需要明确：
+__bitmap_and() 的返回值只代表交集是否为空，不能修改 tmpmask.bits[]。 当前方案能够不写 dst，是因为后续 weight、test_cpu 和初始 HCPU 均已通过 Stub/宏隔离，不再依赖真实 tmpmask 位内容。
+ 
+⸻
+ 
+2. 
+vmm_cpumask_weight
+当前展开为：
+vmm_cpumask_weight()
+    → bitmap_weight()
+    → __bitmap_weight()
+所以直接配置：
+__bitmap_weight：
+    return 0、1 或 2
+即可控制：
+vmm_cpumask_weight(affinity) < 1
+的结果。
+ 
+⸻
+ 
+3. 
+vmm_cpumask_test_cpu
+保持你目前的改写，不要删除：
+#define vmm_cpumask_test_cpu(cpu, cpumask) \
+    ((vcast_cpumask_test_cpu_ret != 0U) ? 1 : 0)
+用例中设置：
+vcast_cpumask_test_cpu_ret = 0U;
+表示所有调用返回 false；设置：
+vcast_cpumask_test_cpu_ret = 1U;
+表示所有调用返回 true。
+由于这是统一返回值，不能在同一条用例中让 CPU0返回 true、CPU1返回 false。因此测试设计需要按不同用例分别覆盖。
+ 
+⸻
+ 
+4. 
+vmm_cpumask_first
+被测函数使用的是：
+u32 hcpu = vmm_cpumask_first(affinity);
+不是：
+vmm_cpumask_first_and()
+所以你给出的：
+vmm_cpumask_next_and()
+本身不影响该语句。
+本测试构造要求：
+vmm_cpumask_first(affinity) = 0
+请先看 Expanded Source：
+	•	如果你现有的 vmm_cpumask_next() 改写已经使其返回 n + 1，则 first 自然返回 0，不需要再处理；
+	•	如果 Expanded Source 中仍调用 find_first_bit()、find_next_bit() 或对应底层函数，将该底层 Stub 返回值设置为：
+return 0
+即可，不需要增加 User Code。
+以下所有用例都按初始：
+hcpu = 0
+设计。
+ 
+⸻
+ 
+二、保留的现有 User Code
+保留：
+u32 vcast_cpumask_test_cpu_ret;
+以及现有宏：
+#define vmm_cpumask_test_cpu(cpu, cpumask) \
+    ((vcast_cpumask_test_cpu_ret != 0U) ? 1 : 0)
+如果之前已经存在下面这个变量，直接继续使用：
+u32 vcast_scheduler_hcpu_out;
+若尚未存在，只增加该变量：
+/*
+ * 控制 vmm_scheduler_get_hcpu() 的输出 HCPU。
+ */
+u32 vcast_scheduler_hcpu_out;
+ 
+⸻
+ 
+三、
+vmm_scheduler_get_hcpu
+输出参数
+vmm_manager_vcpu_get_hcpu() 内部调用：
+vmm_scheduler_get_hcpu(vcpu, &vhcpu);
+在 vmm_scheduler_get_hcpu 的 Stub User Code 中保留或增加：
+/*
+ * 第二个形参名称以 Expanded Driver 中的实际名称为准。
+ * 若名称为 hcpu，则使用下面写法。
+ */
+if (hcpu != NULL) {
+    *hcpu = vcast_scheduler_hcpu_out;
+}
+返回值继续在 VectorCAST 中直接配置：
+return VMM_OK
+或：
+return VMM_EFAIL
+当需要 HCPU UNKNOWN 时，直接令：
+vmm_scheduler_get_hcpu：
+    return VMM_EFAIL
+实际函数会返回：
+VMM_VCPU_HCPU_UNKNOWN
+不依赖输出参数。
+ 
+⸻
+ 
+四、公共 Begin User Code：
+GH0-UC
+六条用例均可复制该基线，再按照各用例说明修改。
+static struct vmm_cpumask affinity;
+u32 v;
+
+memset(&affinity, 0, sizeof(affinity));
+
+/*
+ * 沿用现有的 manager VCPU 环境准备函数，
+ * 只用于设置 mngr 中各数组指针。
+ */
+vcast_prepare_vcpu_count = 1U;
+
+(void)vcast_manager_prepare_orphan_create_env(0);
+
+/*
+ * helper 原本用于 orphan_create，不适合直接表示
+ * good_hcpu 的已用/可用槽位关系，因此这里重新设置。
+ *
+ * TRUE：槽位可用，函数中直接 continue。
+ * FALSE：槽位已使用，需要参与负载检查。
+ */
+for (v = 0U;
+     v < (u32)CONFIG_MAX_VCPU_COUNT;
+     ++v) {
+    mngr.vcpu_avail_array[v] = TRUE;
+
+    mngr.vcpu_array[v].priority =
+        (u8)VMM_VCPU_DEF_PRIORITY;
+}
+
+/*
+ * 只让 VCPU0处于已使用状态。
+ * 因此 vmm_scheduler_get_hcpu 每条非早退用例最多调用一次。
+ */
+mngr.vcpu_avail_array[0] = FALSE;
+
+mngr.vcpu_array[0].priority =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+
+mngr.vcpu_count = 1U;
+
+/*
+ * 默认 HCPU 为 CPU0。
+ */
+vcast_scheduler_hcpu_out = 0U;
+
+/*
+ * 默认 cpumask_test_cpu 返回 true。
+ */
+vcast_cpumask_test_cpu_ret = 1U;
+
+<<vmm_manager.__vmm_manager_good_hcpu.priority>> =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+
+<<vmm_manager.__vmm_manager_good_hcpu.affinity>> =
+    &affinity;
+cpu_online_mask 沿用你当前已有的有效初始化，不需要修改其真实位值，因为 __bitmap_and 被 Stub，不读取输入位图内容。
+ 
+⸻
+ 
+五、测试用例
+__vmm_manager_good_hcpu.001.R
+场景
+定时器尚未启动，直接返回当前物理 CPU。
+Begin User Code
+复制 GH0-UC。
+Stub Processing
+__bitmap_and：
+    return 1
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+    （当前已有 first=0改写时不需要配置）
+
+vmm_timer_started：
+    return FALSE
+
+vmm_smp_processor_id：
+    return 3
+__bitmap_weight 不调用。
+期望值
+return = 3
+注释
+测试目的：验证定时器子系统尚未启动时，函数不执行 VCPU 负载统计，直接返回当前物理 CPU。
+用例类别：基于需求的测试
+预置条件：输入 affinity 有效；定时器未启动；当前物理 CPU 为 CPU3。
+测试步骤：
+step1、准备 manager VCPU 环境。
+step2、设置 __bitmap_and 返回非空。
+step3、设置 vmm_timer_started 返回 FALSE。
+step4、设置 vmm_smp_processor_id 返回 3。
+step5、调用 __vmm_manager_good_hcpu。
+step6、观察函数返回值。
+用例来源：需求分析。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：定时器未启动时选择当前物理 CPU。
+其它说明：覆盖复合条件第一个子条件 !vmm_timer_started() 为 true；vmm_cpumask_weight 因短路不执行。
+通过准则：函数返回 3，测试用例通过。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.002.IN
+场景
+定时器已启动，但 affinity 权重为 0。
+Begin User Code
+复制 GH0-UC。
+Stub Processing
+__bitmap_and：
+    return 0
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+
+vmm_timer_started：
+    return TRUE
+
+__bitmap_weight：
+    return 0
+
+vmm_smp_processor_id：
+    return 2
+期望值
+return = 2
+注释
+测试目的：验证定时器已启动但有效 affinity 为空时，函数返回当前物理 CPU。
+用例类别：接口测试
+预置条件：定时器已启动；__bitmap_weight 返回 0；当前物理 CPU 为 CPU2。
+测试步骤：
+step1、准备 manager 和 affinity 输入。
+step2、设置 __bitmap_and 返回空交集。
+step3、设置 vmm_timer_started 返回 TRUE。
+step4、设置 __bitmap_weight 返回 0。
+step5、设置当前物理 CPU 为 CPU2。
+step6、调用 __vmm_manager_good_hcpu。
+step7、观察函数返回值。
+用例来源：接口分析、无效等价类。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：有效 affinity 为空。
+其它说明：覆盖复合条件第一个子条件为 false、第二个子条件 vmm_cpumask_weight(affinity)<1 为 true。
+通过准则：函数返回 2，测试用例通过。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.003.R
+场景
+已使用 VCPU 的优先级与目标优先级不同。
+Begin User Code
+复制 GH0-UC，然后修改：
+/*
+ * 选择一个与输入优先级不同的有效优先级。
+ */
+mngr.vcpu_array[0].priority =
+    ((u8)VMM_VCPU_DEF_PRIORITY ==
+     (u8)VMM_VCPU_MIN_PRIORITY) ?
+    (u8)VMM_VCPU_MAX_PRIORITY :
+    (u8)VMM_VCPU_MIN_PRIORITY;
+
+vcast_scheduler_hcpu_out = 0U;
+vcast_cpumask_test_cpu_ret = 1U;
+Stub Processing
+__bitmap_and：
+    return 1
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+
+vmm_timer_started：
+    return TRUE
+
+__bitmap_weight：
+    return 1
+
+vmm_scheduler_get_hcpu：
+    return VMM_OK
+    输出 HCPU = 0
+期望值
+return = 0
+注释
+测试目的：验证已使用 VCPU 的优先级与目标优先级不同时，该 VCPU 不计入 HCPU 负载。
+用例类别：基于需求的测试
+预置条件：定时器已启动；有效 affinity 权重非零；VCPU0已使用且优先级与输入优先级不同。
+测试步骤：
+step1、构造一个已使用 VCPU。
+step2、设置该 VCPU 的优先级与输入优先级不同。
+step3、设置 HCPU 查询成功并返回 CPU0。
+step4、设置 cpumask 测试结果为 true。
+step5、调用 __vmm_manager_good_hcpu。
+step6、观察函数返回值。
+用例来源：需求分析。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：忽略不同优先级的已使用 VCPU。
+其它说明：覆盖 vcpu->priority != priority 为 true；后续 UNKNOWN 和 cpumask 子条件因短路不执行。其余 VCPU 槽位为可用状态，同时覆盖 avail_array 为 true的 continue 路径。
+通过准则：函数返回初始 CPU0，测试用例通过。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.004.FI
+场景
+VCPU HCPU 查询失败，得到 VMM_VCPU_HCPU_UNKNOWN。
+Begin User Code
+复制 GH0-UC。
+mngr.vcpu_array[0].priority =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+
+vcast_cpumask_test_cpu_ret = 1U;
+Stub Processing
+__bitmap_and：
+    return 1
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+
+vmm_timer_started：
+    return TRUE
+
+__bitmap_weight：
+    return 1
+
+vmm_scheduler_get_hcpu：
+    return VMM_EFAIL
+期望值
+return = 0
+注释
+测试目的：通过故障注入验证已使用 VCPU 的 HCPU 查询失败时，函数跳过该 VCPU。
+用例类别：故障注入测试
+预置条件：定时器已启动；有效 affinity 权重非零；VCPU优先级与目标优先级相同；HCPU查询接口返回失败。
+测试步骤：
+step1、构造一个同优先级已使用 VCPU。
+step2、设置 vmm_scheduler_get_hcpu 返回 VMM_EFAIL。
+step3、调用 __vmm_manager_good_hcpu。
+step4、观察函数返回值。
+用例来源：故障注入。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：已使用 VCPU 的 HCPU 状态未知。
+其它说明：实际 vmm_manager_vcpu_get_hcpu 将下层错误转换为 VMM_VCPU_HCPU_UNKNOWN；覆盖 cur_hcpu == VMM_VCPU_HCPU_UNKNOWN 为 true，cpumask 子条件因短路不执行。
+通过准则：函数返回初始 CPU0，测试用例通过。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.005.R
+场景
+VCPU 当前 HCPU 不在 affinity 中，同时覆盖候选 CPU 不在 affinity 中。
+Begin User Code
+复制 GH0-UC，然后设置：
+mngr.vcpu_array[0].priority =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+
+vcast_scheduler_hcpu_out = 0U;
+
+/*
+ * 所有 vmm_cpumask_test_cpu 调用返回 false。
+ */
+vcast_cpumask_test_cpu_ret = 0U;
+Stub Processing
+__bitmap_and：
+    return 1
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+
+vmm_timer_started：
+    return TRUE
+
+__bitmap_weight：
+    return 1
+
+vmm_scheduler_get_hcpu：
+    return VMM_OK
+    输出 HCPU = 0
+期望值
+return = 0
+注释
+测试目的：验证已使用 VCPU 的当前 HCPU 不属于 affinity 时不统计该 VCPU，并跳过所有不属于 affinity 的候选 CPU。
+用例类别：基于需求的测试
+预置条件：定时器已启动；VCPU优先级匹配；HCPU查询成功；重定义后的 vmm_cpumask_test_cpu 返回 false。
+测试步骤：
+step1、构造一个同优先级已使用 VCPU。
+step2、设置 HCPU查询返回 CPU0。
+step3、将 vcast_cpumask_test_cpu_ret 设置为 0。
+step4、调用 __vmm_manager_good_hcpu。
+step5、观察函数返回值。
+用例来源：需求分析。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：VCPU及候选 CPU 位于 affinity 范围外。
+其它说明：覆盖第一个 VCPU循环中 !vmm_cpumask_test_cpu(cur_hcpu, affinity) 为 true；同时覆盖候选循环中 !vmm_cpumask_test_cpu(c, affinity) 为 true和 continue路径。
+通过准则：函数返回初始 CPU0，测试用例通过。
+ 
+⸻
+ 
+__vmm_manager_good_hcpu.006.R
+场景
+CPU0已有一个同优先级 VCPU，函数选择负载更低的 CPU1。
+Begin User Code
+复制 GH0-UC，然后设置：
+mngr.vcpu_array[0].priority =
+    (u8)VMM_VCPU_DEF_PRIORITY;
+
+/*
+ * 已使用 VCPU0当前运行在初始候选 CPU0。
+ */
+vcast_scheduler_hcpu_out = 0U;
+
+/*
+ * VCPU CPU检查和候选 CPU检查全部返回 true。
+ */
+vcast_cpumask_test_cpu_ret = 1U;
+Stub Processing
+__bitmap_and：
+    return 1
+
+vmm_cpumask_first 对应的底层函数：
+    return 0
+
+vmm_timer_started：
+    return TRUE
+
+__bitmap_weight：
+    return 2
+
+vmm_scheduler_get_hcpu：
+    return VMM_OK
+    输出 HCPU = 0
+期望值
+return = 1
+路径关系
+该用例中：
+初始 hcpu = 0
+
+VCPU负载统计后：
+    count[0] = 1
+    count[1] = 0
+
+min = count[0] = 1
+候选循环：
+c = 0：
+    count[0] < min
+    1 < 1
+    false
+
+c = 1：
+    count[1] < min
+    0 < 1
+    true
+
+因此：
+    hcpu = 1
+注释
+测试目的：验证初始候选 CPU负载较高时，函数选择负载更低的其他 HCPU。
+用例类别：基于需求的测试
+预置条件：定时器已启动；有效 affinity 权重为2；存在一个同优先级已使用 VCPU且其当前 HCPU为CPU0；cpumask检查返回true。
+测试步骤：
+step1、构造一个运行在 CPU0的同优先级 VCPU。
+step2、设置 __bitmap_weight 返回2。
+step3、设置 vmm_scheduler_get_hcpu 输出CPU0。
+step4、设置 vcast_cpumask_test_cpu_ret 为1。
+step5、调用 __vmm_manager_good_hcpu。
+step6、观察函数返回值。
+用例来源：需求分析、有效等价类。
+追溯ID：__vmm_manager_good_hcpu。
+等价列表：在多个候选 HCPU中选择低负载 CPU。
+其它说明：覆盖 VCPU负载计数递增；候选 CPU检查为true；count[c] < min 分别为false和true；覆盖更新min及hcpu的路径。该用例要求 CONFIG_CPU_COUNT至少为2。
+通过准则：函数返回CPU1，即返回值为1，测试用例通过。
+ 
+⸻
+ 
+六、六条用例的 Stub 配置汇总
+用例	__bitmap_and	vmm_timer_started	__bitmap_weight	get_hcpu	test_cpu	期望
+.001	1	FALSE	不调用	不调用	1	3
+.002	0	TRUE	0	不调用	1	2
+.003	1	TRUE	1	OK，CPU0	1	0
+.004	1	TRUE	1	EFAIL	1	0
+.005	1	TRUE	1	OK，CPU0	0	0
+.006	1	TRUE	2	OK，CPU0	1	1
+所有用例中：
+vmm_cpumask_first 对应结果 = 0
+ 
+⸻
+ 
+七、覆盖路径对应关系
+源码条件/语句	覆盖用例
+!vmm_timer_started() 为 true	.001
+!vmm_timer_started() 为 false	.002～.006
+vmm_cpumask_weight()<1 为 true	.002
+vmm_cpumask_weight()<1 为 false	.003～.006
+vcpu_avail_array[v] 为 true	.003～.006 中 VCPU1以后
+vcpu_avail_array[v] 为 false	.003～.006 中 VCPU0
+priority != priority 为 true	.003
+priority != priority 为 false	.004～.006
+cur_hcpu == UNKNOWN 为 true	.004
+cur_hcpu == UNKNOWN 为 false	.005、.006
+第一处 test_cpu 为 false	.005
+第一处 test_cpu 为 true	.006
+count[cur_hcpu]++	.006
+第二处 test_cpu 为 false	.005
+第二处 test_cpu 为 true	.003、.004、.006
+count[c] < min 为 false	.006 的 c=0
+count[c] < min 为 true	.006 的 c=1
+更新 min 和 hcpu	.006
+ 
+⸻
+ 
+八、正式名称汇总
+__vmm_manager_good_hcpu.001.R_定时器未启动返回当前CPU
+__vmm_manager_good_hcpu.002.IN_Affinity为空返回当前CPU
+__vmm_manager_good_hcpu.003.R_跳过不同优先级VCPU
+__vmm_manager_good_hcpu.004.FI_跳过HCPU未知VCPU
+__vmm_manager_good_hcpu.005.R_跳过Affinity外VCPU和候选CPU
+__vmm_manager_good_hcpu.006.R_选择较低负载HCPU
+这版不删除你现有的 vmm_cpumask_test_cpu 改写，也不新增位图输出数组；cpumask 的控制只使用当前宏变量、__bitmap_weight 返回值以及 vmm_cpumask_first 对应底层返回值。__bitmap_and 只配置返回码，不依赖其输出参数。
