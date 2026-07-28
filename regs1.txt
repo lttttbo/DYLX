@@ -1,0 +1,855 @@
+下面按你之前允许的分批方式处理。本批完整补充：
+vexpress_cfgctrl_read
+vexpress_cfgctrl_write
+arm_sysregs_emulator_probe
+每条用例均保留独立注释，类别只使用：
+基于需求的测试
+接口测试
+故障注入测试
+arm_sysregs_reg_read() 和 arm_sysregs_reg_write() 的 switch 分支数量较多，单独作为下一批整理，避免省略任一 case 的构造和注释。
+ 
+⸻
+ 
+一、
+vexpress_cfgctrl_read
+1. 公共 Begin User Code：
+VCR0-UC
+后续用例在此基础上修改入参。
+static struct arm_sysregs s;
+static u32 val;
+
+static u32 db_voltage_store[2];
+static u32 db_clock_store[2];
+
+memset(&s, 0, sizeof(s));
+memset(db_voltage_store, 0, sizeof(db_voltage_store));
+memset(db_clock_store, 0, sizeof(db_clock_store));
+
+db_voltage_store[0] = 900000U;
+db_voltage_store[1] = 1000000U;
+
+db_clock_store[0] = 60000000U;
+db_clock_store[1] = 23750000U;
+
+s.db_voltage = db_voltage_store;
+s.db_num_vsensors = 2U;
+
+s.db_clock = db_clock_store;
+s.db_num_clocks = 2U;
+
+s.mb_clock[0] = 50000000U;
+s.mb_clock[1] = 23750000U;
+
+val = 0xDEADBEEFU;
+
+<<arm_sysregs.vexpress_cfgctrl_read.s>> =
+    &s;
+
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_VOLT;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_MB;
+
+<<arm_sysregs.vexpress_cfgctrl_read.position>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_read.val>> =
+    &val;
+vmm_printf 使用空 Stub，不检查打印内容。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.001.IN_DCC非零
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.dcc>> =
+    1U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证 DCC 编号非零时，配置控制读取接口判定请求不受支持并返回失败。 用例类别：接口测试 预置条件：状态对象及输出指针有效；DCC 设置为 1；position 和 site 合法。 测试步骤： step1、初始化配置控制状态。 step2、将 dcc 设置为 1。 step3、调用 vexpress_cfgctrl_read。 step4、观察返回值和输出值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：非零 DCC 请求。 其它说明：覆盖入口复合条件中 dcc != 0 为 true，后续条件因短路不执行。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.002.IN_Position非零
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.position>> =
+    1U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证板卡堆叠位置非零时，配置控制读取接口返回失败。 用例类别：接口测试 预置条件：DCC 为 0；position 为 1；site 合法。 测试步骤： step1、初始化有效状态对象。 step2、将 position 设置为 1。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：非零板卡堆叠位置。 其它说明：覆盖入口复合条件中 DCC 判断为 false、position 判断为 true。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.003.IN_Site无效
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_DB2;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证 site 既不是主板也不是第一块子板时，配置控制读取接口返回失败。 用例类别：接口测试 预置条件：DCC 和 position 均为 0；site 设置为 DB2。 测试步骤： step1、初始化状态对象。 step2、将 site 设置为 SYS_CFG_SITE_DB2。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：不支持的配置站点。 其它说明：覆盖 site != MB 和 site != DB1 同时为 true的路径。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.004.R_读取子板电压成功
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_VOLT;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_DB1;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    0U;
+期望值
+return = TRUE
+val = 900000
+用例注释
+测试目的：验证读取 DB1 范围内的电压传感器时，函数返回对应传感器值。 用例类别：基于需求的测试 预置条件：DB1 配置两个电压传感器；device 为 0。 测试步骤： step1、初始化 DB1 电压数组。 step2、指定 VOLT、DB1、device 0。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：有效 DB1 电压传感器读取。 其它说明：覆盖 DB1 电压判断整体为 true的直接成功返回路径。 通过准则：函数返回 TRUE，输出值为 900000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.005.IN_子板电压索引越界
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_VOLT;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_DB1;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    2U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证 DB1 电压传感器索引等于传感器数量时，读取请求失败。 用例类别：接口测试 预置条件：DB1 电压传感器数量为 2；device 为边界外值 2。 测试步骤： step1、初始化两个电压传感器。 step2、将 device 设置为 2。 step3、调用被测函数。 step4、观察返回值和输出值。 用例来源：接口分析、边界值分析。 追溯ID：vexpress_cfgctrl_read。 等价列表：DB1 电压索引上边界外。 其它说明：覆盖 site==DB1 为 true、device<db_num_vsensors 为 false；主板电压判断因 site 不匹配而失败。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.006.R_读取主板电压成功
+Begin User Code
+复制 VCR0-UC，保持：
+function = SYS_CFG_VOLT;
+site = SYS_CFG_SITE_MB;
+device = 0U;
+期望值
+return = TRUE
+val = 3300000
+用例注释
+测试目的：验证读取主板唯一电压传感器时，函数返回固定的 3.3V 电压值。 用例类别：基于需求的测试 预置条件：site 为主板；device 为 0。 测试步骤： step1、设置功能为电压读取。 step2、指定主板 device 0。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：有效主板电压读取。 其它说明：覆盖 DB1 电压 site 判断为 false，以及主板电压判断整体为 true。 通过准则：函数返回 TRUE，输出值为 3300000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.007.IN_主板电压设备号无效
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    1U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证主板电压设备号不是 0时，函数返回失败。 用例类别：接口测试 预置条件：site 为主板；device 为 1。 测试步骤： step1、设置功能为电压读取。 step2、将主板 device 设置为 1。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：无效主板电压设备号。 其它说明：覆盖主板电压判断中 site 为 true、device 等于 0为 false。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.008.R_读取主板时钟成功
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_OSC;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_MB;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    0U;
+期望值
+return = TRUE
+val = 50000000
+用例注释
+测试目的：验证读取主板有效时钟设备时，函数返回对应时钟频率。 用例类别：基于需求的测试 预置条件：主板时钟 0配置为 50MHz。 测试步骤： step1、初始化主板时钟数组。 step2、指定 OSC、MB、device 0。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：有效主板时钟读取。 其它说明：覆盖主板时钟判断整体为 true。 通过准则：函数返回 TRUE，输出值为 50000000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.009.IN_主板时钟索引越界
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_OSC;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_MB;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    (u32)sizeof(s.mb_clock);
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证主板时钟设备号等于源码允许范围上界时，函数返回失败。 用例类别：接口测试 预置条件：site 为主板；device 等于 sizeof(s.mb_clock)。 测试步骤： step1、设置功能为 OSC。 step2、将 device 设置为比较边界值。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vexpress_cfgctrl_read。 等价列表：主板时钟设备索引上边界外。 其它说明：覆盖主板时钟判断中 site 为 true、device 范围判断为 false；不会访问数组。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.010.R_读取子板时钟成功
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_OSC;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_DB1;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    0U;
+期望值
+return = TRUE
+val = 60000000
+用例注释
+测试目的：验证读取 DB1 范围内的时钟设备时，函数返回对应时钟频率。 用例类别：基于需求的测试 预置条件：DB1 配置两个时钟；device 为 0。 测试步骤： step1、初始化 DB1 时钟数组。 step2、指定 OSC、DB1、device 0。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：有效 DB1 时钟读取。 其它说明：覆盖主板时钟 site 判断为 false，以及 DB1 时钟判断整体为 true。 通过准则：函数返回 TRUE，输出值为 60000000。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.011.IN_子板时钟索引越界
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    SYS_CFG_OSC;
+
+<<arm_sysregs.vexpress_cfgctrl_read.site>> =
+    SYS_CFG_SITE_DB1;
+
+<<arm_sysregs.vexpress_cfgctrl_read.device>> =
+    2U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证 DB1 时钟索引等于时钟数量时，函数返回失败。 用例类别：接口测试 预置条件：DB1 时钟数量为 2；device 为 2。 测试步骤： step1、初始化 DB1 时钟配置。 step2、将 device 设置为上边界外值。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、边界值分析。 追溯ID：vexpress_cfgctrl_read。 等价列表：DB1 时钟索引越界。 其它说明：覆盖 DB1 时钟判断中 site 为 true、device 范围判断为 false。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+vexpress_cfgctrl_read.012.IN_不支持的功能号
+Begin User Code
+复制 VCR0-UC，修改：
+<<arm_sysregs.vexpress_cfgctrl_read.function>> =
+    0U;
+期望值
+return = FALSE
+val = 0xDEADBEEF
+用例注释
+测试目的：验证 function 既不是 VOLT也不是 OSC 时，读取接口返回失败。 用例类别：接口测试 预置条件：入口参数合法；function 为未实现值 0。 测试步骤： step1、设置合法 DCC、site 和 position。 step2、将 function 设置为 0。 step3、调用被测函数。 step4、观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_read。 等价列表：未实现的配置读取功能。 其它说明：覆盖 switch 的 default 分支。 通过准则：函数返回 FALSE，输出值保持不变。
+ 
+⸻
+ 
+名称汇总
+vexpress_cfgctrl_read.001.IN_DCC非零
+vexpress_cfgctrl_read.002.IN_Position非零
+vexpress_cfgctrl_read.003.IN_Site无效
+vexpress_cfgctrl_read.004.R_读取子板电压成功
+vexpress_cfgctrl_read.005.IN_子板电压索引越界
+vexpress_cfgctrl_read.006.R_读取主板电压成功
+vexpress_cfgctrl_read.007.IN_主板电压设备号无效
+vexpress_cfgctrl_read.008.R_读取主板时钟成功
+vexpress_cfgctrl_read.009.IN_主板时钟索引越界
+vexpress_cfgctrl_read.010.R_读取子板时钟成功
+vexpress_cfgctrl_read.011.IN_子板时钟索引越界
+vexpress_cfgctrl_read.012.IN_不支持的功能号
+ 
+⸻
+ 
+二、
+vexpress_cfgctrl_write
+1. 公共 Begin User Code：
+VCW0-UC
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+static u32 db_clock_store[2];
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+memset(db_clock_store, 0, sizeof(db_clock_store));
+
+db_clock_store[0] = 60000000U;
+db_clock_store[1] = 23750000U;
+
+s.guest = &guest;
+
+s.db_clock = db_clock_store;
+s.db_num_clocks = 2U;
+
+s.mb_clock[0] = 50000000U;
+s.mb_clock[1] = 23750000U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.s>> =
+    &s;
+
+<<arm_sysregs.vexpress_cfgctrl_write.dcc>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.function>> =
+    SYS_CFG_OSC;
+
+<<arm_sysregs.vexpress_cfgctrl_write.site>> =
+    SYS_CFG_SITE_MB;
+
+<<arm_sysregs.vexpress_cfgctrl_write.position>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.device>> =
+    0U;
+
+<<arm_sysregs.vexpress_cfgctrl_write.val>> =
+    25000000U;
+公共 Stub：
+vmm_manager_guest_shutdown_request：
+    return VMM_OK
+
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+
+vmm_printf：
+    空实现
+ 
+⸻
+ 
+vexpress_cfgctrl_write.001.IN_DCC非零
+将 dcc 设置为 1。
+期望：
+return = FALSE
+用例注释： 测试目的：验证 DCC 非零时写配置请求被拒绝。 用例类别：接口测试 预置条件：状态对象有效；position 和 site 合法。 测试步骤：设置 dcc 为 1；调用函数；观察返回值。 用例来源：接口分析、无效等价类。 追溯ID：vexpress_cfgctrl_write。 等价列表：非零 DCC 写请求。 其它说明：覆盖入口复合条件第一个子条件为 true。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.002.IN_Position非零
+将 position 设置为 1。
+期望 FALSE。
+用例注释： 测试目的：验证 position 非零时写配置请求失败。 用例类别：接口测试 预置条件：DCC 为 0；site 合法。 测试步骤：设置 position 为 1；调用函数；观察返回值。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：非零堆叠位置。 其它说明：覆盖入口 DCC 判断为 false、position 判断为 true。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.003.IN_Site无效
+将 site 设置为 SYS_CFG_SITE_DB2。
+期望 FALSE。
+用例注释： 测试目的：验证不支持的 site 写请求失败。 用例类别：接口测试 预置条件：DCC 和 position 为 0。 测试步骤：设置 site 为 DB2；调用函数；观察返回值。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：不支持的配置站点。 其它说明：覆盖 site 既不是 MB也不是 DB1的路径。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.004.R_写主板时钟成功
+保持 OSC、MB、device 0、val 25000000。
+期望：
+return = TRUE
+s.mb_clock[0] = 25000000
+用例注释： 测试目的：验证主板有效时钟设备可被更新。 用例类别：基于需求的测试 预置条件：主板时钟数组有效。 测试步骤：指定主板 device 0和新频率；调用函数；检查数组。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效主板时钟写入。 其它说明：覆盖第一个 OSC 判断整体为 true。 通过准则：返回 TRUE，主板时钟 0更新为 25000000。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.005.IN_主板时钟索引越界
+设置：
+device = (u32)sizeof(s.mb_clock);
+期望 FALSE。
+用例注释： 测试目的：验证主板时钟索引达到比较上界时写入失败。 用例类别：接口测试 预置条件：site 为 MB。 测试步骤：设置 device 为 sizeof(mb_clock)；调用函数；观察结果。 用例来源：边界值分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：主板时钟索引越界。 其它说明：覆盖主板 site 为 true、device 范围判断为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.006.R_写子板时钟成功
+设置 DB1、device 0。
+期望：
+return = TRUE
+db_clock_store[0] = 25000000
+用例注释： 测试目的：验证 DB1 有效时钟设备可被更新。 用例类别：基于需求的测试 预置条件：DB1 配置两个时钟。 测试步骤：指定 DB1 device 0；调用函数；检查时钟值。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效子板时钟写入。 其它说明：覆盖主板 site 判断为 false以及 DB1 时钟判断整体为 true。 通过准则：函数返回 TRUE，DB1 时钟 0更新。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.007.IN_子板时钟索引越界
+设置 DB1、device 2。
+期望 FALSE。
+用例注释： 测试目的：验证 DB1 时钟索引等于时钟数量时写入失败。 用例类别：接口测试 预置条件：DB1 时钟数量为 2。 测试步骤：设置 device 为 2；调用函数；观察结果。 用例来源：边界值分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：子板时钟索引越界。 其它说明：覆盖 DB1 site 为 true、device 范围判断为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+以下 MUXFPGA、SHUTDOWN、REBOOT、DVIMODE 的判断形式均为：
+site == SYS_CFG_SITE_MB && device == 0
+每个功能分别使用三条用例覆盖：
+MB + device 0：整体 true
+DB1 + device 0：site false
+MB + device 1：site true、device false
+ 
+⸻
+ 
+vexpress_cfgctrl_write.008.R_主板MUXFPGA写入成功
+function = SYS_CFG_MUXFPGA;
+site = SYS_CFG_SITE_MB;
+device = 0;
+期望 TRUE。
+用例注释： 测试目的：验证主板 MUXFPGA device 0请求被接受。 用例类别：基于需求的测试 预置条件：入口参数合法。 测试步骤：设置 MUXFPGA、MB、device 0；调用函数；观察结果。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效 MUXFPGA 请求。 其它说明：该功能不修改硬件状态，仅返回成功。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.009.IN_子板MUXFPGA写入失败
+function = SYS_CFG_MUXFPGA;
+site = SYS_CFG_SITE_DB1;
+device = 0;
+期望 FALSE。
+用例注释： 测试目的：验证 MUXFPGA 请求的 site 不是主板时返回失败。 用例类别：接口测试 预置条件：device 为 0。 测试步骤：设置 site 为 DB1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：非主板 MUXFPGA 请求。 其它说明：覆盖 site 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.010.IN_MUXFPGA设备号无效
+function = SYS_CFG_MUXFPGA;
+site = SYS_CFG_SITE_MB;
+device = 1;
+期望 FALSE。
+用例注释： 测试目的：验证主板 MUXFPGA device 非零时返回失败。 用例类别：接口测试 预置条件：site 为主板。 测试步骤：设置 device 为 1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：无效 MUXFPGA 设备号。 其它说明：覆盖 site 为 true、device 判断为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.011.R_提交Guest关机请求
+function = SYS_CFG_SHUTDOWN;
+site = SYS_CFG_SITE_MB;
+device = 0;
+期望 TRUE。
+用例注释： 测试目的：验证主板 SHUTDOWN 请求触发 Guest 关机请求并返回成功。 用例类别：基于需求的测试 预置条件：Guest 指针有效。 测试步骤：设置 SHUTDOWN、MB、device 0；调用函数；观察返回值。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效 Guest 关机请求。 其它说明：下层关机接口返回值不参与本函数结果。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.012.IN_子板关机请求失败
+设置 SHUTDOWN、DB1、device 0，期望 FALSE。
+用例注释： 测试目的：验证非主板 SHUTDOWN 请求不被支持。 用例类别：接口测试 预置条件：device 为 0。 测试步骤：设置 site 为 DB1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：非主板关机请求。 其它说明：覆盖 SHUTDOWN site 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.013.IN_关机设备号无效
+设置 SHUTDOWN、MB、device 1，期望 FALSE。
+用例注释： 测试目的：验证主板 SHUTDOWN device 非零时请求失败。 用例类别：接口测试 预置条件：site 为主板。 测试步骤：设置 device 为 1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：无效关机设备号。 其它说明：覆盖 site 为 true、device 判断为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.014.R_提交Guest重启请求
+设置 REBOOT、MB、device 0，期望 TRUE。
+用例注释： 测试目的：验证有效 REBOOT 请求触发 Guest 重启流程。 用例类别：基于需求的测试 预置条件：Guest 有效。 测试步骤：设置 REBOOT、MB、device 0；调用函数；观察返回值。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效 Guest 重启请求。 其它说明：下层重启接口返回值被忽略。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.015.IN_子板重启请求失败
+设置 REBOOT、DB1、device 0，期望 FALSE。
+用例注释： 测试目的：验证非主板 REBOOT 请求失败。 用例类别：接口测试 预置条件：device 为 0。 测试步骤：设置 DB1 site；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：非主板重启请求。 其它说明：覆盖 REBOOT site 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.016.IN_重启设备号无效
+设置 REBOOT、MB、device 1，期望 FALSE。
+用例注释： 测试目的：验证主板 REBOOT device 非零时请求失败。 用例类别：接口测试 预置条件：site 为主板。 测试步骤：设置 device 为 1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：无效重启设备号。 其它说明：覆盖 REBOOT device 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.017.R_DVIMODE请求成功
+设置 DVIMODE、MB、device 0，期望 TRUE。
+用例注释： 测试目的：验证主板 DVIMODE device 0请求被接受。 用例类别：基于需求的测试 预置条件：入口参数合法。 测试步骤：设置 DVIMODE、MB、device 0；调用函数；观察结果。 用例来源：需求分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：有效 DVI 模式请求。 其它说明：Xvisor 忽略模式值但将请求视为成功。 通过准则：函数返回 TRUE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.018.IN_子板DVIMODE请求失败
+设置 DVIMODE、DB1、device 0，期望 FALSE。
+用例注释： 测试目的：验证非主板 DVIMODE 请求失败。 用例类别：接口测试 预置条件：device 为 0。 测试步骤：设置 site 为 DB1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：非主板 DVI 模式请求。 其它说明：覆盖 DVIMODE site 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.019.IN_DVIMODE设备号无效
+设置 DVIMODE、MB、device 1，期望 FALSE。
+用例注释： 测试目的：验证主板 DVIMODE device 非零时请求失败。 用例类别：接口测试 预置条件：site 为主板。 测试步骤：设置 device 为 1；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：无效 DVI 模式设备号。 其它说明：覆盖 DVIMODE device 子条件为 false。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+vexpress_cfgctrl_write.020.IN_不支持的功能号
+设置：
+function = 0U;
+期望 FALSE。
+用例注释： 测试目的：验证未实现的 SYS_CFG 功能号返回失败。 用例类别：接口测试 预置条件：DCC、site 和 position 合法。 测试步骤：设置 function 为 0；调用函数；观察结果。 用例来源：接口分析。 追溯ID：vexpress_cfgctrl_write。 等价列表：未实现的配置写功能。 其它说明：覆盖 switch default。 通过准则：函数返回 FALSE。
+ 
+⸻
+ 
+名称汇总
+vexpress_cfgctrl_write.001.IN_DCC非零
+vexpress_cfgctrl_write.002.IN_Position非零
+vexpress_cfgctrl_write.003.IN_Site无效
+vexpress_cfgctrl_write.004.R_写主板时钟成功
+vexpress_cfgctrl_write.005.IN_主板时钟索引越界
+vexpress_cfgctrl_write.006.R_写子板时钟成功
+vexpress_cfgctrl_write.007.IN_子板时钟索引越界
+vexpress_cfgctrl_write.008.R_主板MUXFPGA写入成功
+vexpress_cfgctrl_write.009.IN_子板MUXFPGA写入失败
+vexpress_cfgctrl_write.010.IN_MUXFPGA设备号无效
+vexpress_cfgctrl_write.011.R_提交Guest关机请求
+vexpress_cfgctrl_write.012.IN_子板关机请求失败
+vexpress_cfgctrl_write.013.IN_关机设备号无效
+vexpress_cfgctrl_write.014.R_提交Guest重启请求
+vexpress_cfgctrl_write.015.IN_子板重启请求失败
+vexpress_cfgctrl_write.016.IN_重启设备号无效
+vexpress_cfgctrl_write.017.R_DVIMODE请求成功
+vexpress_cfgctrl_write.018.IN_子板DVIMODE请求失败
+vexpress_cfgctrl_write.019.IN_DVIMODE设备号无效
+vexpress_cfgctrl_write.020.IN_不支持的功能号
+ 
+⸻
+ 
+三、
+arm_sysregs_emulator_probe
+1. 扩展现有 
+vmm_devtree_read_u32_array
+Stub
+你之前已有：
+u32 vcast_dt_read_u32_array_count;
+u32 vcast_dt_read_u32_array_out_seq[3];
+probe 的第一次调用读取两个元素：
+s->mux_in_irq[0]
+s->mux_in_irq[1]
+第二次通过 inline 的 vmm_devtree_read_u32() 读取一个元素：
+s->mux_out_irq
+只需额外增加第二元素序列：
+u32 vcast_dt_read_u32_array_out1_seq[3];
+将原 vmm_devtree_read_u32_array Stub 输出代码替换为：
+u32 vcast_idx;
+
+vcast_idx =
+    (vcast_dt_read_u32_array_count < 3U) ?
+    vcast_dt_read_u32_array_count : 2U;
+
+if ((out != NULL) && (sz >= (size_t)1U)) {
+    out[0] =
+        vcast_dt_read_u32_array_out_seq[
+            vcast_idx];
+}
+
+if ((out != NULL) && (sz >= (size_t)2U)) {
+    out[1] =
+        vcast_dt_read_u32_array_out1_seq[
+            vcast_idx];
+}
+
+vcast_dt_read_u32_array_count++;
+该修改不影响之前 guest_create 中 sz==1 的用例。
+公共复位增加：
+vcast_dt_read_u32_array_out1_seq[0] = 0U;
+vcast_dt_read_u32_array_out1_seq[1] = 0U;
+vcast_dt_read_u32_array_out1_seq[2] = 0U;
+ 
+⸻
+ 
+2. 公共 Begin User Code：
+PROBE0-UC
+static struct vmm_guest guest;
+static struct vmm_emudev edev;
+static struct vmm_devtree_node node;
+static struct vmm_devtree_nodeid eid;
+
+static struct arm_sysregs state_store;
+
+static u32 voltage_store[2];
+static u32 clock_store[2];
+static u32 clock_reset_store[2];
+
+memset(&guest, 0, sizeof(guest));
+memset(&edev, 0, sizeof(edev));
+memset(&node, 0, sizeof(node));
+memset(&eid, 0, sizeof(eid));
+
+memset(&state_store, 0, sizeof(state_store));
+memset(voltage_store, 0, sizeof(voltage_store));
+memset(clock_store, 0, sizeof(clock_store));
+memset(clock_reset_store, 0, sizeof(clock_reset_store));
+
+edev.node = &node;
+edev.priv = NULL;
+
+vcast_dt_read_u32_array_count = 0U;
+
+/* 第1次：mux_in_irq[0..1] */
+vcast_dt_read_u32_array_out_seq[0] = 32U;
+vcast_dt_read_u32_array_out1_seq[0] = 33U;
+
+/* 第2次：mux_out_irq */
+vcast_dt_read_u32_array_out_seq[1] = 40U;
+vcast_dt_read_u32_array_out1_seq[1] = 0U;
+
+<<arm_sysregs.arm_sysregs_emulator_probe.guest>> =
+    &guest;
+
+<<arm_sysregs.arm_sysregs_emulator_probe.edev>> =
+    &edev;
+
+<<arm_sysregs.arm_sysregs_emulator_probe.eid>> =
+    &eid;
+公共 Stub：
+vmm_timer_timestamp：
+    return 1000
+
+vmm_free：
+    空实现
+
+vmm_devemu_register_irqchip：
+    空实现
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.001.FI_状态对象分配失败
+Begin User Code
+复制 PROBE0-UC。
+Stub Processing
+vmm_zalloc：
+    第1次 return NULL
+期望值
+return = VMM_ENOMEM
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证系统寄存器状态对象分配失败时，probe 返回内存不足。 用例类别：故障注入测试 预置条件：Guest、模拟设备和匹配表项有效；第一次分配返回 NULL。 测试步骤： step1、初始化 probe 入参。 step2、设置状态对象分配失败。 step3、调用 arm_sysregs_emulator_probe。 step4、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：状态对象内存分配失败。 其它说明：覆盖 !s 的直接失败路径。 通过准则：函数返回 VMM_ENOMEM，edev->priv 保持 NULL。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.002.FI_无匹配数据且MUX输入读取失败
+Begin User Code
+复制 PROBE0-UC，保持：
+eid.data = NULL;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+
+vmm_devtree_read_u32_array：
+    第1次 return VMM_EIO
+期望值
+return = VMM_EIO
+edev.priv = NULL
+用例注释
+测试目的：验证匹配表项不包含板级数据且读取 MUX 输入中断失败时，probe 清理状态对象并返回错误。 用例类别：故障注入测试 预置条件：状态对象分配成功；eid->data=NULL；MUX 输入属性读取失败。 测试步骤： step1、设置匹配数据为空。 step2、设置第一次设备树数组读取失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：无匹配数据且 MUX 输入读取失败。 其它说明：覆盖 eid->data 为 false，以及三个动态数组清理判断均为 false。 通过准则：函数返回 VMM_EIO，edev->priv 保持 NULL。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.003.R_零传感器零时钟Probe成功
+Begin User Code
+复制 PROBE0-UC，增加：
+static u32 data_zero[] = {
+    VEXPRESS_SYSID_CA9,
+    VEXPRESS_PROCID_CA9,
+    0U, /* db_num_vsensors */
+    0U  /* db_num_clocks */
+};
+
+eid.data = data_zero;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+
+vmm_devtree_read_u32_array：
+    第1次 return VMM_OK
+    第2次 return VMM_OK
+期望值
+return = VMM_OK
+edev.priv = &state_store
+
+state_store.db_num_vsensors = 0
+state_store.db_num_clocks = 0
+
+state_store.mux_in_irq[0] = 32
+state_store.mux_in_irq[1] = 33
+state_store.mux_out_irq = 40
+用例注释
+测试目的：验证匹配数据不配置电压传感器和子板时钟时，probe 可完成基础初始化。 用例类别：基于需求的测试 预置条件：匹配数据有效；两个数量字段均为 0；设备树中断属性读取成功。 测试步骤： step1、构造零传感器、零时钟匹配数据。 step2、设置状态对象分配成功。 step3、设置两次设备树读取成功。 step4、调用被测函数。 step5、检查状态对象和 edev->priv。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_emulator_probe。 等价列表：无子板传感器和时钟的设备初始化。 其它说明：覆盖 eid->data 为 true，两个数量判断均为 false，以及 probe 成功路径。 通过准则：函数返回 VMM_OK，中断号及私有状态设置正确。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.004.FI_电压数组分配失败
+Begin User Code
+复制 PROBE0-UC，增加：
+static u32 data_voltage[] = {
+    VEXPRESS_SYSID_CA15,
+    VEXPRESS_PROCID_CA15,
+    1U,
+    900000U,
+    0U
+};
+
+eid.data = data_voltage;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return NULL
+期望值
+return = VMM_ENOMEM
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证子板电压数组分配失败时，probe 释放状态对象并返回内存不足。 用例类别：故障注入测试 预置条件：匹配数据配置一个电压传感器；状态对象分配成功；电压数组分配失败。 测试步骤： step1、构造一个电压传感器配置。 step2、设置第二次 vmm_zalloc 返回 NULL。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：子板电压数组分配失败。 其它说明：覆盖 db_num_vsensors 为非零和 !db_voltage 为 true。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.005.FI_时钟数组分配失败
+Begin User Code
+复制 PROBE0-UC，增加：
+static u32 data_clock[] = {
+    VEXPRESS_SYSID_CA15,
+    VEXPRESS_PROCID_CA15,
+    0U,
+    1U,
+    60000000U
+};
+
+eid.data = data_clock;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return NULL
+期望值
+return = VMM_ENOMEM
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证子板时钟数组分配失败时，probe 返回内存不足。 用例类别：故障注入测试 预置条件：电压传感器数量为 0；子板时钟数量为 1；时钟数组分配失败。 测试步骤： step1、构造单时钟匹配数据。 step2、设置状态对象分配成功、时钟数组分配失败。 step3、调用被测函数。 step4、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：子板时钟数组分配失败。 其它说明：覆盖传感器数量判断为 false、时钟数量判断为 true和 !db_clock 路径。 通过准则：函数返回 VMM_ENOMEM。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.006.FI_时钟复位数组分配失败
+Begin User Code
+复制 PROBE0-UC，增加：
+static u32 data_full_one[] = {
+    VEXPRESS_SYSID_CA15,
+    VEXPRESS_PROCID_CA15,
+    1U,
+    900000U,
+    1U,
+    60000000U
+};
+
+eid.data = data_full_one;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return voltage_store
+    第3次 return clock_store
+    第4次 return NULL
+期望值
+return = VMM_ENOMEM
+state_store.db_clock = NULL
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证时钟复位值数组分配失败时，probe 释放已分配时钟和电压资源。 用例类别：故障注入测试 预置条件：状态、电压数组和时钟数组分配成功；时钟复位数组分配失败。 测试步骤： step1、构造单电压、单时钟配置。 step2、设置第四次分配失败。 step3、调用被测函数。 step4、检查返回值和 db_clock 字段。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：时钟复位数组分配失败。 其它说明：覆盖 !db_clock_reset 路径以及显式将 db_clock 置为 NULL的清理逻辑。 通过准则：函数返回 VMM_ENOMEM，state_store.db_clock 为 NULL。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.007.FI_MUX输入读取失败并清理动态资源
+Begin User Code
+复制 PROBE0-UC，使用 data_full_one：
+eid.data = data_full_one;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return voltage_store
+    第3次 return clock_store
+    第4次 return clock_reset_store
+
+vmm_devtree_read_u32_array：
+    第1次 return VMM_EIO
+期望值
+return = VMM_EIO
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证动态资源全部分配成功后，MUX 输入中断读取失败会执行完整清理。 用例类别：故障注入测试 预置条件：状态、电压、时钟及复位数组分配成功；MUX 输入属性读取失败。 测试步骤： step1、准备完整匹配数据。 step2、设置四次内存分配成功。 step3、注入第一次设备树读取失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：完整资源环境下 MUX 输入读取失败。 其它说明：覆盖清理路径中 db_clock、db_clock_reset 和 db_voltage 三个判断均为 true。 通过准则：函数返回 VMM_EIO，edev->priv 未设置。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.008.FI_MUX输出读取失败
+Begin User Code
+与 .007.FI 相同。
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return voltage_store
+    第3次 return clock_store
+    第4次 return clock_reset_store
+
+vmm_devtree_read_u32_array：
+    第1次 return VMM_OK
+    第2次 return VMM_EIO
+期望值
+return = VMM_EIO
+edev.priv = NULL
+用例注释
+测试目的：通过故障注入验证 MUX 输入中断读取成功但 MUX 输出中断读取失败时，probe 清理全部动态资源。 用例类别：故障注入测试 预置条件：所有动态数组分配成功；第一次设备树读取成功；第二次读取失败。 测试步骤： step1、准备完整状态数据。 step2、设置 MUX 输入读取成功。 step3、注入 MUX 输出读取失败。 step4、调用被测函数。 step5、观察返回值。 用例来源：故障注入。 追溯ID：arm_sysregs_emulator_probe。 等价列表：MUX 输出中断属性读取失败。 其它说明：第二次调用来源于 inline vmm_devtree_read_u32() 展开后的 vmm_devtree_read_u32_array()。 通过准则：函数返回 VMM_EIO，edev->priv 保持 NULL。
+ 
+⸻
+ 
+arm_sysregs_emulator_probe.009.R_完整动态配置Probe成功
+Begin User Code
+复制 PROBE0-UC，增加：
+static u32 data_full_two[] = {
+    VEXPRESS_SYSID_CA9,
+    VEXPRESS_PROCID_CA9,
+
+    2U,
+    900000U,
+    1000000U,
+
+    2U,
+    60000000U,
+    23750000U
+};
+
+eid.data = data_full_two;
+Stub Processing
+vmm_zalloc：
+    第1次 return &state_store
+    第2次 return voltage_store
+    第3次 return clock_store
+    第4次 return clock_reset_store
+
+vmm_devtree_read_u32_array：
+    第1次 return VMM_OK
+    第2次 return VMM_OK
+期望值
+return = VMM_OK
+edev.priv = &state_store
+
+state_store.sys_id = VEXPRESS_SYSID_CA9
+state_store.proc_id = VEXPRESS_PROCID_CA9
+
+state_store.db_num_vsensors = 2
+voltage_store[0] = 900000
+voltage_store[1] = 1000000
+
+state_store.db_num_clocks = 2
+clock_reset_store[0] = 60000000
+clock_reset_store[1] = 23750000
+
+state_store.mux_in_irq[0] = 32
+state_store.mux_in_irq[1] = 33
+state_store.mux_out_irq = 40
+用例注释
+测试目的：验证包含多个电压传感器和多个子板时钟的完整配置能够完成 probe 初始化。 用例类别：基于需求的测试 预置条件：匹配数据配置两个电压传感器和两个时钟；所有内存分配及设备树读取成功。 测试步骤： step1、构造完整匹配数据。 step2、设置四次内存分配返回对应静态存储。 step3、设置两次设备树读取成功。 step4、调用被测函数。 step5、检查复制后的数组、IRQ及私有指针。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_emulator_probe。 等价列表：完整 VExpress 动态配置初始化。 其它说明：覆盖电压和时钟复制循环的进入、多次迭代及自然退出路径。 通过准则：函数返回 VMM_OK，所有板级数据和 IRQ 配置正确写入状态对象。
+ 
+⸻
+ 
+名称汇总
+arm_sysregs_emulator_probe.001.FI_状态对象分配失败
+arm_sysregs_emulator_probe.002.FI_无匹配数据且MUX输入读取失败
+arm_sysregs_emulator_probe.003.R_零传感器零时钟Probe成功
+arm_sysregs_emulator_probe.004.FI_电压数组分配失败
+arm_sysregs_emulator_probe.005.FI_时钟数组分配失败
+arm_sysregs_emulator_probe.006.FI_时钟复位数组分配失败
+arm_sysregs_emulator_probe.007.FI_MUX输入读取失败并清理动态资源
+arm_sysregs_emulator_probe.008.FI_MUX输出读取失败
+arm_sysregs_emulator_probe.009.R_完整动态配置Probe成功
