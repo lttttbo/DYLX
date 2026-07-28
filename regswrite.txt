@@ -1,0 +1,1341 @@
+你说得对。上一版把大量用例压缩成表格和统一注释，无法直接作为正式测试用例录入，也没有清楚说明每一条用例实际构造了什么。
+下面只重新整理 arm_sysregs_reg_write()。每条用例都包含独立的构造、Stub、期望结果和完整注释。测试数据构造允许引用公共基线，但注释中的测试步骤全部描述该用例实际设置和执行的内容。
+ 
+⸻
+ 
+一、公共配置
+1. 公共 Begin User Code：
+ARW0-UC
+除特别说明外，各用例可复制以下代码，再按照对应条目修改字段：
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+INIT_RW_LOCK(&s.lock);
+
+s.guest = &guest;
+
+/*
+ * 默认构造 VExpress 板型。
+ * 以下写法沿用当前 arm_sysregs.c 中 board_id(s)
+ * 从 sys_id 对应字段提取板型的实现。
+ */
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.leds = 0x0000A5A5U;
+s.lockval = 0x00001234U;
+
+s.cfgdata1 = 0x0000A5A5U;
+s.cfgdata2 = 0x0000A5A5U;
+
+s.flags = 0x000000F0U;
+s.nvflags = 0x00000F00U;
+
+s.resetlevel = 0x00000055U;
+
+s.sys_clcd = 0x0000FFFFU;
+s.sys_cfgdata = 0x0000A5A5U;
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0x000000F0U;
+
+s.mux_out_irq = 45U;
+
+s.mb_clock[0] = 50000000U;
+
+<<arm_sysregs.arm_sysregs_reg_write.s>> =
+    &s;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x08U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+本批沿用当前环境中已经可正常工作的锁处理方案。以下外部函数保持 VectorCAST 默认 Stub 或设置返回 0，不需要验证调用次数：
+vmm_manager_guest_reboot_request
+vmm_devemu_emulate_irq
+vmm_printf
+ 
+⸻
+ 
+二、基础寄存器写入
+arm_sysregs_reg_write.001.R_LED寄存器掩码写入
+Begin User Code
+复制 ARW0-UC，保持：
+s.leds = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x08U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x00005505
+计算关系为：
+(0xA5A5U & 0x0F0FU) | 0x5000U
+    == 0x5505U
+用例注释
+测试目的：验证向 LED 寄存器写入时，函数先按照 regmask 保留原寄存器中的指定位，再合并 regval。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效；LED 初始值为 0xA5A5；写掩码为 0x0F0F；写入值为 0x5000。 测试步骤： step1、将 LED 寄存器初始化为 0xA5A5。 step2、将写偏移设置为 0x08。 step3、将保留掩码设置为 0x0F0F，写入值设置为 0x5000。 step4、调用 arm_sysregs_reg_write。 step5、检查函数返回值和 s.leds。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：LED 寄存器有效掩码写入。 其它说明：本用例覆盖 case 0x08 的寄存器更新路径。 通过准则：函数返回 VMM_OK，s.leds 等于 0x5505。
+ 
+⸻
+ 
+arm_sysregs_reg_write.002.R_LOCK写入解锁值
+Begin User Code
+复制 ARW0-UC，修改：
+s.lockval = 0x00001234U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x20U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0xFFFFFFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    (u32)LOCK_VALUE;
+Expected Return
+VMM_OK
+关键期望
+s.lockval = LOCK_VALUE
+用例注释
+测试目的：验证向 LOCK 寄存器写入规定的解锁值时，函数保存完整的 LOCK_VALUE。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效；LOCK 寄存器具有非解锁初值。 测试步骤： step1、将 s.lockval 初始化为 0x1234。 step2、将写偏移设置为 0x20。 step3、将写入值设置为 LOCK_VALUE。 step4、调用 arm_sysregs_reg_write。 step5、检查返回值及 LOCK 寄存器结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：写入合法解锁值。 其它说明：覆盖 regval == LOCK_VALUE 为 true 的分支。 通过准则：函数返回 VMM_OK，s.lockval 等于 LOCK_VALUE。
+ 
+⸻
+ 
+arm_sysregs_reg_write.003.R_LOCK写入普通值
+Begin User Code
+复制 ARW0-UC，修改：
+s.lockval = 0x00001234U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x20U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0xFFFFFFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x0000FFFFU;
+Expected Return
+VMM_OK
+关键期望
+s.lockval = 0x00007FFF
+用例注释
+测试目的：验证向 LOCK 寄存器写入非解锁值时，函数只保留写入值的低 15 位。 用例类别：基于需求的测试 预置条件：LOCK 寄存器对象有效；写入值为 0xFFFF，且不等于 LOCK_VALUE。 测试步骤： step1、将 LOCK 寄存器初始化为确定值。 step2、将写偏移设置为 0x20。 step3、将写入值设置为 0xFFFF。 step4、调用被测函数。 step5、检查 LOCK 寄存器是否被限制为 0x7FFF。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：写入普通锁控制值。 其它说明：覆盖 regval == LOCK_VALUE 为 false 的分支以及 regval & 0x7fff 处理。 通过准则：函数返回 VMM_OK，s.lockval 等于 0x7FFF。
+ 
+⸻
+ 
+arm_sysregs_reg_write.004.R_CFGDATA1掩码写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.cfgdata1 = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x28U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+Expected Return
+VMM_OK
+关键期望
+s.cfgdata1 = 0x00005505
+用例注释
+测试目的：验证 CFGDATA1 寄存器按照保留掩码和新写入值完成更新。 用例类别：基于需求的测试 预置条件：CFGDATA1 初始值为 0xA5A5；掩码和写入值有效。 测试步骤： step1、初始化 s.cfgdata1 为 0xA5A5。 step2、将写偏移设置为 0x28。 step3、设置保留掩码为 0x0F0F，写入值为 0x5000。 step4、调用被测函数。 step5、检查 CFGDATA1 的更新结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：CFGDATA1 有效掩码写入。 其它说明：覆盖 case 0x28 的两次位运算更新。 通过准则：函数返回 VMM_OK，s.cfgdata1 等于 0x5505。
+ 
+⸻
+ 
+arm_sysregs_reg_write.005.R_CFGDATA2掩码写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.cfgdata2 = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x2CU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+Expected Return
+VMM_OK
+关键期望
+s.cfgdata2 = 0x00005505
+用例注释
+测试目的：验证 CFGDATA2 寄存器按照保留掩码和新写入值完成更新。 用例类别：基于需求的测试 预置条件：CFGDATA2 初始值为 0xA5A5；写入参数有效。 测试步骤： step1、初始化 s.cfgdata2 为 0xA5A5。 step2、将写偏移设置为 0x2C。 step3、设置掩码为 0x0F0F，写入值为 0x5000。 step4、调用被测函数。 step5、检查 CFGDATA2 的最终值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：CFGDATA2 有效掩码写入。 其它说明：覆盖 case 0x2c 的寄存器更新路径。 通过准则：函数返回 VMM_OK，s.cfgdata2 等于 0x5505。
+ 
+⸻
+ 
+arm_sysregs_reg_write.006.R_FLAGSSET置位
+Begin User Code
+复制 ARW0-UC，修改：
+s.flags = 0x000000F0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x30U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x0000000FU;
+Expected Return
+VMM_OK
+关键期望
+s.flags = 0x000000FF
+用例注释
+测试目的：验证 FLAGSSET 写操作将 regval 中置位的标志合并到现有 FLAGS 中。 用例类别：基于需求的测试 预置条件：FLAGS 初始值为 0xF0；写入值为 0x0F。 测试步骤： step1、初始化 FLAGS 为 0xF0。 step2、将写偏移设置为 0x30。 step3、将写入值设置为 0x0F。 step4、调用被测函数。 step5、检查 FLAGS 的最终值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：普通标志位置位。 其它说明：覆盖 s->flags |= regval 语句。 通过准则：函数返回 VMM_OK，s.flags 等于 0xFF。
+ 
+⸻
+ 
+arm_sysregs_reg_write.007.R_FLAGSCLR清位
+Begin User Code
+复制 ARW0-UC，修改：
+s.flags = 0x000000FFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x34U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x0000000FU;
+Expected Return
+VMM_OK
+关键期望
+s.flags = 0x000000F0
+用例注释
+测试目的：验证 FLAGSCLR 写操作清除 regval 指定的标志位。 用例类别：基于需求的测试 预置条件：FLAGS 初始值为 0xFF；清除掩码为 0x0F。 测试步骤： step1、初始化 FLAGS 为 0xFF。 step2、将写偏移设置为 0x34。 step3、设置写入值为 0x0F。 step4、调用被测函数。 step5、检查低四位是否被清除。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：普通标志位清除。 其它说明：覆盖 s->flags &= ~regval 语句。 通过准则：函数返回 VMM_OK，s.flags 等于 0xF0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.008.R_NVFLAGSSET置位
+Begin User Code
+复制 ARW0-UC，修改：
+s.nvflags = 0x00000F00U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x38U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x000000F0U;
+Expected Return
+VMM_OK
+关键期望
+s.nvflags = 0x00000FF0
+用例注释
+测试目的：验证 NVFLAGSSET 将写入值中的置位项合并到非易失标志寄存器。 用例类别：基于需求的测试 预置条件：NVFLAGS 初始值为 0x0F00；写入值为 0x00F0。 测试步骤： step1、初始化 NVFLAGS。 step2、将写偏移设置为 0x38。 step3、将写入值设置为 0x00F0。 step4、调用被测函数。 step5、检查 NVFLAGS 的合并结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：非易失标志位置位。 其它说明：覆盖 s->nvflags |= regval 语句。 通过准则：函数返回 VMM_OK，s.nvflags 等于 0x0FF0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.009.R_NVFLAGSCLR清位
+Begin User Code
+复制 ARW0-UC，修改：
+s.nvflags = 0x00000FF0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x3CU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x000000F0U;
+Expected Return
+VMM_OK
+关键期望
+s.nvflags = 0x00000F00
+用例注释
+测试目的：验证 NVFLAGSCLR 清除 regval 指定的非易失标志位。 用例类别：基于需求的测试 预置条件：NVFLAGS 初始值为 0x0FF0；写入值为 0x00F0。 测试步骤： step1、初始化 NVFLAGS 为 0x0FF0。 step2、将写偏移设置为 0x3C。 step3、将写入值设置为 0x00F0。 step4、调用被测函数。 step5、检查目标标志位是否被清除。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：非易失标志位清除。 其它说明：覆盖 s->nvflags &= ~regval 语句。 通过准则：函数返回 VMM_OK，s.nvflags 等于 0x0F00。
+ 
+⸻
+ 
+三、OSC 保留寄存器
+arm_sysregs_reg_write.010.R_OSC0保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x0CU;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+s.lockval = 0x00001234
+用例注释
+测试目的：验证向 OSC0 保留寄存器写入时，函数接受访问但不修改系统寄存器状态。 用例类别：基于需求的测试 预置条件：状态对象中的 LED 和 LOCK 字段具有确定初值。 测试步骤： step1、将 LED 和 LOCK 设置为确定的哨兵值。 step2、将写偏移设置为 OSC0 地址 0x0C。 step3、调用 arm_sysregs_reg_write。 step4、检查返回值及哨兵字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSC0 保留写操作。 其它说明：覆盖 case 0x0c 标签。该寄存器当前没有实现写入行为。 通过准则：函数返回 VMM_OK，关键状态字段保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.011.R_OSC1保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x10U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+s.lockval = 0x00001234
+用例注释
+测试目的：验证 OSC1 寄存器写访问进入对应保留分支，并且不改变状态对象。 用例类别：基于需求的测试 预置条件：状态对象有效，关键字段具有确定初值。 测试步骤： step1、初始化 LED 和 LOCK 哨兵值。 step2、将写偏移设置为 0x10。 step3、调用被测函数。 step4、检查函数结果和关键字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSC1 保留写操作。 其它说明：覆盖 case 0x10 标签。 通过准则：函数返回 VMM_OK，关键字段保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.012.R_OSC2保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x14U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+s.lockval = 0x00001234
+用例注释
+测试目的：验证 OSC2 寄存器写访问被接受但不产生状态修改。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效。 测试步骤： step1、记录 LED 和 LOCK 初始值。 step2、将写偏移设置为 OSC2 地址 0x14。 step3、执行寄存器写函数。 step4、检查返回值和状态字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSC2 保留写操作。 其它说明：覆盖 case 0x14 标签。 通过准则：函数返回 VMM_OK，状态字段保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.013.R_OSC3保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x18U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+s.lockval = 0x00001234
+用例注释
+测试目的：验证 OSC3 保留寄存器写操作不会改变系统寄存器状态。 用例类别：基于需求的测试 预置条件：系统寄存器状态已初始化。 测试步骤： step1、设置关键状态字段为确定值。 step2、将写偏移设置为 0x18。 step3、调用被测函数。 step4、检查返回值和状态字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSC3 保留写操作。 其它说明：覆盖 case 0x18 标签。 通过准则：函数返回 VMM_OK，关键字段保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.014.R_OSC4保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x1CU;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+s.lockval = 0x00001234
+用例注释
+测试目的：验证 OSC4 保留寄存器写入被忽略且函数正常返回。 用例类别：基于需求的测试 预置条件：状态对象有效，关键字段已设置为非零值。 测试步骤： step1、设置 LED 和 LOCK 初值。 step2、将写偏移设置为 OSC4 地址 0x1C。 step3、调用被测函数。 step4、检查返回值和关键字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSC4 保留写操作。 其它说明：覆盖 case 0x1c 标签。 通过准则：函数返回 VMM_OK，关键状态字段不变。
+ 
+⸻
+ 
+四、RESETCTL
+arm_sysregs_reg_write.015.R_PB926未解锁忽略复位控制
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PB926 << (u32)16);
+
+s.lockval = 0U;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000100U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000055
+用例注释
+测试目的：验证 PB926 板型在 LOCK 未解锁时，RESETCTL 写操作不会修改复位级别。 用例类别：基于需求的测试 预置条件：板型为 PB926；lockval 不等于 LOCK_VALUE；复位级别初值为 0x55。 测试步骤： step1、将板型设置为 PB926。 step2、将 LOCK 设置为未解锁状态。 step3、向 RESETCTL 写入 PB926 的重启控制位 0x100。 step4、调用被测函数。 step5、检查 resetlevel 是否保持原值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PB926 锁定状态下写 RESETCTL。 其它说明：覆盖 PB926 分支中 s->lockval == LOCK_VALUE 为 false。 通过准则：函数返回 VMM_OK，s.resetlevel 保持 0x55。
+ 
+⸻
+ 
+arm_sysregs_reg_write.016.R_PB926解锁但不触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PB926 << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0
+用例注释
+测试目的：验证 PB926 已解锁但写入值未包含 0x100 时，函数更新 RESETCTL，但不提交 Guest 重启请求。 用例类别：基于需求的测试 预置条件：板型为 PB926；LOCK 已解锁；写入值不包含重启控制位。 测试步骤： step1、设置 PB926 板型和有效解锁值。 step2、将 RESETCTL 初值设置为非零。 step3、向 RESETCTL 写入 0。 step4、调用被测函数。 step5、检查复位级别更新结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PB926 解锁后普通 RESETCTL 写入。 其它说明：覆盖锁判断为 true，以及 s->resetlevel & 0x100 为 false。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.017.R_PB926解锁触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PB926 << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000100U;
+Stub Processing
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000100
+用例注释
+测试目的：验证 PB926 在已解锁状态下写入 0x100 复位控制位时，函数进入 Guest 重启请求路径。 用例类别：基于需求的测试 预置条件：板型为 PB926；LOCK 已解锁；Guest 指针有效。 测试步骤： step1、设置 PB926 板型。 step2、将 LOCK 设置为 LOCK_VALUE。 step3、向 RESETCTL 写入 0x100。 step4、调用被测函数。 step5、检查 RESETCTL 更新值和函数返回值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PB926 重启控制位有效写入。 其它说明：覆盖 PB926 内层重启条件为 true。下层重启请求的返回值不影响本函数结果。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0x100。
+ 
+⸻
+ 
+arm_sysregs_reg_write.018.R_PBX未解锁忽略复位控制
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PBX << (u32)16);
+
+s.lockval = 0U;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000004U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000055
+用例注释
+测试目的：验证 PBX 板型在未解锁状态下不会接受 RESETCTL 更新。 用例类别：基于需求的测试 预置条件：板型为 PBX；LOCK 未解锁；复位级别具有确定初值。 测试步骤： step1、设置 PBX 板型。 step2、将 LOCK 设置为未解锁状态。 step3、向 RESETCTL 写入 0x04。 step4、调用被测函数。 step5、检查复位级别是否保持不变。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PBX 锁定状态下写 RESETCTL。 其它说明：覆盖 PBX/PBA8 共用处理体中的锁判断 false 路径，同时执行 PBX case 标签。 通过准则：函数返回 VMM_OK，s.resetlevel 保持 0x55。
+ 
+⸻
+ 
+arm_sysregs_reg_write.019.R_PBA8解锁但不触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PBA8 << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0
+用例注释
+测试目的：验证 PBA8 已解锁但未设置 0x04 重启位时，只更新 RESETCTL，不触发重启。 用例类别：基于需求的测试 预置条件：板型为 PBA8；LOCK 已解锁；写入值为 0。 测试步骤： step1、设置 PBA8 板型和有效解锁值。 step2、将 RESETCTL 初值设置为 0x55。 step3、向 RESETCTL 写入 0。 step4、调用被测函数。 step5、检查复位级别。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PBA8 解锁后普通 RESETCTL 写入。 其它说明：覆盖 PBX/PBA8 共用处理体中的锁判断 true和 resetlevel & 0x04 为 false。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.020.R_PBA8解锁触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PBA8 << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000004U;
+Stub Processing
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000004
+用例注释
+测试目的：验证 PBA8 在解锁状态下写入 0x04 时进入 Guest 重启请求路径。 用例类别：基于需求的测试 预置条件：板型为 PBA8；LOCK 已解锁；Guest 指针有效。 测试步骤： step1、设置 PBA8 板型。 step2、写入有效解锁值。 step3、向 RESETCTL 写入 0x04。 step4、调用被测函数。 step5、检查 RESETCTL 结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PBA8 重启控制位有效写入。 其它说明：覆盖 PBX/PBA8 共用处理体中的重启位判断 true。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0x04。
+ 
+⸻
+ 
+arm_sysregs_reg_write.021.R_EB未解锁忽略复位控制
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.lockval = 0U;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000008U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000055
+用例注释
+测试目的：验证 EB 板型在 LOCK 未解锁时忽略 RESETCTL 写入。 用例类别：基于需求的测试 预置条件：板型为 EB；LOCK 未解锁；复位级别为 0x55。 测试步骤： step1、设置 EB 板型。 step2、保持 LOCK 为未解锁状态。 step3、向 RESETCTL 写入 0x08。 step4、调用被测函数。 step5、检查复位级别是否未改变。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：EB 锁定状态下写 RESETCTL。 其它说明：覆盖 EB 分支中的锁判断为 false。 通过准则：函数返回 VMM_OK，s.resetlevel 保持 0x55。
+ 
+⸻
+ 
+arm_sysregs_reg_write.022.R_EB解锁但不触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0U;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0
+用例注释
+测试目的：验证 EB 已解锁但写入值不包含 0x08 时，只更新复位寄存器而不触发重启。 用例类别：基于需求的测试 预置条件：板型为 EB；LOCK 已解锁；写入值为 0。 测试步骤： step1、设置 EB 板型和解锁状态。 step2、将 RESETCTL 初始值设置为非零。 step3、向 RESETCTL 写入 0。 step4、调用被测函数。 step5、检查更新后的复位级别。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：EB 解锁后普通 RESETCTL 写入。 其它说明：覆盖 EB 锁判断为 true及 resetlevel & 0x08 为 false。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.023.R_EB解锁触发重启
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.lockval = (u32)LOCK_VALUE;
+s.resetlevel = 0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000008U;
+Stub Processing
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000008
+用例注释
+测试目的：验证 EB 在解锁状态下写入 0x08 重启位时进入 Guest 重启流程。 用例类别：基于需求的测试 预置条件：板型为 EB；LOCK 已解锁；Guest 指针有效。 测试步骤： step1、设置 EB 板型。 step2、将 LOCK 设置为解锁值。 step3、向 RESETCTL 写入 0x08。 step4、调用被测函数。 step5、检查 RESETCTL 写入结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：EB 重启控制位有效写入。 其它说明：覆盖 EB 重启条件为 true。 通过准则：函数返回 VMM_OK，s.resetlevel 等于 0x08。
+ 
+⸻
+ 
+arm_sysregs_reg_write.024.R_VExpress复位控制保留写
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0xFFFFFFFFU;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000055
+用例注释
+测试目的：验证 VExpress 板型的 RESETCTL 被视为保留寄存器，写入不会改变复位状态。 用例类别：基于需求的测试 预置条件：板型为 VExpress；复位级别具有非零初值。 测试步骤： step1、设置 VExpress 板型。 step2、将 resetlevel 初始化为 0x55。 step3、向 RESETCTL 写入全 1。 step4、调用被测函数。 step5、检查复位级别。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress RESETCTL 保留写。 其它说明：覆盖 RESETCTL 内层板型 switch 的 BOARD_ID_VEXPRESS 分支。 通过准则：函数返回 VMM_OK，s.resetlevel 保持 0x55。
+ 
+⸻
+ 
+arm_sysregs_reg_write.025.IN_未知板型复位控制保留写
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)0xFFFU << (u32)16);
+
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x40U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0xFFFFFFFFU;
+Expected Return
+VMM_OK
+关键期望
+s.resetlevel = 0x00000055
+用例注释
+测试目的：验证未知板型访问 RESETCTL 时进入默认保留处理，不修改复位状态。 用例类别：接口测试 预置条件：板型字段设置为未定义值 0xFFF；复位级别为 0x55。 测试步骤： step1、将板型编码设置为未知值。 step2、设置 RESETCTL 初值。 step3、向 RESETCTL 写入全 1。 step4、调用被测函数。 step5、检查返回值和复位级别。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：未知板型 RESETCTL 写访问。 其它说明：覆盖 RESETCTL 内层 switch 的 default 分支。 通过准则：函数返回 VMM_OK，s.resetlevel 保持不变。
+ 
+⸻
+ 
+五、PCICTL 与 CLCD
+arm_sysregs_reg_write.026.R_PCI控制寄存器保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x44U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 PCICTL 写访问被接受，但当前实现不执行状态更新。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效，LED 字段作为状态哨兵。 测试步骤： step1、初始化状态对象和 LED 哨兵值。 step2、将写偏移设置为 0x44。 step3、调用被测函数。 step4、检查函数返回值及哨兵字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：PCICTL 保留写操作。 其它说明：覆盖 case 0x44。 通过准则：函数返回 VMM_OK，状态哨兵保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.027.R_PB926FlashCLCD写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PB926 << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+s.mux_out_irq = 45U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x4CU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Stub Processing
+vmm_devemu_emulate_irq：
+    return VMM_OK
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x00003F34
+用例注释
+测试目的：验证 PB926 板型写 FLASH/CLCD 控制寄存器时保留只读位 13:8，更新其他位并执行 MUX 中断模拟。 用例类别：基于需求的测试 预置条件：板型为 PB926；sys_clcd 初值为 0xFFFF；写入值为 0x1234。 测试步骤： step1、设置 PB926 板型和 CLCD 初值。 step2、将写偏移设置为 FLASH 地址 0x4C。 step3、写入 0x1234。 step4、调用被测函数。 step5、检查 CLCD 状态结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PB926 FLASH/CLCD 有效写入。 其它说明：覆盖外层 case 0x4c、PB926 板型分支及 MUX IRQ 调用路径。 通过准则：函数返回 VMM_OK，s.sys_clcd 等于 0x3F34。
+ 
+⸻
+ 
+arm_sysregs_reg_write.028.R_EBCLCD写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x50U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x00003F34
+用例注释
+测试目的：验证 EB 板型写 CLCD 寄存器时保留位 13:8，更新其余可写位。 用例类别：基于需求的测试 预置条件：板型为 EB；CLCD 初值为 0xFFFF。 测试步骤： step1、设置 EB 板型。 step2、将 CLCD 写偏移设置为 0x50。 step3、写入 0x1234。 step4、调用被测函数。 step5、检查 CLCD 寄存器结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：EB CLCD 有效写入。 其它说明：覆盖外层 case 0x50 和 EB 板型处理路径。 通过准则：函数返回 VMM_OK，s.sys_clcd 等于 0x3F34。
+ 
+⸻
+ 
+arm_sysregs_reg_write.029.R_PBA8CLCD写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PBA8 << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x50U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x000012B4
+用例注释
+测试目的：验证 PBA8 板型写 CLCD 时保留原寄存器的 bit7，并使用 regval 更新其他位。 用例类别：基于需求的测试 预置条件：板型为 PBA8；CLCD 初值为 0xFFFF；写入值的 bit7为 0。 测试步骤： step1、设置 PBA8 板型和 CLCD 初值。 step2、将写偏移设置为 0x50。 step3、写入 0x1234。 step4、调用被测函数。 step5、检查 bit7 保留后的寄存器结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PBA8 CLCD 有效写入。 其它说明：覆盖 PBA8/PBX 共用处理体以及 PBA8 case 标签。 通过准则：函数返回 VMM_OK，s.sys_clcd 等于 0x12B4。
+ 
+⸻
+ 
+arm_sysregs_reg_write.030.R_PBXCLCD写入
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_PBX << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x50U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x000012B4
+用例注释
+测试目的：验证 PBX 板型写 CLCD 时只保留原寄存器 bit7，并更新其余位。 用例类别：基于需求的测试 预置条件：板型为 PBX；CLCD 初值和写入值均有效。 测试步骤： step1、设置 PBX 板型。 step2、将 CLCD 初值设置为 0xFFFF。 step3、向 0x50 写入 0x1234。 step4、调用被测函数。 step5、检查 CLCD 最终值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：PBX CLCD 有效写入。 其它说明：覆盖 PBA8/PBX 共用处理体中的 PBX case 标签。 通过准则：函数返回 VMM_OK，s.sys_clcd 等于 0x12B4。
+ 
+⸻
+ 
+arm_sysregs_reg_write.031.R_VExpressCLCD保留写
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x50U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x0000FFFF
+用例注释
+测试目的：验证 VExpress 板型的 CLCD 系统控制寄存器未实现，写操作不改变状态。 用例类别：基于需求的测试 预置条件：板型为 VExpress；CLCD 初值为 0xFFFF。 测试步骤： step1、设置 VExpress 板型。 step2、设置 CLCD 初值。 step3、向 CLCD 偏移写入 0x1234。 step4、调用被测函数。 step5、检查 CLCD 是否保持原值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress CLCD 保留写。 其它说明：覆盖 CLCD 内层 switch 的 VExpress 分支。 通过准则：函数返回 VMM_OK，s.sys_clcd 保持 0xFFFF。
+ 
+⸻
+ 
+arm_sysregs_reg_write.032.IN_未知板型CLCD保留写
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)0xFFFU << (u32)16);
+
+s.sys_clcd = 0x0000FFFFU;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x50U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00001234U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_clcd = 0x0000FFFF
+用例注释
+测试目的：验证未知板型写 CLCD 寄存器时进入默认保留处理，不修改状态。 用例类别：接口测试 预置条件：板型字段为未定义值；CLCD 初始值确定。 测试步骤： step1、设置未知板型编码。 step2、将 CLCD 初始化为 0xFFFF。 step3、向 CLCD 写入 0x1234。 step4、调用被测函数。 step5、检查寄存器状态。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：未知板型 CLCD 写操作。 其它说明：覆盖 CLCD 内层 switch 的 default 分支。 通过准则：函数返回 VMM_OK，s.sys_clcd 保持不变。
+ 
+⸻
+ 
+六、只读或保留寄存器写入
+arm_sysregs_reg_write.033.R_CLCDSER保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x54U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 CLCDSER 寄存器写访问进入保留处理且不修改状态。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效；LED 作为状态哨兵。 测试步骤： step1、设置 LED 哨兵值。 step2、将写偏移设置为 0x54。 step3、调用被测函数。 step4、检查返回值和 LED 值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：CLCDSER 保留写。 其它说明：覆盖 case 0x54 标签。 通过准则：函数返回 VMM_OK，状态哨兵不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.034.R_DMAPSR0保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x64U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 DMAPSR0 写入被忽略并正常返回。 用例类别：基于需求的测试 预置条件：状态对象有效；状态哨兵已初始化。 测试步骤： step1、初始化 LED 哨兵值。 step2、将写偏移设置为 0x64。 step3、调用被测函数。 step4、检查返回值和哨兵字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：DMAPSR0 保留写。 其它说明：覆盖 case 0x64 标签。 通过准则：函数返回 VMM_OK，状态保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.035.R_DMAPSR1保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x68U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 DMAPSR1 写访问不执行寄存器更新。 用例类别：基于需求的测试 预置条件：系统寄存器状态有效。 测试步骤： step1、设置状态哨兵。 step2、将写偏移设置为 0x68。 step3、调用被测函数。 step4、检查返回值和状态。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：DMAPSR1 保留写。 其它说明：覆盖 case 0x68 标签。 通过准则：函数返回 VMM_OK，哨兵字段不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.036.R_DMAPSR2保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x6CU;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 DMAPSR2 保留寄存器写操作不会改变状态。 用例类别：基于需求的测试 预置条件：状态对象有效。 测试步骤： step1、初始化状态哨兵。 step2、将写偏移设置为 0x6C。 step3、调用被测函数。 step4、检查执行结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：DMAPSR2 保留写。 其它说明：覆盖 case 0x6c 标签。 通过准则：函数返回 VMM_OK，状态不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.037.R_IOSEL保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x70U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 IOSEL 写操作进入保留分支。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效。 测试步骤： step1、设置状态哨兵值。 step2、将偏移设置为 0x70。 step3、调用寄存器写函数。 step4、检查返回值和状态哨兵。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：IOSEL 保留写。 其它说明：覆盖 case 0x70 标签。 通过准则：函数返回 VMM_OK，状态哨兵不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.038.R_PLDCTL保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x74U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 PLDCTL 写访问不修改系统控制状态。 用例类别：基于需求的测试 预置条件：状态对象有效，LED 值确定。 测试步骤： step1、初始化 LED 哨兵。 step2、将写偏移设置为 0x74。 step3、调用被测函数。 step4、检查返回值及 LED。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：PLDCTL 保留写。 其它说明：覆盖 case 0x74 标签。 通过准则：函数返回 VMM_OK，LED 保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.039.R_BUSID保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x80U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 BUSID 寄存器写入被忽略。 用例类别：基于需求的测试 预置条件：状态对象有效。 测试步骤： step1、设置状态哨兵。 step2、将写偏移设置为 0x80。 step3、调用被测函数。 step4、检查执行结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：BUSID 保留写。 其它说明：覆盖 case 0x80 标签。 通过准则：函数返回 VMM_OK，状态哨兵不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.040.R_PROCID0保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x84U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证只读的 PROCID0 寄存器写入不改变状态。 用例类别：基于需求的测试 预置条件：状态对象有效。 测试步骤： step1、初始化状态哨兵。 step2、将写偏移设置为 0x84。 step3、调用被测函数。 step4、检查返回值和状态。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：PROCID0 保留写。 其它说明：覆盖 case 0x84 标签。 通过准则：函数返回 VMM_OK，状态保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.041.R_PROCID1保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x88U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 PROCID1 写访问进入只读保留处理。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、设置状态哨兵。 step2、将写偏移设置为 0x88。 step3、调用被测函数。 step4、检查函数返回值和状态字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：PROCID1 保留写。 其它说明：覆盖 case 0x88 标签。 通过准则：函数返回 VMM_OK，状态哨兵不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.042.R_OSCRESET0保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x8CU;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 OSCRESET0 写操作不执行状态更新。 用例类别：基于需求的测试 预置条件：状态对象有效。 测试步骤： step1、设置状态哨兵值。 step2、将写偏移设置为 0x8C。 step3、调用被测函数。 step4、检查返回值和状态。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSCRESET0 保留写。 其它说明：覆盖 case 0x8c 标签。 通过准则：函数返回 VMM_OK，状态不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.043.R_OSCRESET1保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x90U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 OSCRESET1 写操作被忽略。 用例类别：基于需求的测试 预置条件：状态对象有效。 测试步骤： step1、初始化状态哨兵。 step2、设置写偏移为 0x90。 step3、调用被测函数。 step4、检查函数结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSCRESET1 保留写。 其它说明：覆盖 case 0x90 标签。 通过准则：返回 VMM_OK，状态保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.044.R_OSCRESET2保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x94U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 OSCRESET2 写访问不修改状态对象。 用例类别：基于需求的测试 预置条件：状态对象已初始化。 测试步骤： step1、设置 LED 哨兵值。 step2、设置偏移为 0x94。 step3、调用被测函数。 step4、检查返回结果和 LED。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSCRESET2 保留写。 其它说明：覆盖 case 0x94 标签。 通过准则：函数返回 VMM_OK，LED 不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.045.R_OSCRESET3保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x98U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 OSCRESET3 写入被当前实现忽略。 用例类别：基于需求的测试 预置条件：系统寄存器状态有效。 测试步骤： step1、初始化状态哨兵。 step2、将写偏移设置为 0x98。 step3、调用被测函数。 step4、检查函数返回值和状态。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSCRESET3 保留写。 其它说明：覆盖 case 0x98 标签。 通过准则：函数返回 VMM_OK，状态哨兵不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.046.R_OSCRESET4保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x9CU;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 OSCRESET4 写操作不产生状态变化。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、设置状态哨兵。 step2、将写偏移设置为 0x9C。 step3、调用被测函数。 step4、检查返回值和状态字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：OSCRESET4 保留写。 其它说明：覆盖 case 0x9c 标签。 通过准则：函数返回 VMM_OK，状态保持不变。
+ 
+⸻
+ 
+七、VExpress 专用配置寄存器
+arm_sysregs_reg_write.047.IN_非VExpress写SYS_CFGDATA失败
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgdata = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+Expected Return
+VMM_EFAIL
+关键期望
+s.sys_cfgdata = 0x0000A5A5
+用例注释
+测试目的：验证非 VExpress 板型不能写入 SYS_CFGDATA 寄存器。 用例类别：接口测试 预置条件：板型为 EB；SYS_CFGDATA 具有确定初值。 测试步骤： step1、将板型设置为 EB。 step2、初始化 SYS_CFGDATA 为 0xA5A5。 step3、向偏移 0xA0 写入配置数据。 step4、调用被测函数。 step5、检查返回值和 SYS_CFGDATA。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：非 VExpress 板型写 SYS_CFGDATA。 其它说明：覆盖 board_id(s) != BOARD_ID_VEXPRESS 为 true。 通过准则：函数返回 VMM_EFAIL，s.sys_cfgdata 保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.048.R_VExpress写SYS_CFGDATA成功
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgdata = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgdata = 0x00005505
+用例注释
+测试目的：验证 VExpress 板型可以按照掩码更新 SYS_CFGDATA。 用例类别：基于需求的测试 预置条件：板型为 VExpress；SYS_CFGDATA 初始值为 0xA5A5。 测试步骤： step1、设置 VExpress 板型。 step2、设置 SYS_CFGDATA 初值。 step3、以掩码 0x0F0F 写入 0x5000。 step4、调用被测函数。 step5、检查 SYS_CFGDATA 结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress SYS_CFGDATA 有效写入。 其它说明：覆盖板型判断为 false和寄存器更新路径。 通过准则：函数返回 VMM_OK，s.sys_cfgdata 等于 0x5505。
+ 
+⸻
+ 
+arm_sysregs_reg_write.049.IN_非VExpress写SYS_CFGCTRL失败
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgctrl = 0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    (1U << 31);
+Expected Return
+VMM_EFAIL
+关键期望
+s.sys_cfgctrl = 0
+用例注释
+测试目的：验证非 VExpress 板型写 SYS_CFGCTRL 时返回失败。 用例类别：接口测试 预置条件：板型为 EB；SYS_CFGCTRL 初值为 0。 测试步骤： step1、设置 EB 板型。 step2、将写偏移设置为 0xA4。 step3、写入包含启动位的配置控制值。 step4、调用被测函数。 step5、检查返回值和控制寄存器。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：非 VExpress 板型写 SYS_CFGCTRL。 其它说明：覆盖 SYS_CFGCTRL 板型检查失败路径。 通过准则：函数返回 VMM_EFAIL，s.sys_cfgctrl 保持 0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.050.R_VExpress写CFGCTRL但未启动
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0x000000F0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    (((u32)SYS_CFG_OSC << (u32)20) |
+     ((u32)3U << (u32)18));
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgctrl ==
+    ((u32)SYS_CFG_OSC << (u32)20)
+
+s.sys_cfgstat == 0x000000F0U
+用例注释
+测试目的：验证 VExpress 写 SYS_CFGCTRL 但未设置启动位时，只保存合法控制位，不执行配置读写操作。 用例类别：基于需求的测试 预置条件：板型为 VExpress；SYS_CFGCTRL 初始值为 0；写入值未设置 bit31。 测试步骤： step1、设置 VExpress 板型。 step2、构造未设置启动位、但设置未定义位 19:18 的控制值。 step3、向偏移 0xA4 写入该控制值。 step4、调用被测函数。 step5、检查未定义位是否被清除，以及状态寄存器是否未改变。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：未启动的 SYS_CFGCTRL 写操作。 其它说明：覆盖启动位判断为 false，并验证位 19:18 的 RAZ/WI 行为。 通过准则：函数返回 VMM_OK，未定义位被清除，sys_cfgstat 保持 0xF0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.051.R_VExpressCFGCTRL写操作成功
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0U;
+s.sys_cfgdata = 25000000U;
+s.mb_clock[0] = 50000000U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    ((1U << 31) |
+     (1U << 30) |
+     ((u32)SYS_CFG_OSC << (u32)20) |
+     ((u32)SYS_CFG_SITE_MB << (u32)16));
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgstat = 1
+s.mb_clock[0] = 25000000
+同时：
+(s.sys_cfgctrl & (1U << 31)) == 0U
+用例注释
+测试目的：验证 VExpress SYS_CFGCTRL 写命令设置启动位和写方向位后，能够成功调用配置写逻辑并清除启动位。 用例类别：基于需求的测试 预置条件：板型为 VExpress；配置功能为主板 OSC device 0；SYS_CFGDATA 为 25MHz。 测试步骤： step1、设置 VExpress 板型及主板时钟初值。 step2、将 SYS_CFGDATA 设置为 25000000。 step3、构造包含 start、write、OSC、MB 和 device 0的控制值。 step4、调用寄存器写函数。 step5、检查完成状态、主板时钟和启动位。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress SYS_CFGCTRL 配置写成功。 其它说明：覆盖启动位 true、写方向位 true以及 vexpress_cfgctrl_write 返回 true。 通过准则：函数返回 VMM_OK，状态为完成且无错误，主板时钟更新为 25MHz，启动位被清除。
+ 
+⸻
+ 
+arm_sysregs_reg_write.052.IN_VExpressCFGCTRL写操作失败
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0U;
+s.sys_cfgdata = 25000000U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    ((1U << 31) |
+     (1U << 30) |
+     (1U << 26) |
+     ((u32)SYS_CFG_OSC << (u32)20) |
+     ((u32)SYS_CFG_SITE_MB << (u32)16));
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgstat = 3
+同时：
+(s.sys_cfgctrl & (1U << 31)) == 0U
+用例注释
+测试目的：验证 SYS_CFGCTRL 写命令中的 DCC 非零导致配置写失败时，函数在完成状态中设置错误位。 用例类别：接口测试 预置条件：板型为 VExpress；启动位和写方向位已设置；DCC 设置为 1。 测试步骤： step1、初始化 SYS_CFGCTRL 和 SYS_CFGSTAT。 step2、构造 DCC 为 1的 OSC 写命令。 step3、调用被测函数。 step4、检查配置状态和启动位。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress 配置写请求参数无效。 其它说明：覆盖 !vexpress_cfgctrl_write(...) 为 true以及错误状态位置位。 通过准则：函数返回 VMM_OK，s.sys_cfgstat 等于 3，启动位被清除。
+ 
+⸻
+ 
+arm_sysregs_reg_write.053.R_VExpressCFGCTRL读操作成功
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0U;
+s.sys_cfgdata = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    ((1U << 31) |
+     ((u32)SYS_CFG_VOLT << (u32)20) |
+     ((u32)SYS_CFG_SITE_MB << (u32)16));
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgstat = 1
+s.sys_cfgdata = 3300000
+同时：
+(s.sys_cfgctrl & (1U << 31)) == 0U
+用例注释
+测试目的：验证 VExpress SYS_CFGCTRL 读命令能够读取主板电压传感器并写回 SYS_CFGDATA。 用例类别：基于需求的测试 预置条件：板型为 VExpress；命令功能为主板电压 device 0；写方向位未设置。 测试步骤： step1、设置 VExpress 板型和配置状态初值。 step2、构造包含 start、VOLT、MB、device 0的读命令。 step3、调用寄存器写函数。 step4、检查配置状态、读取数据和启动位。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress 配置读取成功。 其它说明：覆盖写方向位 false、vexpress_cfgctrl_read 返回 true和数据回写路径。 通过准则：函数返回 VMM_OK，状态为完成，SYS_CFGDATA 等于 3300000，启动位清除。
+ 
+⸻
+ 
+arm_sysregs_reg_write.054.IN_VExpressCFGCTRL读操作失败
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0U;
+s.sys_cfgdata = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA4U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    ((1U << 31) |
+     (1U << 26) |
+     ((u32)SYS_CFG_VOLT << (u32)20) |
+     ((u32)SYS_CFG_SITE_MB << (u32)16));
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgstat = 3
+s.sys_cfgdata = 0x0000A5A5
+用例注释
+测试目的：验证配置读命令中的 DCC 非零导致读取失败时，函数设置错误状态并保持原数据。 用例类别：接口测试 预置条件：板型为 VExpress；配置读命令的 DCC 设置为 1；SYS_CFGDATA 具有确定初值。 测试步骤： step1、初始化 SYS_CFGDATA 为 0xA5A5。 step2、构造 DCC 非零的主板电压读命令。 step3、调用被测函数。 step4、检查错误状态和 SYS_CFGDATA。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress 配置读取参数无效。 其它说明：覆盖 !vexpress_cfgctrl_read(...) 为 true；局部读取值不会写回 SYS_CFGDATA。 通过准则：函数返回 VMM_OK，sys_cfgstat 等于 3，sys_cfgdata 保持 0xA5A5。
+ 
+⸻
+ 
+arm_sysregs_reg_write.055.IN_非VExpress写SYS_CFGSTAT失败
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgstat = 0x000000F0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA8U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x0000000FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000007U;
+Expected Return
+VMM_EFAIL
+关键期望
+s.sys_cfgstat = 0x000000F0
+用例注释
+测试目的：验证非 VExpress 板型写 SYS_CFGSTAT 时返回失败且不修改状态寄存器。 用例类别：接口测试 预置条件：板型为 EB；配置状态初值为 0xF0。 测试步骤： step1、设置 EB 板型。 step2、设置 SYS_CFGSTAT 初值。 step3、向偏移 0xA8 写入状态值。 step4、调用被测函数。 step5、检查返回值和配置状态。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：非 VExpress 板型写 SYS_CFGSTAT。 其它说明：覆盖 SYS_CFGSTAT 板型判断失败路径。 通过准则：函数返回 VMM_EFAIL，s.sys_cfgstat 保持 0xF0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.056.R_VExpress写SYS_CFGSTAT成功
+Begin User Code
+复制 ARW0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgstat = 0x000000F0U;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xA8U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x0000000FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00000007U;
+Expected Return
+VMM_OK
+关键期望
+s.sys_cfgstat = 3
+用例注释
+测试目的：验证 VExpress SYS_CFGSTAT 写操作只接收 regval 的低两位，并按掩码更新状态。 用例类别：基于需求的测试 预置条件：板型为 VExpress；SYS_CFGSTAT 初值为 0xF0。 测试步骤： step1、设置 VExpress 板型。 step2、将 SYS_CFGSTAT 初始化为 0xF0。 step3、使用掩码 0x0F 写入值 0x07。 step4、调用被测函数。 step5、检查状态寄存器结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：VExpress SYS_CFGSTAT 有效写入。 其它说明：覆盖板型判断成功及 regval & 3 限制逻辑。 通过准则：函数返回 VMM_OK，s.sys_cfgstat 等于 3。
+ 
+⸻
+ 
+八、末尾分支
+arm_sysregs_reg_write.057.R_PLDCTL1保留写
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xD8U;
+Expected Return
+VMM_OK
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证 PLDCTL1 写访问被当前实现作为保留操作处理。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效。 测试步骤： step1、初始化状态对象和哨兵字段。 step2、将写偏移设置为 0xD8。 step3、调用被测函数。 step4、检查返回值和状态字段。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_write。 等价列表：PLDCTL1 保留写。 其它说明：覆盖 case 0xd8 标签。 通过准则：函数返回 VMM_OK，状态哨兵保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.058.IN_未知寄存器写失败
+Begin User Code
+复制 ARW0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0xACU;
+Expected Return
+VMM_EFAIL
+关键期望
+s.leds = 0x0000A5A5
+用例注释
+测试目的：验证写入未实现的系统寄存器偏移时，函数通过 switch default 返回失败。 用例类别：接口测试 预置条件：系统寄存器状态对象有效；偏移 0xAC 不属于任何已实现 case。 测试步骤： step1、初始化系统寄存器状态和哨兵字段。 step2、将写偏移设置为未知地址 0xAC。 step3、调用 arm_sysregs_reg_write。 step4、检查返回值及状态哨兵。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_write。 等价列表：未知系统寄存器写偏移。 其它说明：覆盖外层 switch 的 default 分支。 通过准则：函数返回 VMM_EFAIL，状态对象未发生目标寄存器更新。
+ 
+⸻
+ 
+九、正式名称汇总
+arm_sysregs_reg_write.001.R_LED寄存器掩码写入
+arm_sysregs_reg_write.002.R_LOCK写入解锁值
+arm_sysregs_reg_write.003.R_LOCK写入普通值
+arm_sysregs_reg_write.004.R_CFGDATA1掩码写入
+arm_sysregs_reg_write.005.R_CFGDATA2掩码写入
+arm_sysregs_reg_write.006.R_FLAGSSET置位
+arm_sysregs_reg_write.007.R_FLAGSCLR清位
+arm_sysregs_reg_write.008.R_NVFLAGSSET置位
+arm_sysregs_reg_write.009.R_NVFLAGSCLR清位
+arm_sysregs_reg_write.010.R_OSC0保留写
+arm_sysregs_reg_write.011.R_OSC1保留写
+arm_sysregs_reg_write.012.R_OSC2保留写
+arm_sysregs_reg_write.013.R_OSC3保留写
+arm_sysregs_reg_write.014.R_OSC4保留写
+arm_sysregs_reg_write.015.R_PB926未解锁忽略复位控制
+arm_sysregs_reg_write.016.R_PB926解锁但不触发重启
+arm_sysregs_reg_write.017.R_PB926解锁触发重启
+arm_sysregs_reg_write.018.R_PBX未解锁忽略复位控制
+arm_sysregs_reg_write.019.R_PBA8解锁但不触发重启
+arm_sysregs_reg_write.020.R_PBA8解锁触发重启
+arm_sysregs_reg_write.021.R_EB未解锁忽略复位控制
+arm_sysregs_reg_write.022.R_EB解锁但不触发重启
+arm_sysregs_reg_write.023.R_EB解锁触发重启
+arm_sysregs_reg_write.024.R_VExpress复位控制保留写
+arm_sysregs_reg_write.025.IN_未知板型复位控制保留写
+arm_sysregs_reg_write.026.R_PCI控制寄存器保留写
+arm_sysregs_reg_write.027.R_PB926FlashCLCD写入
+arm_sysregs_reg_write.028.R_EBCLCD写入
+arm_sysregs_reg_write.029.R_PBA8CLCD写入
+arm_sysregs_reg_write.030.R_PBXCLCD写入
+arm_sysregs_reg_write.031.R_VExpressCLCD保留写
+arm_sysregs_reg_write.032.IN_未知板型CLCD保留写
+arm_sysregs_reg_write.033.R_CLCDSER保留写
+arm_sysregs_reg_write.034.R_DMAPSR0保留写
+arm_sysregs_reg_write.035.R_DMAPSR1保留写
+arm_sysregs_reg_write.036.R_DMAPSR2保留写
+arm_sysregs_reg_write.037.R_IOSEL保留写
+arm_sysregs_reg_write.038.R_PLDCTL保留写
+arm_sysregs_reg_write.039.R_BUSID保留写
+arm_sysregs_reg_write.040.R_PROCID0保留写
+arm_sysregs_reg_write.041.R_PROCID1保留写
+arm_sysregs_reg_write.042.R_OSCRESET0保留写
+arm_sysregs_reg_write.043.R_OSCRESET1保留写
+arm_sysregs_reg_write.044.R_OSCRESET2保留写
+arm_sysregs_reg_write.045.R_OSCRESET3保留写
+arm_sysregs_reg_write.046.R_OSCRESET4保留写
+arm_sysregs_reg_write.047.IN_非VExpress写SYS_CFGDATA失败
+arm_sysregs_reg_write.048.R_VExpress写SYS_CFGDATA成功
+arm_sysregs_reg_write.049.IN_非VExpress写SYS_CFGCTRL失败
+arm_sysregs_reg_write.050.R_VExpress写CFGCTRL但未启动
+arm_sysregs_reg_write.051.R_VExpressCFGCTRL写操作成功
+arm_sysregs_reg_write.052.IN_VExpressCFGCTRL写操作失败
+arm_sysregs_reg_write.053.R_VExpressCFGCTRL读操作成功
+arm_sysregs_reg_write.054.IN_VExpressCFGCTRL读操作失败
+arm_sysregs_reg_write.055.IN_非VExpress写SYS_CFGSTAT失败
+arm_sysregs_reg_write.056.R_VExpress写SYS_CFGSTAT成功
+arm_sysregs_reg_write.057.R_PLDCTL1保留写
+arm_sysregs_reg_write.058.IN_未知寄存器写失败
