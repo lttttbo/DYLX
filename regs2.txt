@@ -1,0 +1,1026 @@
+下面继续 arm_sysregs.c 剩余两个函数：
+arm_sysregs_reg_write
+arm_sysregs_reg_read
+测试构造沿用现有方案，不新增辅助函数，只使用局部静态对象、直接字段赋值和现有 Stub。
+以下板型构造按文件中的：
+board_id(s) = (s->sys_id >> 16) & 0xFFF;
+因此测试中直接设置：
+s.sys_id = ((u32)BOARD_ID_PB926 << 16);
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.sys_id = ((u32)BOARD_ID_PBA8 << 16);
+s.sys_id = ((u32)BOARD_ID_PBX << 16);
+s.sys_id = ((u32)BOARD_ID_VEXPRESS << 16);
+即可控制 board_id(s) 的结果。该提取方式及对应板型常量与此实现的上游代码一致。
+ 
+⸻
+ 
+一、公共测试配置
+1. 锁相关函数
+继续沿用当前环境中已有的锁隔离方式：
+vmm_write_lock：
+    空实现
+
+vmm_write_unlock：
+    空实现
+
+vmm_read_lock：
+    空实现
+
+vmm_read_unlock：
+    空实现
+如果当前环境已经可以安全执行实际读写锁，则不需要重复修改。
+ 
+⸻
+ 
+2. 外部函数 Stub
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+
+vmm_manager_guest_shutdown_request：
+    return VMM_OK
+
+vmm_devemu_emulate_irq：
+    使用默认空 Stub
+
+vmm_timer_timestamp：
+    按具体读取用例设置返回值
+不需要验证上述中间函数的调用次数。
+ 
+⸻
+ 
+二、
+arm_sysregs_reg_write
+1. 公共 Begin User Code：
+ARW0-UC
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+INIT_RW_LOCK(&s.lock);
+
+s.guest = &guest;
+
+/*
+ * 默认使用 VExpress。
+ * 涉及其他板型的用例会单独覆盖该字段。
+ */
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+s.leds = 0x0000A5A5U;
+s.lockval = 0x00001234U;
+
+s.cfgdata1 = 0x0000A5A5U;
+s.cfgdata2 = 0x0000A5A5U;
+
+s.flags = 0x000000F0U;
+s.nvflags = 0x00000F00U;
+
+s.resetlevel = 0x00000055U;
+
+s.sys_clcd = 0x0000FFFFU;
+s.sys_cfgdata = 0x0000A5A5U;
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0x000000F0U;
+
+s.mux_out_irq = 45U;
+
+s.mb_clock[0] = 50000000U;
+s.mb_clock[1] = 23750000U;
+
+<<arm_sysregs.arm_sysregs_reg_write.s>> =
+    &s;
+
+<<arm_sysregs.arm_sysregs_reg_write.offset>> =
+    0x08U;
+
+<<arm_sysregs.arm_sysregs_reg_write.regmask>> =
+    0x00000F0FU;
+
+<<arm_sysregs.arm_sysregs_reg_write.regval>> =
+    0x00005000U;
+ 
+⸻
+ 
+2. 简单读写寄存器用例
+下表每一行均为一条独立用例。
+编号及正式名称	输入修改	期望结果	覆盖目的
+arm_sysregs_reg_write.001.R_LED寄存器掩码写入	offset=0x08，regmask=0x0F0F，regval=0x5000	返回 VMM_OK；s.leds=0x5505	覆盖 LED 的掩码保留与新值合并
+arm_sysregs_reg_write.002.R_LOCK写入解锁值	offset=0x20，regval=LOCK_VALUE	返回 VMM_OK；s.lockval=LOCK_VALUE	覆盖 regval == LOCK_VALUE 为 true
+arm_sysregs_reg_write.003.R_LOCK写入普通值	offset=0x20，regval=0xFFFF	返回 VMM_OK；s.lockval=0x7FFF	覆盖 regval == LOCK_VALUE 为 false
+arm_sysregs_reg_write.004.R_CFGDATA1掩码写入	offset=0x28，regmask=0x0F0F，regval=0x5000	返回 VMM_OK；s.cfgdata1=0x5505	覆盖 CFGDATA1 更新
+arm_sysregs_reg_write.005.R_CFGDATA2掩码写入	offset=0x2C，同上	返回 VMM_OK；s.cfgdata2=0x5505	覆盖 CFGDATA2 更新
+arm_sysregs_reg_write.006.R_FLAGSSET置位	offset=0x30，s.flags=0xF0，regval=0x0F	返回 VMM_OK；s.flags=0xFF	覆盖普通标志位置位
+arm_sysregs_reg_write.007.R_FLAGSCLR清位	offset=0x34，s.flags=0xFF，regval=0x0F	返回 VMM_OK；s.flags=0xF0	覆盖普通标志位清除
+arm_sysregs_reg_write.008.R_NVFLAGSSET置位	offset=0x38，s.nvflags=0x0F00，regval=0x00F0	返回 VMM_OK；s.nvflags=0x0FF0	覆盖非易失标志位置位
+arm_sysregs_reg_write.009.R_NVFLAGSCLR清位	offset=0x3C，s.nvflags=0x0FF0，regval=0x00F0	返回 VMM_OK；s.nvflags=0x0F00	覆盖非易失标志位清除
+上述用例统一注释格式
+测试目的：验证对应系统控制寄存器的写入处理符合掩码、置位或清位规则。
+用例类别：基于需求的测试
+预置条件：arm_sysregs 状态对象有效，相关寄存器具有确定初始值。
+测试步骤：
+step1、复制 ARW0-UC。
+step2、按照用例表设置 offset、regmask、regval及相关初始字段。
+step3、调用 arm_sysregs_reg_write。
+step4、检查返回值和目标寄存器字段。
+用例来源：需求分析、有效等价类。
+追溯ID：arm_sysregs_reg_write。
+等价列表：见对应正式名称。
+其它说明：仅验证函数返回值及状态字段，不验证锁或中间函数调用次数。
+通过准则：函数返回 VMM_OK，目标字段等于表中期望值。
+ 
+⸻
+ 
+3. OSC 保留寄存器写入
+这些 case 共用空处理体，但为了覆盖每一个 switch case，分别建立用例：
+正式名称	offset	期望
+arm_sysregs_reg_write.010.R_OSC0保留写	0x0C	VMM_OK，关键字段保持不变
+arm_sysregs_reg_write.011.R_OSC1保留写	0x10	同上
+arm_sysregs_reg_write.012.R_OSC2保留写	0x14	同上
+arm_sysregs_reg_write.013.R_OSC3保留写	0x18	同上
+arm_sysregs_reg_write.014.R_OSC4保留写	0x1C	同上
+建议检查：
+s.leds = 0xA5A5
+s.lockval = 0x1234
+s.sys_clcd = 0xFFFF
+统一注释
+测试目的：验证对应 OSC 保留寄存器写入被接受但不修改系统寄存器状态。
+用例类别：基于需求的测试
+预置条件：状态对象有效，关键字段具有确定初值。
+测试步骤：
+step1、复制 ARW0-UC。
+step2、设置 offset 为对应 OSC 地址。
+step3、调用 arm_sysregs_reg_write。
+step4、检查返回值和关键状态字段。
+用例来源：需求分析。
+追溯ID：arm_sysregs_reg_write。
+等价列表：对应 OSC 保留寄存器写操作。
+其它说明：各 case 标签分别执行一次，以覆盖 switch 分支。
+通过准则：函数返回 VMM_OK，关键状态字段保持不变。
+ 
+⸻
+ 
+三、RESETCTL 测试
+以下用例统一设置：
+offset = 0x40U;
+regmask = 0U;
+1. PB926
+arm_sysregs_reg_write.015.R_PB926未解锁忽略复位控制
+s.sys_id = ((u32)BOARD_ID_PB926 << 16);
+s.lockval = 0U;
+s.resetlevel = 0x55U;
+
+regval = 0x100U;
+期望：
+return = VMM_OK
+s.resetlevel = 0x55
+覆盖：
+s->lockval == LOCK_VALUE
+为 false。
+ 
+⸻
+ 
+arm_sysregs_reg_write.016.R_PB926解锁但不触发重启
+s.sys_id = ((u32)BOARD_ID_PB926 << 16);
+s.lockval = LOCK_VALUE;
+s.resetlevel = 0x55U;
+
+regval = 0U;
+期望：
+return = VMM_OK
+s.resetlevel = 0
+覆盖：
+s->resetlevel & 0x100
+为 false。
+ 
+⸻
+ 
+arm_sysregs_reg_write.017.R_PB926解锁触发重启
+s.sys_id = ((u32)BOARD_ID_PB926 << 16);
+s.lockval = LOCK_VALUE;
+
+regval = 0x100U;
+Stub：
+vmm_manager_guest_reboot_request：
+    return VMM_OK
+期望：
+return = VMM_OK
+s.resetlevel = 0x100
+覆盖 PB926 重启条件为 true。
+ 
+⸻
+ 
+2. PBX/PBA8 共用处理分支
+arm_sysregs_reg_write.018.R_PBX未解锁忽略复位控制
+s.sys_id = ((u32)BOARD_ID_PBX << 16);
+s.lockval = 0U;
+s.resetlevel = 0x55U;
+
+regval = 0x04U;
+期望：
+return = VMM_OK
+s.resetlevel = 0x55
+ 
+⸻
+ 
+arm_sysregs_reg_write.019.R_PBA8解锁但不触发重启
+s.sys_id = ((u32)BOARD_ID_PBA8 << 16);
+s.lockval = LOCK_VALUE;
+
+regval = 0U;
+期望：
+return = VMM_OK
+s.resetlevel = 0
+ 
+⸻
+ 
+arm_sysregs_reg_write.020.R_PBA8解锁触发重启
+s.sys_id = ((u32)BOARD_ID_PBA8 << 16);
+s.lockval = LOCK_VALUE;
+
+regval = 0x04U;
+期望：
+return = VMM_OK
+s.resetlevel = 0x04
+ 
+⸻
+ 
+3. EB
+arm_sysregs_reg_write.021.R_EB未解锁忽略复位控制
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.lockval = 0U;
+s.resetlevel = 0x55U;
+
+regval = 0x08U;
+期望 s.resetlevel=0x55。
+ 
+⸻
+ 
+arm_sysregs_reg_write.022.R_EB解锁但不触发重启
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.lockval = LOCK_VALUE;
+
+regval = 0U;
+期望 s.resetlevel=0。
+ 
+⸻
+ 
+arm_sysregs_reg_write.023.R_EB解锁触发重启
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.lockval = LOCK_VALUE;
+
+regval = 0x08U;
+期望 s.resetlevel=0x08。
+ 
+⸻
+ 
+4. 保留板型
+arm_sysregs_reg_write.024.R_VExpress复位控制保留写
+s.sys_id = ((u32)BOARD_ID_VEXPRESS << 16);
+s.resetlevel = 0x55U;
+
+regval = 0xFFFFFFFFU;
+期望：
+return = VMM_OK
+s.resetlevel = 0x55
+ 
+⸻
+ 
+arm_sysregs_reg_write.025.IN_未知板型复位控制保留写
+s.sys_id = (0x1FFU << 16);
+s.resetlevel = 0x55U;
+
+regval = 0xFFFFFFFFU;
+期望：
+return = VMM_OK
+s.resetlevel = 0x55
+ 
+⸻
+ 
+RESETCTL 用例统一注释
+测试目的：验证指定板型在锁定、解锁及复位控制位不同状态下的 RESETCTL 写入行为。
+用例类别：基于需求的测试；未知板型用例为接口测试。
+预置条件：状态对象和 Guest 指针有效；板型、锁值和复位初值按用例设置。
+测试步骤：
+step1、复制 ARW0-UC。
+step2、设置 sys_id、lockval、resetlevel和regval。
+step3、调用 arm_sysregs_reg_write。
+step4、检查返回值和resetlevel。
+用例来源：需求分析、边界条件分析。
+追溯ID：arm_sysregs_reg_write。
+等价列表：见用例名称。
+其它说明：不单独验证 Guest 重启接口调用次数。
+通过准则：函数返回 VMM_OK，resetlevel 等于对应期望值。
+ 
+⸻
+ 
+四、PCICTL 与 CLCD/FLASH
+arm_sysregs_reg_write.026.R_PCI控制寄存器保留写
+offset = 0x44U;
+期望：
+return = VMM_OK
+关键字段保持不变
+ 
+⸻
+ 
+1. PB926
+arm_sysregs_reg_write.027.R_PB926FlashCLCD写入
+s.sys_id = ((u32)BOARD_ID_PB926 << 16);
+s.sys_clcd = 0xFFFFU;
+
+offset = 0x4CU;
+regval = 0x1234U;
+期望：
+return = VMM_OK
+s.sys_clcd = 0x3F34
+计算过程：
+(0xFFFF & 0x3F00) |
+(0x1234 & ~0x3F00)
+= 0x3F34
+ 
+⸻
+ 
+2. EB
+arm_sysregs_reg_write.028.R_EBCLCD写入
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.sys_clcd = 0xFFFFU;
+
+offset = 0x50U;
+regval = 0x1234U;
+期望：
+return = VMM_OK
+s.sys_clcd = 0x3F34
+ 
+⸻
+ 
+3. PBA8/PBX
+arm_sysregs_reg_write.029.R_PBA8CLCD写入
+s.sys_id = ((u32)BOARD_ID_PBA8 << 16);
+s.sys_clcd = 0xFFFFU;
+
+offset = 0x50U;
+regval = 0x1234U;
+期望：
+return = VMM_OK
+s.sys_clcd = 0x12B4
+ 
+⸻
+ 
+arm_sysregs_reg_write.030.R_PBXCLCD写入
+将板型改为：
+s.sys_id = ((u32)BOARD_ID_PBX << 16);
+其他配置与 .029 相同。
+期望：
+s.sys_clcd = 0x12B4
+ 
+⸻
+ 
+4. 保留板型
+arm_sysregs_reg_write.031.R_VExpressCLCD保留写
+s.sys_id = ((u32)BOARD_ID_VEXPRESS << 16);
+s.sys_clcd = 0xFFFFU;
+
+offset = 0x50U;
+regval = 0x1234U;
+期望 s.sys_clcd=0xFFFF。
+ 
+⸻
+ 
+arm_sysregs_reg_write.032.IN_未知板型CLCD保留写
+s.sys_id = (0x1FFU << 16);
+其他配置与 .031 相同。
+期望 s.sys_clcd=0xFFFF。
+ 
+⸻
+ 
+五、只读或保留寄存器写入
+以下每一行均为独立用例，返回值均为：
+VMM_OK
+关键状态字段保持不变。
+编号及名称	offset
+arm_sysregs_reg_write.033.R_CLCDSER保留写	0x54
+arm_sysregs_reg_write.034.R_DMAPSR0保留写	0x64
+arm_sysregs_reg_write.035.R_DMAPSR1保留写	0x68
+arm_sysregs_reg_write.036.R_DMAPSR2保留写	0x6C
+arm_sysregs_reg_write.037.R_IOSEL保留写	0x70
+arm_sysregs_reg_write.038.R_PLDCTL保留写	0x74
+arm_sysregs_reg_write.039.R_BUSID保留写	0x80
+arm_sysregs_reg_write.040.R_PROCID0保留写	0x84
+arm_sysregs_reg_write.041.R_PROCID1保留写	0x88
+arm_sysregs_reg_write.042.R_OSCRESET0保留写	0x8C
+arm_sysregs_reg_write.043.R_OSCRESET1保留写	0x90
+arm_sysregs_reg_write.044.R_OSCRESET2保留写	0x94
+arm_sysregs_reg_write.045.R_OSCRESET3保留写	0x98
+arm_sysregs_reg_write.046.R_OSCRESET4保留写	0x9C
+统一注释可沿用 OSC 保留写注释，将寄存器名称替换为对应名称。
+ 
+⸻
+ 
+六、SYS_CFGDATA
+arm_sysregs_reg_write.047.IN_非VExpress写SYS_CFGDATA失败
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.sys_cfgdata = 0xA5A5U;
+
+offset = 0xA0U;
+regmask = 0x0F0FU;
+regval = 0x5000U;
+期望：
+return = VMM_EFAIL
+s.sys_cfgdata = 0xA5A5
+ 
+⸻
+ 
+arm_sysregs_reg_write.048.R_VExpress写SYS_CFGDATA成功
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+s.sys_cfgdata = 0xA5A5U;
+
+offset = 0xA0U;
+regmask = 0x0F0FU;
+regval = 0x5000U;
+期望：
+return = VMM_OK
+s.sys_cfgdata = 0x5505
+ 
+⸻
+ 
+七、SYS_CFGCTRL
+所有用例设置：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+offset = 0xA4U;
+regmask = 0U;
+arm_sysregs_reg_write.049.IN_非VExpress写SYS_CFGCTRL失败
+将板型改为 EB：
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+regval = (1U << 31);
+期望：
+return = VMM_EFAIL
+ 
+⸻
+ 
+arm_sysregs_reg_write.050.R_VExpress写CFGCTRL但未启动
+s.sys_cfgctrl = 0U;
+s.sys_cfgstat = 0xF0U;
+
+regval =
+    ((u32)SYS_CFG_OSC << 20) |
+    (3U << 18);
+期望：
+return = VMM_OK
+
+s.sys_cfgctrl =
+    ((u32)SYS_CFG_OSC << 20)
+
+s.sys_cfgstat = 0xF0
+覆盖：
+s->sys_cfgctrl & (1U << 31)
+为 false，以及未定义位 [19:18] 被清除。
+ 
+⸻
+ 
+arm_sysregs_reg_write.051.R_VExpressCFGCTRL写操作成功
+s.sys_cfgdata = 25000000U;
+s.mb_clock[0] = 50000000U;
+
+regval =
+    (1U << 31) |
+    (1U << 30) |
+    ((u32)SYS_CFG_OSC << 20) |
+    ((u32)SYS_CFG_SITE_MB << 16) |
+    0U;
+期望：
+return = VMM_OK
+
+s.sys_cfgstat = 1
+s.mb_clock[0] = 25000000
+
+s.sys_cfgctrl =
+    (1U << 30) |
+    ((u32)SYS_CFG_OSC << 20)
+覆盖：
+start = true
+write = true
+vexpress_cfgctrl_write = true
+ 
+⸻
+ 
+arm_sysregs_reg_write.052.IN_VExpressCFGCTRL写操作失败
+s.sys_cfgdata = 25000000U;
+
+regval =
+    (1U << 31) |
+    (1U << 30) |
+    (1U << 26) | /* dcc = 1 */
+    ((u32)SYS_CFG_OSC << 20);
+期望：
+return = VMM_OK
+s.sys_cfgstat = 3
+覆盖：
+!vexpress_cfgctrl_write(...)
+为 true。
+ 
+⸻
+ 
+arm_sysregs_reg_write.053.R_VExpressCFGCTRL读操作成功
+s.sys_cfgdata = 0xA5A5U;
+
+regval =
+    (1U << 31) |
+    ((u32)SYS_CFG_VOLT << 20) |
+    ((u32)SYS_CFG_SITE_MB << 16) |
+    0U;
+期望：
+return = VMM_OK
+s.sys_cfgstat = 1
+s.sys_cfgdata = 3300000
+覆盖：
+start = true
+write = false
+vexpress_cfgctrl_read = true
+ 
+⸻
+ 
+arm_sysregs_reg_write.054.IN_VExpressCFGCTRL读操作失败
+s.sys_cfgdata = 0xA5A5U;
+
+regval =
+    (1U << 31) |
+    (1U << 26) | /* dcc = 1 */
+    ((u32)SYS_CFG_VOLT << 20);
+期望：
+return = VMM_OK
+s.sys_cfgstat = 3
+s.sys_cfgdata = 0xA5A5
+ 
+⸻
+ 
+八、SYS_CFGSTAT、PLDCTL1 与默认分支
+arm_sysregs_reg_write.055.IN_非VExpress写SYS_CFGSTAT失败
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+
+offset = 0xA8U;
+regmask = 0x0FU;
+regval = 0x07U;
+期望 VMM_EFAIL。
+ 
+⸻
+ 
+arm_sysregs_reg_write.056.R_VExpress写SYS_CFGSTAT成功
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+s.sys_cfgstat = 0xF0U;
+
+offset = 0xA8U;
+regmask = 0x0FU;
+regval = 0x07U;
+期望：
+return = VMM_OK
+s.sys_cfgstat = 3
+ 
+⸻
+ 
+arm_sysregs_reg_write.057.R_PLDCTL1保留写
+offset = 0xD8U;
+期望 VMM_OK，状态不变。
+ 
+⸻
+ 
+arm_sysregs_reg_write.058.IN_未知寄存器写失败
+offset = 0xACU;
+期望：
+return = VMM_EFAIL
+ 
+⸻
+ 
+九、
+arm_sysregs_reg_write
+名称汇总
+arm_sysregs_reg_write.001.R_LED寄存器掩码写入
+arm_sysregs_reg_write.002.R_LOCK写入解锁值
+arm_sysregs_reg_write.003.R_LOCK写入普通值
+arm_sysregs_reg_write.004.R_CFGDATA1掩码写入
+arm_sysregs_reg_write.005.R_CFGDATA2掩码写入
+arm_sysregs_reg_write.006.R_FLAGSSET置位
+arm_sysregs_reg_write.007.R_FLAGSCLR清位
+arm_sysregs_reg_write.008.R_NVFLAGSSET置位
+arm_sysregs_reg_write.009.R_NVFLAGSCLR清位
+arm_sysregs_reg_write.010.R_OSC0保留写
+arm_sysregs_reg_write.011.R_OSC1保留写
+arm_sysregs_reg_write.012.R_OSC2保留写
+arm_sysregs_reg_write.013.R_OSC3保留写
+arm_sysregs_reg_write.014.R_OSC4保留写
+arm_sysregs_reg_write.015.R_PB926未解锁忽略复位控制
+arm_sysregs_reg_write.016.R_PB926解锁但不触发重启
+arm_sysregs_reg_write.017.R_PB926解锁触发重启
+arm_sysregs_reg_write.018.R_PBX未解锁忽略复位控制
+arm_sysregs_reg_write.019.R_PBA8解锁但不触发重启
+arm_sysregs_reg_write.020.R_PBA8解锁触发重启
+arm_sysregs_reg_write.021.R_EB未解锁忽略复位控制
+arm_sysregs_reg_write.022.R_EB解锁但不触发重启
+arm_sysregs_reg_write.023.R_EB解锁触发重启
+arm_sysregs_reg_write.024.R_VExpress复位控制保留写
+arm_sysregs_reg_write.025.IN_未知板型复位控制保留写
+arm_sysregs_reg_write.026.R_PCI控制寄存器保留写
+arm_sysregs_reg_write.027.R_PB926FlashCLCD写入
+arm_sysregs_reg_write.028.R_EBCLCD写入
+arm_sysregs_reg_write.029.R_PBA8CLCD写入
+arm_sysregs_reg_write.030.R_PBXCLCD写入
+arm_sysregs_reg_write.031.R_VExpressCLCD保留写
+arm_sysregs_reg_write.032.IN_未知板型CLCD保留写
+arm_sysregs_reg_write.033.R_CLCDSER保留写
+arm_sysregs_reg_write.034.R_DMAPSR0保留写
+arm_sysregs_reg_write.035.R_DMAPSR1保留写
+arm_sysregs_reg_write.036.R_DMAPSR2保留写
+arm_sysregs_reg_write.037.R_IOSEL保留写
+arm_sysregs_reg_write.038.R_PLDCTL保留写
+arm_sysregs_reg_write.039.R_BUSID保留写
+arm_sysregs_reg_write.040.R_PROCID0保留写
+arm_sysregs_reg_write.041.R_PROCID1保留写
+arm_sysregs_reg_write.042.R_OSCRESET0保留写
+arm_sysregs_reg_write.043.R_OSCRESET1保留写
+arm_sysregs_reg_write.044.R_OSCRESET2保留写
+arm_sysregs_reg_write.045.R_OSCRESET3保留写
+arm_sysregs_reg_write.046.R_OSCRESET4保留写
+arm_sysregs_reg_write.047.IN_非VExpress写SYS_CFGDATA失败
+arm_sysregs_reg_write.048.R_VExpress写SYS_CFGDATA成功
+arm_sysregs_reg_write.049.IN_非VExpress写SYS_CFGCTRL失败
+arm_sysregs_reg_write.050.R_VExpress写CFGCTRL但未启动
+arm_sysregs_reg_write.051.R_VExpressCFGCTRL写操作成功
+arm_sysregs_reg_write.052.IN_VExpressCFGCTRL写操作失败
+arm_sysregs_reg_write.053.R_VExpressCFGCTRL读操作成功
+arm_sysregs_reg_write.054.IN_VExpressCFGCTRL读操作失败
+arm_sysregs_reg_write.055.IN_非VExpress写SYS_CFGSTAT失败
+arm_sysregs_reg_write.056.R_VExpress写SYS_CFGSTAT成功
+arm_sysregs_reg_write.057.R_PLDCTL1保留写
+arm_sysregs_reg_write.058.IN_未知寄存器写失败
+ 
+⸻
+ 
+十、
+arm_sysregs_reg_read
+1. 公共 Begin User Code：
+ARR0-UC
+static struct arm_sysregs s;
+static struct vmm_guest guest;
+static u32 dst;
+
+memset(&s, 0, sizeof(s));
+memset(&guest, 0, sizeof(guest));
+
+INIT_RW_LOCK(&s.lock);
+
+s.guest = &guest;
+
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+s.leds = 0x0000A5A5U;
+s.lockval = LOCK_VALUE;
+
+s.cfgdata1 = 0x11112222U;
+s.cfgdata2 = 0x33334444U;
+
+s.flags = 0x000000F0U;
+s.nvflags = 0x00000F00U;
+
+s.resetlevel = 0x00000055U;
+s.sys_mci = 0x00000066U;
+s.sys_clcd = 0x00007788U;
+
+s.proc_id = 0x12345678U;
+
+s.sys_cfgdata = 0x11223344U;
+s.sys_cfgctrl = 0x55667788U;
+s.sys_cfgstat = 0x00000003U;
+
+s.ref_100hz = 100U;
+s.ref_24mhz = 1000U;
+
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.s>> =
+    &s;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0U;
+
+<<arm_sysregs.arm_sysregs_reg_read.dst>> =
+    &dst;
+ 
+⸻
+ 
+十一、普通寄存器读取
+编号及正式名称	offset及额外设置	期望 dst
+arm_sysregs_reg_read.001.R_读取系统ID	offset=0x00；可设 s.sys_id=0x12345678	0x12345678
+arm_sysregs_reg_read.002.R_读取硬件开关	0x04	0
+arm_sysregs_reg_read.003.R_读取LED	0x08	0xA5A5
+arm_sysregs_reg_read.004.R_读取LOCK	0x20	LOCK_VALUE
+arm_sysregs_reg_read.005.R_读取OSC0	0x0C	0
+arm_sysregs_reg_read.006.R_读取OSC1	0x10	0
+arm_sysregs_reg_read.007.R_读取OSC2	0x14	0
+arm_sysregs_reg_read.008.R_读取OSC3	0x18	0
+arm_sysregs_reg_read.009.R_读取OSC4	0x1C	0
+arm_sysregs_reg_read.011.R_读取CFGDATA1	0x28	0x11112222
+arm_sysregs_reg_read.012.R_读取CFGDATA2	0x2C	0x33334444
+arm_sysregs_reg_read.013.R_读取FLAGS	0x30	0xF0
+arm_sysregs_reg_read.014.R_读取NVFLAGS	0x38	0x0F00
+arm_sysregs_reg_read.017.R_读取PCICTL	0x44	1
+arm_sysregs_reg_read.018.R_读取MCI	0x48	0x66
+arm_sysregs_reg_read.019.R_读取FLASH	0x4C	0
+arm_sysregs_reg_read.020.R_读取CLCD	0x50	0x7788
+arm_sysregs_reg_read.021.R_读取CLCDSER	0x54	0
+arm_sysregs_reg_read.022.R_读取BOOTCS	0x58	0
+arm_sysregs_reg_read.024.R_读取MISC	0x60	0
+arm_sysregs_reg_read.025.R_读取PROCID0	0x84	0x12345678
+arm_sysregs_reg_read.026.R_读取PROCID1	0x88	0xFF000000
+所有用例返回：
+VMM_OK
+统一注释
+测试目的：验证对应系统寄存器读取返回源码规定的状态值、固定值或 RAZ 值。
+用例类别：基于需求的测试
+预置条件：状态对象和输出指针有效，目标字段具有确定初值。
+测试步骤：
+step1、复制 ARR0-UC。
+step2、设置 offset及对应状态字段。
+step3、调用 arm_sysregs_reg_read。
+step4、检查返回值和dst。
+用例来源：需求分析、有效等价类。
+追溯ID：arm_sysregs_reg_read。
+等价列表：见正式名称。
+其它说明：每个共享处理体的 case 标签分别执行一次。
+通过准则：函数返回 VMM_OK，dst 等于表中期望值。
+ 
+⸻
+ 
+十二、100HZ 与 24MHz
+arm_sysregs_reg_read.010.R_读取100HZ计数器
+s.ref_100hz = 100U;
+
+offset = 0x24U;
+Stub：
+vmm_timer_timestamp：
+    return 20000100
+
+udiv64：
+    如果被 VectorCAST 识别为 Stub，设置 return 2；
+    如果已展开或使用 Actual，则不需要设置。
+计算：
+tdiff = 20000100 - 100
+      = 20000000
+
+dst = 20000000 / 10000000
+    = 2
+期望：
+return = VMM_OK
+dst = 2
+注释
+测试目的：验证100Hz参考计数器根据当前时间戳与参考时间差计算读取值。
+用例类别：基于需求的测试
+预置条件：参考时间为100，当前时间戳为20000100。
+测试步骤：
+step1、设置ref_100hz。
+step2、设置vmm_timer_timestamp返回值。
+step3、读取0x24寄存器。
+step4、检查返回值和dst。
+用例来源：需求分析、有效等价类。
+追溯ID：arm_sysregs_reg_read。
+等价列表：100Hz计数器正常读取。
+其它说明：若udiv64被识别为Stub，应显式设置返回2。
+通过准则：函数返回VMM_OK，dst等于2。
+ 
+⸻
+ 
+arm_sysregs_reg_read.023.R_读取24MHz计数器
+s.ref_24mhz = 1000U;
+
+offset = 0x5CU;
+Stub：
+vmm_timer_timestamp：
+    return 17384
+此时：
+tdiff = 17384 - 1000
+      = 16384
+计算：
+((16384 * 3) >> 7) = 384
+((16384 * 9) >> 14) = 9
+
+dst = 393
+期望：
+return = VMM_OK
+dst = 393
+ 
+⸻
+ 
+十三、RESETCTL 读取
+arm_sysregs_reg_read.015.R_VExpress读取RESETCTL为零
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+s.resetlevel = 0x55U;
+
+offset = 0x40U;
+期望：
+return = VMM_OK
+dst = 0
+覆盖板型判断为 true。
+ 
+⸻
+ 
+arm_sysregs_reg_read.016.R_非VExpress读取RESETCTL
+s.sys_id =
+    ((u32)BOARD_ID_EB << 16);
+
+s.resetlevel = 0x55U;
+
+offset = 0x40U;
+期望：
+return = VMM_OK
+dst = 0x55
+覆盖板型判断为 false。
+ 
+⸻
+ 
+十四、统一返回零的寄存器
+下表每一行都是独立用例，均期望：
+return = VMM_OK
+dst = 0
+编号及名称	offset
+arm_sysregs_reg_read.027.R_读取DMAPSR0	0x64
+arm_sysregs_reg_read.028.R_读取DMAPSR1	0x68
+arm_sysregs_reg_read.029.R_读取DMAPSR2	0x6C
+arm_sysregs_reg_read.030.R_读取IOSEL	0x70
+arm_sysregs_reg_read.031.R_读取PLDCTL	0x74
+arm_sysregs_reg_read.032.R_读取BUSID	0x80
+arm_sysregs_reg_read.033.R_读取OSCRESET0	0x8C
+arm_sysregs_reg_read.034.R_读取OSCRESET1	0x90
+arm_sysregs_reg_read.035.R_读取OSCRESET2	0x94
+arm_sysregs_reg_read.036.R_读取OSCRESET3	0x98
+arm_sysregs_reg_read.037.R_读取OSCRESET4	0x9C
+arm_sysregs_reg_read.038.R_读取SYS_TEST_OSC0	0xC0
+arm_sysregs_reg_read.039.R_读取SYS_TEST_OSC1	0xC4
+arm_sysregs_reg_read.040.R_读取SYS_TEST_OSC2	0xC8
+arm_sysregs_reg_read.041.R_读取SYS_TEST_OSC3	0xCC
+arm_sysregs_reg_read.042.R_读取SYS_TEST_OSC4	0xD0
+ 
+⸻
+ 
+十五、VExpress 专用寄存器读取
+SYS_CFGDATA
+arm_sysregs_reg_read.043.IN_非VExpress读取SYS_CFGDATA失败
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+s.sys_cfgdata = 0x11223344U;
+
+offset = 0xA0U;
+dst = 0xDEADBEEFU;
+期望：
+return = VMM_EFAIL
+dst = 0xDEADBEEF
+ 
+⸻
+ 
+arm_sysregs_reg_read.044.R_VExpress读取SYS_CFGDATA
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+offset = 0xA0U;
+期望：
+return = VMM_OK
+dst = 0x11223344
+ 
+⸻
+ 
+SYS_CFGCTRL
+arm_sysregs_reg_read.045.IN_非VExpress读取SYS_CFGCTRL失败
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+offset = 0xA4U;
+dst = 0xDEADBEEFU;
+期望：
+return = VMM_EFAIL
+dst = 0xDEADBEEF
+ 
+⸻
+ 
+arm_sysregs_reg_read.046.R_VExpress读取SYS_CFGCTRL
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+offset = 0xA4U;
+期望：
+return = VMM_OK
+dst = 0x55667788
+ 
+⸻
+ 
+SYS_CFGSTAT
+arm_sysregs_reg_read.047.IN_非VExpress读取SYS_CFGSTAT失败
+s.sys_id = ((u32)BOARD_ID_EB << 16);
+offset = 0xA8U;
+dst = 0xDEADBEEFU;
+期望：
+return = VMM_EFAIL
+dst = 0xDEADBEEF
+ 
+⸻
+ 
+arm_sysregs_reg_read.048.R_VExpress读取SYS_CFGSTAT
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << 16);
+
+offset = 0xA8U;
+期望：
+return = VMM_OK
+dst = 3
+ 
+⸻
+ 
+十六、PLDCTL1 与默认分支
+arm_sysregs_reg_read.049.R_读取PLDCTL1
+offset = 0xD8U;
+期望：
+return = VMM_OK
+dst = 0
+ 
+⸻
+ 
+arm_sysregs_reg_read.050.IN_未知寄存器读取失败
+offset = 0xACU;
+dst = 0xDEADBEEFU;
+期望：
+return = VMM_EFAIL
+dst = 0xDEADBEEF
+注释
+测试目的：验证读取未实现的系统寄存器地址时，函数返回失败且不修改输出参数。
+用例类别：接口测试
+预置条件：状态对象和输出指针有效；dst具有确定初值。
+测试步骤：
+step1、复制ARR0-UC。
+step2、设置offset为0xAC。
+step3、调用arm_sysregs_reg_read。
+step4、检查返回值和dst。
+用例来源：接口分析、无效等价类。
+追溯ID：arm_sysregs_reg_read。
+等价列表：未知系统寄存器偏移。
+其它说明：覆盖switch的default路径。
+通过准则：函数返回VMM_EFAIL，dst保持0xDEADBEEF。
+ 
+⸻
+ 
+十七、
+arm_sysregs_reg_read
+名称汇总
+arm_sysregs_reg_read.001.R_读取系统ID
+arm_sysregs_reg_read.002.R_读取硬件开关
+arm_sysregs_reg_read.003.R_读取LED
+arm_sysregs_reg_read.004.R_读取LOCK
+arm_sysregs_reg_read.005.R_读取OSC0
+arm_sysregs_reg_read.006.R_读取OSC1
+arm_sysregs_reg_read.007.R_读取OSC2
+arm_sysregs_reg_read.008.R_读取OSC3
+arm_sysregs_reg_read.009.R_读取OSC4
+arm_sysregs_reg_read.010.R_读取100HZ计数器
+arm_sysregs_reg_read.011.R_读取CFGDATA1
+arm_sysregs_reg_read.012.R_读取CFGDATA2
+arm_sysregs_reg_read.013.R_读取FLAGS
+arm_sysregs_reg_read.014.R_读取NVFLAGS
+arm_sysregs_reg_read.015.R_VExpress读取RESETCTL为零
+arm_sysregs_reg_read.016.R_非VExpress读取RESETCTL
+arm_sysregs_reg_read.017.R_读取PCICTL
+arm_sysregs_reg_read.018.R_读取MCI
+arm_sysregs_reg_read.019.R_读取FLASH
+arm_sysregs_reg_read.020.R_读取CLCD
+arm_sysregs_reg_read.021.R_读取CLCDSER
+arm_sysregs_reg_read.022.R_读取BOOTCS
+arm_sysregs_reg_read.023.R_读取24MHz计数器
+arm_sysregs_reg_read.024.R_读取MISC
+arm_sysregs_reg_read.025.R_读取PROCID0
+arm_sysregs_reg_read.026.R_读取PROCID1
+arm_sysregs_reg_read.027.R_读取DMAPSR0
+arm_sysregs_reg_read.028.R_读取DMAPSR1
+arm_sysregs_reg_read.029.R_读取DMAPSR2
+arm_sysregs_reg_read.030.R_读取IOSEL
+arm_sysregs_reg_read.031.R_读取PLDCTL
+arm_sysregs_reg_read.032.R_读取BUSID
+arm_sysregs_reg_read.033.R_读取OSCRESET0
+arm_sysregs_reg_read.034.R_读取OSCRESET1
+arm_sysregs_reg_read.035.R_读取OSCRESET2
+arm_sysregs_reg_read.036.R_读取OSCRESET3
+arm_sysregs_reg_read.037.R_读取OSCRESET4
+arm_sysregs_reg_read.038.R_读取SYS_TEST_OSC0
+arm_sysregs_reg_read.039.R_读取SYS_TEST_OSC1
+arm_sysregs_reg_read.040.R_读取SYS_TEST_OSC2
+arm_sysregs_reg_read.041.R_读取SYS_TEST_OSC3
+arm_sysregs_reg_read.042.R_读取SYS_TEST_OSC4
+arm_sysregs_reg_read.043.IN_非VExpress读取SYS_CFGDATA失败
+arm_sysregs_reg_read.044.R_VExpress读取SYS_CFGDATA
+arm_sysregs_reg_read.045.IN_非VExpress读取SYS_CFGCTRL失败
+arm_sysregs_reg_read.046.R_VExpress读取SYS_CFGCTRL
+arm_sysregs_reg_read.047.IN_非VExpress读取SYS_CFGSTAT失败
+arm_sysregs_reg_read.048.R_VExpress读取SYS_CFGSTAT
+arm_sysregs_reg_read.049.R_读取PLDCTL1
+arm_sysregs_reg_read.050.IN_未知寄存器读取失败
