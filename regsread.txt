@@ -1,0 +1,918 @@
+下面继续完整整理 arm_sysregs_reg_read()。本次每条测试用例均单独给出构造、Stub、期望和完整注释，不再使用统一注释代替单条用例说明。
+该函数没有对 s 和 dst 做空指针检查，因此不构造 s == NULL 或 dst == NULL 用例，否则会在函数内部直接解引用。
+一、公共测试构造
+ARR0-UC
+：通用 Begin User Code
+各用例可以复制以下构造，然后按对应条目修改 offset、状态字段或板型：
+static struct arm_sysregs s;
+static u32 dst;
+
+memset(&s, 0, sizeof(s));
+
+INIT_RW_LOCK(&s.lock);
+
+/*
+ * 默认构造 VExpress 板型。
+ * 需要非 VExpress 路径的用例会单独修改。
+ */
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.leds = 0x0000A5A5U;
+s.lockval = (u32)LOCK_VALUE;
+
+s.cfgdata1 = 0x11112222U;
+s.cfgdata2 = 0x33334444U;
+
+s.flags = 0x000000F0U;
+s.nvflags = 0x00000F00U;
+
+s.resetlevel = 0x00000055U;
+s.sys_mci = 0x00000066U;
+s.sys_clcd = 0x00007788U;
+
+s.proc_id = 0x12345678U;
+
+s.sys_cfgdata = 0x11223344U;
+s.sys_cfgctrl = 0x55667788U;
+s.sys_cfgstat = 0x00000003U;
+
+s.ref_100hz = (u64)100U;
+s.ref_24mhz = (u64)1000U;
+
+/*
+ * 错误路径用例利用该初值确认 dst 未被修改。
+ */
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.s>> =
+    &s;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x00U;
+
+<<arm_sysregs.arm_sysregs_reg_read.dst>> =
+    &dst;
+锁相关代码沿用当前已经能够正常执行的测试环境配置。vmm_timer_timestamp() 仅在 100Hz 和 24MHz 用例中设置返回值。
+ 
+⸻
+ 
+二、基础寄存器读取
+arm_sysregs_reg_read.001.R_读取系统ID
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id = 0x12345678U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x00U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x12345678
+用例注释
+测试目的：验证读取系统 ID 寄存器时，函数将 s.sys_id 原值返回给调用者。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效；sys_id 设置为 0x12345678；输出指针有效。 测试步骤： step1、将 s.sys_id 设置为 0x12345678。 step2、将读取偏移设置为系统 ID 地址 0x00。 step3、调用 arm_sysregs_reg_read。 step4、检查函数返回值和 dst。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：系统 ID 寄存器正常读取。 其它说明：覆盖 case 0x00 的字段读取路径。 通过准则：函数返回 VMM_OK，dst 等于 0x12345678。
+ 
+⸻
+ 
+arm_sysregs_reg_read.002.R_读取硬件开关
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x04U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证读取通用硬件开关寄存器时，当前模拟实现返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象和输出指针有效。 测试步骤： step1、将 dst 初始化为非零哨兵值。 step2、将读取偏移设置为硬件开关地址 0x04。 step3、调用被测函数。 step4、检查返回值和输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：硬件开关寄存器读取。 其它说明：当前实现没有向用户暴露开关状态，因此固定返回 0。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.003.R_读取LED
+Begin User Code
+复制 ARR0-UC，保持：
+s.leds = 0x0000A5A5U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x08U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x0000A5A5
+用例注释
+测试目的：验证读取 LED 寄存器时返回当前保存的 LED 状态。 用例类别：基于需求的测试 预置条件：LED 状态设置为 0xA5A5；输出指针有效。 测试步骤： step1、将 s.leds 初始化为 0xA5A5。 step2、将读取偏移设置为 0x08。 step3、调用 arm_sysregs_reg_read。 step4、检查 dst 是否等于 LED 状态。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：LED 状态正常读取。 其它说明：覆盖 case 0x08。 通过准则：函数返回 VMM_OK，dst 等于 0xA5A5。
+ 
+⸻
+ 
+arm_sysregs_reg_read.004.R_读取LOCK
+Begin User Code
+复制 ARR0-UC，保持：
+s.lockval = (u32)LOCK_VALUE;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x20U;
+Expected Return
+VMM_OK
+关键期望
+dst = LOCK_VALUE
+用例注释
+测试目的：验证读取 LOCK 寄存器时，函数返回当前锁控制值。 用例类别：基于需求的测试 预置条件：LOCK 寄存器设置为 LOCK_VALUE。 测试步骤： step1、将 s.lockval 设置为解锁值。 step2、将读取偏移设置为 0x20。 step3、调用被测函数。 step4、检查函数返回值和输出内容。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：LOCK 寄存器正常读取。 其它说明：覆盖 case 0x20。 通过准则：函数返回 VMM_OK，dst 等于 LOCK_VALUE。
+ 
+⸻
+ 
+三、OSC 固定零值读取
+arm_sysregs_reg_read.005.R_读取OSC0
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x0CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证读取 OSC0 寄存器时，当前未实现的时钟寄存器返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象及输出指针有效。 测试步骤： step1、将输出值初始化为非零哨兵值。 step2、将读取偏移设置为 OSC0 地址 0x0C。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSC0 固定零值读取。 其它说明：覆盖共享处理体中的 case 0x0c 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.006.R_读取OSC1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x10U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证读取 OSC1 寄存器时返回固定值 0。 用例类别：基于需求的测试 预置条件：状态对象和输出地址有效。 测试步骤： step1、将 dst 设置为非零值。 step2、将读取偏移设置为 0x10。 step3、调用被测函数。 step4、检查读取结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSC1 固定零值读取。 其它说明：覆盖 case 0x10 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.007.R_读取OSC2
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x14U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSC2 寄存器读取进入固定零值处理路径。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出哨兵值。 step2、将偏移设置为 OSC2 地址 0x14。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSC2 固定零值读取。 其它说明：覆盖 case 0x14 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.008.R_读取OSC3
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x18U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证读取 OSC3 时返回固定零值。 用例类别：基于需求的测试 预置条件：输入状态和输出指针有效。 测试步骤： step1、将输出初始化为 0xDEADBEEF。 step2、将偏移设置为 0x18。 step3、调用寄存器读取函数。 step4、检查输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSC3 固定零值读取。 其它说明：覆盖 case 0x18 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.009.R_读取OSC4
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x1CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证读取 OSC4 寄存器时返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效。 测试步骤： step1、初始化输出变量。 step2、将读取偏移设置为 0x1C。 step3、调用被测函数。 step4、检查返回结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSC4 固定零值读取。 其它说明：覆盖 case 0x1c 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+四、计数器和配置数据读取
+arm_sysregs_reg_read.010.R_读取100HZ计数器
+Begin User Code
+复制 ARR0-UC，修改：
+s.ref_100hz = (u64)100U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x24U;
+Stub Processing
+vmm_timer_timestamp：
+    return 20000100
+若 udiv64() 在当前 VectorCAST 环境中被识别为 Stub，则增加：
+udiv64：
+    return 2
+若 udiv64() 已展开或使用实际实现，则不需要配置。
+Expected Return
+VMM_OK
+关键期望
+dst = 2
+实际计算关系：
+tdiff = 20000100 - 100
+      = 20000000
+
+20000000 / 10000000
+      = 2
+用例注释
+测试目的：验证读取 100Hz 计数器时，函数根据当前时间戳和参考时间戳的差值计算计数结果。 用例类别：基于需求的测试 预置条件：100Hz 参考时间为 100；当前时间戳为 20000100；输出指针有效。 测试步骤： step1、将 ref_100hz 设置为 100。 step2、设置 vmm_timer_timestamp 返回 20000100。 step3、将读取偏移设置为 0x24。 step4、调用被测函数。 step5、检查返回值和计算结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：100Hz 计数器正常读取。 其它说明：时间差为 20000000ns，经 10000000除法后结果为 2。 通过准则：函数返回 VMM_OK，dst 等于 2。
+ 
+⸻
+ 
+arm_sysregs_reg_read.011.R_读取CFGDATA1
+Begin User Code
+复制 ARR0-UC，保持：
+s.cfgdata1 = 0x11112222U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x28U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x11112222
+用例注释
+测试目的：验证读取 CFGDATA1 寄存器时返回当前配置数据值。 用例类别：基于需求的测试 预置条件：CFGDATA1 设置为 0x11112222。 测试步骤： step1、初始化 CFGDATA1。 step2、将读取偏移设置为 0x28。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：CFGDATA1 正常读取。 其它说明：覆盖 case 0x28。 通过准则：函数返回 VMM_OK，dst 等于 0x11112222。
+ 
+⸻
+ 
+arm_sysregs_reg_read.012.R_读取CFGDATA2
+Begin User Code
+复制 ARR0-UC，保持：
+s.cfgdata2 = 0x33334444U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x2CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x33334444
+用例注释
+测试目的：验证 CFGDATA2 寄存器返回当前保存的数据值。 用例类别：基于需求的测试 预置条件：CFGDATA2 设置为 0x33334444。 测试步骤： step1、初始化 CFGDATA2 字段。 step2、将读取偏移设置为 0x2C。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：CFGDATA2 正常读取。 其它说明：覆盖 case 0x2c。 通过准则：函数返回 VMM_OK，dst 等于 0x33334444。
+ 
+⸻
+ 
+arm_sysregs_reg_read.013.R_读取FLAGS
+Begin User Code
+复制 ARR0-UC，保持：
+s.flags = 0x000000F0U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x30U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x000000F0
+用例注释
+测试目的：验证读取 FLAGS 寄存器时返回当前普通标志位状态。 用例类别：基于需求的测试 预置条件：FLAGS 设置为 0xF0。 测试步骤： step1、初始化普通标志寄存器。 step2、设置读取偏移为 0x30。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：FLAGS 正常读取。 其它说明：覆盖 case 0x30。 通过准则：函数返回 VMM_OK，dst 等于 0xF0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.014.R_读取NVFLAGS
+Begin User Code
+复制 ARR0-UC，保持：
+s.nvflags = 0x00000F00U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x38U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x00000F00
+用例注释
+测试目的：验证读取 NVFLAGS 时返回当前非易失标志状态。 用例类别：基于需求的测试 预置条件：NVFLAGS 设置为 0x0F00。 测试步骤： step1、初始化非易失标志字段。 step2、将读取偏移设置为 0x38。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：NVFLAGS 正常读取。 其它说明：覆盖 case 0x38。 通过准则：函数返回 VMM_OK，dst 等于 0x0F00。
+ 
+⸻
+ 
+五、RESETCTL 板型分支
+arm_sysregs_reg_read.015.R_VExpress读取RESETCTL为零
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x40U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 VExpress 板型读取 RESETCTL 时，保留寄存器按 RAZ 规则返回 0。 用例类别：基于需求的测试 预置条件：板型为 VExpress；resetlevel 设置为非零值 0x55。 测试步骤： step1、将板型设置为 VExpress。 step2、将内部 resetlevel 设置为 0x55，用于确认读取不返回该字段。 step3、将偏移设置为 0x40。 step4、调用被测函数。 step5、检查返回值和输出值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：VExpress RESETCTL 保留读取。 其它说明：覆盖 board_id(s) == BOARD_ID_VEXPRESS 为 true。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.016.R_非VExpress读取RESETCTL
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.resetlevel = 0x00000055U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x40U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x00000055
+用例注释
+测试目的：验证非 VExpress 板型读取 RESETCTL 时返回当前复位级别。 用例类别：基于需求的测试 预置条件：板型为 EB；resetlevel 设置为 0x55。 测试步骤： step1、将板型设置为 EB。 step2、将复位级别设置为 0x55。 step3、读取偏移 0x40。 step4、检查返回值和输出。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：非 VExpress RESETCTL 正常读取。 其它说明：覆盖板型判断为 false的路径。 通过准则：函数返回 VMM_OK，dst 等于 0x55。
+ 
+⸻
+ 
+六、PCI、MCI、FLASH、CLCD 等寄存器
+arm_sysregs_reg_read.017.R_读取PCICTL
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x44U;
+Expected Return
+VMM_OK
+关键期望
+dst = 1
+用例注释
+测试目的：验证读取 PCICTL 时返回实现规定的固定值 1。 用例类别：基于需求的测试 预置条件：状态对象和输出指针有效。 测试步骤： step1、将输出初始化为非 1值。 step2、将读取偏移设置为 0x44。 step3、调用被测函数。 step4、检查读取结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：PCICTL 固定值读取。 其它说明：覆盖 case 0x44。 通过准则：函数返回 VMM_OK，dst 等于 1。
+ 
+⸻
+ 
+arm_sysregs_reg_read.018.R_读取MCI
+Begin User Code
+复制 ARR0-UC，保持：
+s.sys_mci = 0x00000066U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x48U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x00000066
+用例注释
+测试目的：验证读取 MCI 寄存器时返回当前 sys_mci 状态。 用例类别：基于需求的测试 预置条件：sys_mci 设置为 0x66。 测试步骤： step1、初始化 MCI 状态字段。 step2、将读取偏移设置为 0x48。 step3、调用被测函数。 step4、检查输出内容。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：MCI 寄存器正常读取。 其它说明：覆盖 case 0x48。 通过准则：函数返回 VMM_OK，dst 等于 0x66。
+ 
+⸻
+ 
+arm_sysregs_reg_read.019.R_读取FLASH
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x4CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 FLASH 控制寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器状态有效。 测试步骤： step1、初始化输出哨兵。 step2、将读取偏移设置为 0x4C。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：FLASH 固定零值读取。 其它说明：覆盖 case 0x4c。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.020.R_读取CLCD
+Begin User Code
+复制 ARR0-UC，保持：
+s.sys_clcd = 0x00007788U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x50U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x00007788
+用例注释
+测试目的：验证读取 CLCD 控制寄存器时返回当前保存的 sys_clcd 值。 用例类别：基于需求的测试 预置条件：CLCD 控制状态为 0x7788。 测试步骤： step1、初始化 s.sys_clcd。 step2、将读取偏移设置为 0x50。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：CLCD 控制寄存器正常读取。 其它说明：覆盖 case 0x50。 通过准则：函数返回 VMM_OK，dst 等于 0x7788。
+ 
+⸻
+ 
+arm_sysregs_reg_read.021.R_读取CLCDSER
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x54U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 CLCDSER 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：输入状态及输出地址有效。 测试步骤： step1、将输出初始化为非零值。 step2、读取偏移 0x54。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：CLCDSER 固定零值读取。 其它说明：覆盖 case 0x54。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.022.R_读取BOOTCS
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x58U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 BOOTCS 寄存器读取按当前实现返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出哨兵值。 step2、将读取偏移设置为 0x58。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：BOOTCS 固定零值读取。 其它说明：覆盖 case 0x58。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.023.R_读取24MHz计数器
+Begin User Code
+复制 ARR0-UC，修改：
+s.ref_24mhz = (u64)1000U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x5CU;
+Stub Processing
+vmm_timer_timestamp：
+    return 17384
+Expected Return
+VMM_OK
+关键期望
+dst = 393
+计算过程：
+tdiff = 17384 - 1000
+      = 16384
+
+((16384 * 3) >> 7)
+      = 384
+
+((16384 * 9) >> 14)
+      = 9
+
+384 + 9
+      = 393
+用例注释
+测试目的：验证读取 24MHz 计数器时，函数按照源码中的整数近似公式计算时间差对应的计数值。 用例类别：基于需求的测试 预置条件：24MHz 参考时间为 1000；当前时间戳为 17384。 测试步骤： step1、将 ref_24mhz 设置为 1000。 step2、设置当前时间戳返回 17384，使时间差为 16384。 step3、将读取偏移设置为 0x5C。 step4、调用被测函数。 step5、检查输出值是否为 393。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：24MHz 计数器正常读取。 其它说明：该输入便于精确验证两项移位近似计算结果。 通过准则：函数返回 VMM_OK，dst 等于 393。
+ 
+⸻
+ 
+arm_sysregs_reg_read.024.R_读取MISC
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x60U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 MISC 系统寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：状态对象和输出指针有效。 测试步骤： step1、初始化输出为非零值。 step2、将读取偏移设置为 0x60。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：MISC 固定零值读取。 其它说明：覆盖 case 0x60。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.025.R_读取PROCID0
+Begin User Code
+复制 ARR0-UC，保持：
+s.proc_id = 0x12345678U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x84U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x12345678
+用例注释
+测试目的：验证读取 PROCID0 时返回状态对象中的处理器 ID。 用例类别：基于需求的测试 预置条件：proc_id 设置为 0x12345678。 测试步骤： step1、初始化处理器 ID。 step2、将读取偏移设置为 0x84。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：PROCID0 正常读取。 其它说明：覆盖 case 0x84。 通过准则：函数返回 VMM_OK，dst 等于 0x12345678。
+ 
+⸻
+ 
+arm_sysregs_reg_read.026.R_读取PROCID1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x88U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0xFF000000
+用例注释
+测试目的：验证 PROCID1 寄存器读取返回源码规定的固定处理器标识值。 用例类别：基于需求的测试 预置条件：状态对象和输出指针有效。 测试步骤： step1、将输出初始化为非固定值。 step2、将读取偏移设置为 0x88。 step3、调用被测函数。 step4、检查返回值和输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：PROCID1 固定值读取。 其它说明：覆盖 case 0x88。 通过准则：函数返回 VMM_OK，dst 等于 0xFF000000。
+ 
+⸻
+ 
+七、共享固定零值分支
+arm_sysregs_reg_read.027.R_读取DMAPSR0
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x64U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 DMAPSR0 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、将输出设置为非零哨兵值。 step2、将读取偏移设置为 0x64。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：DMAPSR0 固定零值读取。 其它说明：覆盖共享处理体中的 case 0x64 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.028.R_读取DMAPSR1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x68U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 DMAPSR1 寄存器读取进入固定零值分支。 用例类别：基于需求的测试 预置条件：输入对象和输出地址有效。 测试步骤： step1、初始化输出哨兵。 step2、将读取偏移设置为 0x68。 step3、调用被测函数。 step4、检查读取结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：DMAPSR1 固定零值读取。 其它说明：覆盖 case 0x68 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.029.R_读取DMAPSR2
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x6CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 DMAPSR2 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出变量为非零值。 step2、将读取偏移设置为 0x6C。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：DMAPSR2 固定零值读取。 其它说明：覆盖 case 0x6c 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.030.R_读取IOSEL
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x70U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 IOSEL 寄存器读取返回固定零值。 用例类别：基于需求的测试 预置条件：读取参数有效。 测试步骤： step1、初始化输出哨兵。 step2、将读取偏移设置为 0x70。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：IOSEL 固定零值读取。 其它说明：覆盖 case 0x70 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.031.R_读取PLDCTL
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x74U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 PLDCTL 寄存器读取进入 RAZ 处理并返回 0。 用例类别：基于需求的测试 预置条件：状态对象及输出指针有效。 测试步骤： step1、将输出初始化为非零值。 step2、读取偏移 0x74。 step3、调用被测函数。 step4、检查返回值和输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：PLDCTL 固定零值读取。 其它说明：覆盖 case 0x74 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.032.R_读取BUSID
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x80U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 BUSID 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器状态有效。 测试步骤： step1、初始化输出哨兵值。 step2、将读取偏移设置为 0x80。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：BUSID 固定零值读取。 其它说明：覆盖 case 0x80 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.033.R_读取OSCRESET0
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x8CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSCRESET0 寄存器读取按当前实现返回 0。 用例类别：基于需求的测试 预置条件：状态对象和输出指针有效。 测试步骤： step1、初始化输出为非零值。 step2、将读取偏移设置为 0x8C。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSCRESET0 固定零值读取。 其它说明：覆盖 case 0x8c 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.034.R_读取OSCRESET1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x90U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSCRESET1 读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器状态对象有效。 测试步骤： step1、将输出变量设置为哨兵值。 step2、读取 0x90 偏移。 step3、调用被测函数。 step4、检查输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSCRESET1 固定零值读取。 其它说明：覆盖 case 0x90 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.035.R_读取OSCRESET2
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x94U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSCRESET2 寄存器读取返回固定零值。 用例类别：基于需求的测试 预置条件：输入对象有效。 测试步骤： step1、初始化输出为非零值。 step2、将读取偏移设置为 0x94。 step3、执行寄存器读取。 step4、检查返回值及输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSCRESET2 固定零值读取。 其它说明：覆盖 case 0x94 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.036.R_读取OSCRESET3
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x98U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSCRESET3 寄存器读取进入共享固定零值处理。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出变量。 step2、设置偏移为 0x98。 step3、调用被测函数。 step4、检查输出值。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSCRESET3 固定零值读取。 其它说明：覆盖 case 0x98 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.037.R_读取OSCRESET4
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0x9CU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 OSCRESET4 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：状态对象和输出指针有效。 测试步骤： step1、初始化输出哨兵。 step2、将偏移设置为 0x9C。 step3、调用被测函数。 step4、检查结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：OSCRESET4 固定零值读取。 其它说明：覆盖 case 0x9c 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.038.R_读取SYS_TEST_OSC0
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xC0U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 SYS_TEST_OSC0 测试寄存器读取返回固定零值。 用例类别：基于需求的测试 预置条件：读取对象及输出指针有效。 测试步骤： step1、设置输出初值为非零。 step2、读取偏移 0xC0。 step3、调用被测函数。 step4、检查输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：SYS_TEST_OSC0 固定零值读取。 其它说明：覆盖 case 0xc0 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.039.R_读取SYS_TEST_OSC1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xC4U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 SYS_TEST_OSC1 测试寄存器读取返回 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出变量。 step2、将读取偏移设置为 0xC4。 step3、调用被测函数。 step4、检查输出结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：SYS_TEST_OSC1 固定零值读取。 其它说明：覆盖 case 0xc4 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.040.R_读取SYS_TEST_OSC2
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xC8U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 SYS_TEST_OSC2 寄存器读取进入固定零值分支。 用例类别：基于需求的测试 预置条件：输入参数有效。 测试步骤： step1、初始化输出为非零哨兵。 step2、将偏移设置为 0xC8。 step3、调用被测函数。 step4、检查读取结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：SYS_TEST_OSC2 固定零值读取。 其它说明：覆盖 case 0xc8 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.041.R_读取SYS_TEST_OSC3
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xCCU;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 SYS_TEST_OSC3 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：状态对象及输出地址有效。 测试步骤： step1、设置输出哨兵值。 step2、将偏移设置为 0xCC。 step3、执行寄存器读取。 step4、检查返回结果。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：SYS_TEST_OSC3 固定零值读取。 其它说明：覆盖 case 0xcc 标签。 通过准则：函数返回 VMM_OK，dst 为 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.042.R_读取SYS_TEST_OSC4
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xD0U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 SYS_TEST_OSC4 寄存器读取按当前实现返回 0。 用例类别：基于需求的测试 预置条件：系统寄存器对象有效。 测试步骤： step1、初始化输出变量为非零值。 step2、将读取偏移设置为 0xD0。 step3、调用被测函数。 step4、检查函数返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：SYS_TEST_OSC4 固定零值读取。 其它说明：覆盖 case 0xd0 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+八、VExpress 专用配置寄存器
+arm_sysregs_reg_read.043.IN_非VExpress读取SYS_CFGDATA失败
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgdata = 0x11223344U;
+
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA0U;
+Expected Return
+VMM_EFAIL
+关键期望
+dst = 0xDEADBEEF
+用例注释
+测试目的：验证非 VExpress 板型读取 SYS_CFGDATA 时返回失败，且不修改输出参数。 用例类别：接口测试 预置条件：板型为 EB；SYS_CFGDATA 设置为确定值；dst 初始化为哨兵值。 测试步骤： step1、将板型设置为 EB。 step2、将 dst 设置为 0xDEADBEEF。 step3、将读取偏移设置为 0xA0。 step4、调用被测函数。 step5、检查返回值和 dst。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：非 VExpress 板型读取 SYS_CFGDATA。 其它说明：覆盖 board_id(s) != BOARD_ID_VEXPRESS 为 true；失败路径未对 dst 赋值。 通过准则：函数返回 VMM_EFAIL，dst 保持 0xDEADBEEF。
+ 
+⸻
+ 
+arm_sysregs_reg_read.044.R_VExpress读取SYS_CFGDATA
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgdata = 0x11223344U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA0U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x11223344
+用例注释
+测试目的：验证 VExpress 板型可以读取 SYS_CFGDATA 当前值。 用例类别：基于需求的测试 预置条件：板型为 VExpress；SYS_CFGDATA 为 0x11223344。 测试步骤： step1、设置 VExpress 板型。 step2、初始化 SYS_CFGDATA。 step3、读取偏移 0xA0。 step4、调用被测函数。 step5、检查输出数据。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：VExpress SYS_CFGDATA 正常读取。 其它说明：覆盖板型判断为 false和数据读取路径。 通过准则：函数返回 VMM_OK，dst 等于 0x11223344。
+ 
+⸻
+ 
+arm_sysregs_reg_read.045.IN_非VExpress读取SYS_CFGCTRL失败
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgctrl = 0x55667788U;
+
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA4U;
+Expected Return
+VMM_EFAIL
+关键期望
+dst = 0xDEADBEEF
+用例注释
+测试目的：验证非 VExpress 板型读取 SYS_CFGCTRL 时返回失败且不写输出值。 用例类别：接口测试 预置条件：板型为 EB；输出变量设置为哨兵值。 测试步骤： step1、将板型设置为非 VExpress。 step2、将 dst 初始化为 0xDEADBEEF。 step3、读取偏移 0xA4。 step4、调用被测函数。 step5、检查返回值和输出变量。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：非 VExpress 板型读取 SYS_CFGCTRL。 其它说明：覆盖 SYS_CFGCTRL 板型检查失败路径。 通过准则：函数返回 VMM_EFAIL，dst 保持不变。
+ 
+⸻
+ 
+arm_sysregs_reg_read.046.R_VExpress读取SYS_CFGCTRL
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgctrl = 0x55667788U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA4U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0x55667788
+用例注释
+测试目的：验证 VExpress 板型读取 SYS_CFGCTRL 时返回当前控制寄存器值。 用例类别：基于需求的测试 预置条件：板型为 VExpress；SYS_CFGCTRL 为 0x55667788。 测试步骤： step1、设置 VExpress 板型。 step2、初始化 SYS_CFGCTRL。 step3、读取偏移 0xA4。 step4、调用被测函数。 step5、检查输出值。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：VExpress SYS_CFGCTRL 正常读取。 其它说明：覆盖板型判断成功路径。 通过准则：函数返回 VMM_OK，dst 等于 0x55667788。
+ 
+⸻
+ 
+arm_sysregs_reg_read.047.IN_非VExpress读取SYS_CFGSTAT失败
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_EB << (u32)16);
+
+s.sys_cfgstat = 0x00000003U;
+
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA8U;
+Expected Return
+VMM_EFAIL
+关键期望
+dst = 0xDEADBEEF
+用例注释
+测试目的：验证非 VExpress 板型读取 SYS_CFGSTAT 时返回失败，且不修改输出参数。 用例类别：接口测试 预置条件：板型为 EB；输出变量具有确定哨兵值。 测试步骤： step1、设置非 VExpress 板型。 step2、将 dst 初始化为 0xDEADBEEF。 step3、将读取偏移设置为 0xA8。 step4、调用被测函数。 step5、检查返回结果。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：非 VExpress 板型读取 SYS_CFGSTAT。 其它说明：覆盖 SYS_CFGSTAT 板型判断失败路径。 通过准则：函数返回 VMM_EFAIL，dst 保持哨兵值。
+ 
+⸻
+ 
+arm_sysregs_reg_read.048.R_VExpress读取SYS_CFGSTAT
+Begin User Code
+复制 ARR0-UC，修改：
+s.sys_id =
+    ((u32)BOARD_ID_VEXPRESS << (u32)16);
+
+s.sys_cfgstat = 0x00000003U;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xA8U;
+Expected Return
+VMM_OK
+关键期望
+dst = 3
+用例注释
+测试目的：验证 VExpress 板型读取 SYS_CFGSTAT 时返回当前配置状态。 用例类别：基于需求的测试 预置条件：板型为 VExpress；配置状态为完成并带错误标志，即值 3。 测试步骤： step1、设置 VExpress 板型。 step2、将 SYS_CFGSTAT 设置为 3。 step3、读取偏移 0xA8。 step4、调用被测函数。 step5、检查状态读取结果。 用例来源：需求分析、有效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：VExpress SYS_CFGSTAT 正常读取。 其它说明：覆盖 SYS_CFGSTAT 板型判断成功路径。 通过准则：函数返回 VMM_OK，dst 等于 3。
+ 
+⸻
+ 
+九、末尾分支
+arm_sysregs_reg_read.049.R_读取PLDCTL1
+Begin User Code
+复制 ARR0-UC，修改：
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xD8U;
+Expected Return
+VMM_OK
+关键期望
+dst = 0
+用例注释
+测试目的：验证 PLDCTL1 寄存器读取返回固定值 0。 用例类别：基于需求的测试 预置条件：系统寄存器状态和输出地址有效。 测试步骤： step1、将输出初始化为非零哨兵值。 step2、将读取偏移设置为 0xD8。 step3、调用被测函数。 step4、检查返回值和输出。 用例来源：需求分析。 追溯ID：arm_sysregs_reg_read。 等价列表：PLDCTL1 固定零值读取。 其它说明：覆盖 case 0xd8 标签。 通过准则：函数返回 VMM_OK，dst 等于 0。
+ 
+⸻
+ 
+arm_sysregs_reg_read.050.IN_未知寄存器读取失败
+Begin User Code
+复制 ARR0-UC，修改：
+dst = 0xDEADBEEFU;
+
+<<arm_sysregs.arm_sysregs_reg_read.offset>> =
+    0xACU;
+Expected Return
+VMM_EFAIL
+关键期望
+dst = 0xDEADBEEF
+用例注释
+测试目的：验证读取未实现的寄存器偏移时，函数通过 switch default 返回失败，并保持输出变量不变。 用例类别：接口测试 预置条件：系统寄存器状态有效；偏移 0xAC 不属于任何已实现寄存器；dst 为确定哨兵值。 测试步骤： step1、将 dst 初始化为 0xDEADBEEF。 step2、将读取偏移设置为未知地址 0xAC。 step3、调用 arm_sysregs_reg_read。 step4、检查函数返回值。 step5、确认错误路径未修改 dst。 用例来源：接口分析、无效等价类。 追溯ID：arm_sysregs_reg_read。 等价列表：未知系统寄存器读取偏移。 其它说明：覆盖外层 switch 的 default 分支。 通过准则：函数返回 VMM_EFAIL，dst 保持 0xDEADBEEF。
+ 
+⸻
+ 
+十、正式名称汇总
+arm_sysregs_reg_read.001.R_读取系统ID
+arm_sysregs_reg_read.002.R_读取硬件开关
+arm_sysregs_reg_read.003.R_读取LED
+arm_sysregs_reg_read.004.R_读取LOCK
+arm_sysregs_reg_read.005.R_读取OSC0
+arm_sysregs_reg_read.006.R_读取OSC1
+arm_sysregs_reg_read.007.R_读取OSC2
+arm_sysregs_reg_read.008.R_读取OSC3
+arm_sysregs_reg_read.009.R_读取OSC4
+arm_sysregs_reg_read.010.R_读取100HZ计数器
+arm_sysregs_reg_read.011.R_读取CFGDATA1
+arm_sysregs_reg_read.012.R_读取CFGDATA2
+arm_sysregs_reg_read.013.R_读取FLAGS
+arm_sysregs_reg_read.014.R_读取NVFLAGS
+arm_sysregs_reg_read.015.R_VExpress读取RESETCTL为零
+arm_sysregs_reg_read.016.R_非VExpress读取RESETCTL
+arm_sysregs_reg_read.017.R_读取PCICTL
+arm_sysregs_reg_read.018.R_读取MCI
+arm_sysregs_reg_read.019.R_读取FLASH
+arm_sysregs_reg_read.020.R_读取CLCD
+arm_sysregs_reg_read.021.R_读取CLCDSER
+arm_sysregs_reg_read.022.R_读取BOOTCS
+arm_sysregs_reg_read.023.R_读取24MHz计数器
+arm_sysregs_reg_read.024.R_读取MISC
+arm_sysregs_reg_read.025.R_读取PROCID0
+arm_sysregs_reg_read.026.R_读取PROCID1
+arm_sysregs_reg_read.027.R_读取DMAPSR0
+arm_sysregs_reg_read.028.R_读取DMAPSR1
+arm_sysregs_reg_read.029.R_读取DMAPSR2
+arm_sysregs_reg_read.030.R_读取IOSEL
+arm_sysregs_reg_read.031.R_读取PLDCTL
+arm_sysregs_reg_read.032.R_读取BUSID
+arm_sysregs_reg_read.033.R_读取OSCRESET0
+arm_sysregs_reg_read.034.R_读取OSCRESET1
+arm_sysregs_reg_read.035.R_读取OSCRESET2
+arm_sysregs_reg_read.036.R_读取OSCRESET3
+arm_sysregs_reg_read.037.R_读取OSCRESET4
+arm_sysregs_reg_read.038.R_读取SYS_TEST_OSC0
+arm_sysregs_reg_read.039.R_读取SYS_TEST_OSC1
+arm_sysregs_reg_read.040.R_读取SYS_TEST_OSC2
+arm_sysregs_reg_read.041.R_读取SYS_TEST_OSC3
+arm_sysregs_reg_read.042.R_读取SYS_TEST_OSC4
+arm_sysregs_reg_read.043.IN_非VExpress读取SYS_CFGDATA失败
+arm_sysregs_reg_read.044.R_VExpress读取SYS_CFGDATA
+arm_sysregs_reg_read.045.IN_非VExpress读取SYS_CFGCTRL失败
+arm_sysregs_reg_read.046.R_VExpress读取SYS_CFGCTRL
+arm_sysregs_reg_read.047.IN_非VExpress读取SYS_CFGSTAT失败
+arm_sysregs_reg_read.048.R_VExpress读取SYS_CFGSTAT
+arm_sysregs_reg_read.049.R_读取PLDCTL1
+arm_sysregs_reg_read.050.IN_未知寄存器读取失败
