@@ -1,0 +1,276 @@
+你补充的这个信息非常关键：
+dsm 在 STR 流程中也是冻结再拉起，pid 不变
+这说明：
+	•	virtio_net_teardown() 大概率不会执行（因为进程没有退出，设备对象仍存在）。
+	•	tap1 被删除/脱离 br0 的原因更可能来自：
+	1.	Linux bridge 在 suspend/resume 后重新处理 netdevice 状态
+	2.	tap1 收到了 NETDEV_DOWN / NETDEV_UNREGISTER
+	3.	vhost-net/tap backend 在恢复过程中被 reset
+	4.	ServerVM 网络恢复流程主动 remove/add bridge port
+	5.	Xvisor/acrn-dm 恢复时触发 virtio reset，导致 tap 状态变化
+现在应该从“生命周期”角度打日志，而不是继续看 IP。
+ 
+⸻
+ 
+一、首先确认 tap1 是“消失”还是“脱离 bridge”
+你现在看到：
+brctl show br0
+tap1 不在。
+但是需要确认：
+情况 A
+tap1 设备不存在：
+ip link show tap1
+没有输出。
+说明：
+tap1 unregister
+ 
+⸻
+ 
+情况 B
+tap1 还存在：
+ip link show tap1
+有：
+tap1: <BROADCAST,MULTICAST>
+但是：
+brctl show br0
+没有 tap1。
+说明：
+bridge port detach
+这两个完全不同。
+ 
+⸻
+ 
+二、dsm virtio-net 增加日志
+1. tap 创建/打开
+位置：
+static int
+virtio_net_tap_open(char *devname)
+在：
+rc = ioctl(tunfd, TUNSETIFF, (void *)&ifr);
+之后：
+增加：
+pr_err("DM: tap open success name=%s fd=%d\n",
+       ifr.ifr_name, tunfd);
+目的：
+确认 STR 后有没有重新创建 tap。
+ 
+⸻
+ 
+2. tap fd 关闭
+重点位置：
+virtio_net_teardown()
+改：
+static void
+virtio_net_teardown(void *param)
+{
+    struct virtio_net *net;
+
+    net = (struct virtio_net *)param;
+
+    pr_err("DM: virtio_net_teardown tapfd=%d\n",
+           net ? net->tapfd : -1);
+
+    if (!net)
+        return;
+
+    if (net->tapfd >= 0) {
+        pr_err("DM: closing tap fd=%d\n", net->tapfd);
+        close(net->tapfd);
+        net->tapfd = -1;
+    }
+
+    virtio_reset_dev(&net->base);
+    free(net);
+}
+如果 STR 后没有这个打印：
+说明不是 teardown。
+ 
+⸻
+ 
+三、重点增加 virtio reset 日志
+位置：
+static void
+virtio_net_reset(void *vdev)
+增加：
+static void
+virtio_net_reset(void *vdev)
+{
+    struct virtio_net *net = vdev;
+
+    pr_err("DM: virtio_net_reset enter "
+           "tapfd=%d rx_ready=%d resetting=%d\n",
+           net->tapfd,
+           net->rx_ready,
+           net->resetting);
+恢复结束：
+pr_err("DM: virtio_net_reset exit "
+       "rx_ready=%d\n",
+       net->rx_ready);
+ 
+⸻
+ 
+原因：
+这里：
+net->rx_ready = 0;
+如果 reset 后：
+没有：
+virtio_net_ping_rxq()
+那么：
+tap 存在，但是网络不通。
+ 
+⸻
+ 
+四、增加 vhost-net 生命周期日志（重点）
+因为你的 dsm 参数：
+-s 00:0.0,virtio-net,tap=tap1,vhost
+走：
+net->use_vhost=true
+所以必须看 vhost。
+ 
+⸻
+ 
+vhost start
+位置：
+static int
+vhost_net_start(struct vhost_net *vhost_net)
+增加：
+pr_err("DM: vhost_net_start tapfd=%d\n",
+       vhost_net->tapfd);
+ 
+⸻
+ 
+vhost stop
+位置：
+static int
+vhost_net_stop(struct vhost_net *vhost_net)
+增加：
+pr_err("DM: vhost_net_stop tapfd=%d started=%d\n",
+       vhost_net->tapfd,
+       vhost_net->vhost_started);
+ 
+⸻
+ 
+重点看：
+STR 后是否出现：
+vhost_net_stop
+如果出现：
+继续看：
+vhost_net_start
+是否恢复。
+ 
+⸻
+ 
+五、增加 virtio status 日志
+位置：
+virtio_net_set_status()
+增加：
+static void
+virtio_net_set_status(void *vdev, uint64_t status)
+{
+    struct virtio_net *net = vdev;
+
+    pr_err("DM: virtio_net_set_status "
+           "status=0x%lx tapfd=%d\n",
+           status,
+           net->tapfd);
+重点：
+正常启动：
+应该看到：
+DRIVER_OK
+STR 后如果：
+status=0
+说明 Guest virtio driver 被 reset。
+ 
+⸻
+ 
+六、增加 tap RX/TX 日志
+不要每个包打印，会刷屏。
+建议只打印状态变化。
+RX
+位置：
+virtio_net_tap_rx()
+开头：
+static int last_rx_ready = -1;
+
+if (last_rx_ready != net->rx_ready) {
+    pr_err("DM: tap_rx rx_ready=%d resetting=%d\n",
+           net->rx_ready,
+           net->resetting);
+    last_rx_ready = net->rx_ready;
+}
+观察：
+STR 后：
+如果：
+rx_ready=0
+没有恢复：
+问题定位。
+ 
+⸻
+ 
+TX
+位置：
+virtio_net_tap_tx()
+增加：
+pr_err("DM: tap_tx len=%d fd=%d\n",
+       len,
+       net->tapfd);
+临时即可。
+ 
+⸻
+ 
+七、Linux bridge 侧增加监控
+因为最终现象是：
+tap1 从 br0 消失。
+建议在 ServerVM：
+ip monitor link
+然后执行 STR。
+正常：
+应该看到类似：
+tap1: link DOWN
+或者：
+tap1: deleted
+如果出现：
+Deleted
+说明 tap 被注销。
+如果：
+只有：
+LOWER_DOWN
+说明 bridge 状态变化。
+ 
+⸻
+ 
+八、我目前重新排序怀疑点
+根据你补充：
+dsm pid 不变
+调整：
+优先级	怀疑
+★★★★★	vhost-net stop/start 后 tap 状态异常
+★★★★	virtio reset 后 tap1 被重新配置
+★★★★	ServerVM resume 网络脚本导致 bridge port remove
+★★★	tap netdev down/up 导致 bridge detach
+★	dsm teardown
+ 
+⸻
+ 
+九、建议第一轮只加这 6 个日志
+不要全部加，先验证方向：
+	1.	virtio_net_reset
+	2.	virtio_net_set_status
+	3.	vhost_net_stop
+	4.	vhost_net_start
+	5.	virtio_net_teardown
+	6.	ServerVM:
+ip monitor link
+然后：
+STR 前后对照。
+根据你的现象，我最想看到的是：
+STR
+ |
+virtio_net_reset?
+ |
+vhost_net_stop?
+ |
+vhost_net_start?
+ |
+tap1 link event?
+这几条基本能直接定位 tap1 为什么离开 br0。
