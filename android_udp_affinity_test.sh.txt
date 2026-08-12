@@ -1,0 +1,690 @@
+#!/system/bin/sh
+
+###############################################################################
+# Android virtio-net UDP TX CPU affinity test
+#
+# 用法：
+#   sh android_udp_affinity_test.sh \
+#      [server_ip] [port] [duration] [repeats] [bitrate]
+#
+# 示例：
+#   sh android_udp_affinity_test.sh 192.168.1.1 5201 60 3 0
+#   sh android_udp_affinity_test.sh 192.168.1.1 5201 60 3 1000M
+#
+# 默认：
+#   server_ip = 192.168.1.1
+#   port      = 5201
+#   duration  = 60 秒
+#   repeats   = 3 轮
+#   bitrate   = 0，即关闭 iperf3 限速
+#
+# 可通过环境变量覆盖：
+#   IPERF3_BIN=/data/iperf3
+#   UDP_LEN=1400
+#   REPORT_INTERVAL=10
+#   COOLDOWN=15
+#   SAMPLE_INTERVAL=5
+#   OUT_BASE=/data/local/tmp
+###############################################################################
+
+SERVER_IP="${1:-192.168.1.1}"
+PORT="${2:-5201}"
+DURATION="${3:-60}"
+REPEATS="${4:-3}"
+BITRATE="${5:-0}"
+
+UDP_LEN="${UDP_LEN:-1400}"
+REPORT_INTERVAL="${REPORT_INTERVAL:-10}"
+COOLDOWN="${COOLDOWN:-15}"
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-5}"
+OUT_BASE="${OUT_BASE:-/data/local/tmp}"
+
+###############################################################################
+# 查找 iperf3
+###############################################################################
+
+if [ -n "${IPERF3_BIN:-}" ] && [ -x "${IPERF3_BIN}" ]; then
+    IPERF3="${IPERF3_BIN}"
+else
+    IPERF3="$(command -v iperf3 2>/dev/null)"
+fi
+
+if [ -z "${IPERF3}" ] && [ -x "./iperf3" ]; then
+    IPERF3="./iperf3"
+fi
+
+if [ -z "${IPERF3}" ] || [ ! -x "${IPERF3}" ]; then
+    echo "ERROR: iperf3 not found."
+    echo "Set IPERF3_BIN, for example:"
+    echo "  IPERF3_BIN=/data/iperf3 sh $0"
+    exit 1
+fi
+
+AWK_BIN="$(command -v awk 2>/dev/null)"
+if [ -z "${AWK_BIN}" ]; then
+    echo "ERROR: awk not found."
+    exit 1
+fi
+
+###############################################################################
+# 创建结果目录
+###############################################################################
+
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+BITRATE_TAG="$(printf '%s' "${BITRATE}" | tr -c 'A-Za-z0-9' '_')"
+
+OUT_DIR="${OUT_BASE}/udp_affinity_${TIMESTAMP}_b${BITRATE_TAG}"
+SUMMARY="${OUT_DIR}/summary.csv"
+INFO_FILE="${OUT_DIR}/environment.txt"
+
+mkdir -p "${OUT_DIR}" || exit 1
+
+echo \
+"round,cpu,bitrate,udp_len,duration,iperf_rc,sender_mbps,receiver_mbps,loss_pct,affinity_mismatch_samples,avg_freq_khz,max_temp_mC,process_runtime_ms,runqueue_wait_ms,result_dir" \
+> "${SUMMARY}"
+
+###############################################################################
+# 保存环境信息
+###############################################################################
+
+{
+    echo "timestamp=${TIMESTAMP}"
+    echo "server_ip=${SERVER_IP}"
+    echo "port=${PORT}"
+    echo "duration=${DURATION}"
+    echo "repeats=${REPEATS}"
+    echo "bitrate=${BITRATE}"
+    echo "udp_len=${UDP_LEN}"
+    echo "report_interval=${REPORT_INTERVAL}"
+    echo "sample_interval=${SAMPLE_INTERVAL}"
+    echo "cooldown=${COOLDOWN}"
+    echo "iperf3=${IPERF3}"
+    echo
+
+    echo "===== uname ====="
+    uname -a
+    echo
+
+    echo "===== iperf3 version ====="
+    "${IPERF3}" -v 2>&1
+    echo
+
+    echo "===== Android build ====="
+    command -v getprop >/dev/null 2>&1 && {
+        echo "fingerprint=$(getprop ro.build.fingerprint)"
+        echo "product=$(getprop ro.product.name)"
+        echo "device=$(getprop ro.product.device)"
+    }
+    echo
+
+    echo "===== CPU online ====="
+    cat /sys/devices/system/cpu/online 2>/dev/null
+    echo
+
+    echo "===== Current shell CPU permission ====="
+    grep -E '^Cpus_allowed:|^Cpus_allowed_list:' /proc/self/status
+    echo
+
+    echo "===== CPU frequency policies ====="
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        [ -d "${policy}" ] || continue
+
+        echo "--- ${policy} ---"
+        for item in \
+            affected_cpus \
+            related_cpus \
+            scaling_governor \
+            scaling_min_freq \
+            scaling_max_freq \
+            cpuinfo_min_freq \
+            cpuinfo_max_freq
+        do
+            if [ -r "${policy}/${item}" ]; then
+                printf '%s=' "${item}"
+                cat "${policy}/${item}"
+            fi
+        done
+    done
+    echo
+
+    echo "===== CPU topology ====="
+    for cpu in 0 1 2 3 4 5; do
+        echo "--- cpu${cpu} ---"
+
+        for item in \
+            physical_package_id \
+            core_id \
+            thread_siblings_list \
+            core_siblings_list
+        do
+            path="/sys/devices/system/cpu/cpu${cpu}/topology/${item}"
+
+            if [ -r "${path}" ]; then
+                printf '%s=' "${item}"
+                cat "${path}"
+            fi
+        done
+    done
+} > "${INFO_FILE}" 2>&1
+
+###############################################################################
+# 采集单次测试前后快照
+###############################################################################
+
+snapshot_system()
+{
+    SNAP_TAG="$1"
+    SNAP_DIR="$2"
+
+    mkdir -p "${SNAP_DIR}"
+
+    date '+%Y-%m-%d %H:%M:%S' > "${SNAP_DIR}/timestamp.txt"
+
+    cat /proc/stat \
+        > "${SNAP_DIR}/proc_stat.txt" 2>/dev/null
+
+    cat /proc/interrupts \
+        > "${SNAP_DIR}/interrupts.txt" 2>/dev/null
+
+    cat /proc/net/softnet_stat \
+        > "${SNAP_DIR}/softnet_stat.txt" 2>/dev/null
+
+    cat /proc/loadavg \
+        > "${SNAP_DIR}/loadavg.txt" 2>/dev/null
+
+    {
+        echo "snapshot=${SNAP_TAG}"
+
+        for stat in \
+            rx_bytes \
+            rx_packets \
+            rx_dropped \
+            rx_errors \
+            tx_bytes \
+            tx_packets \
+            tx_dropped \
+            tx_errors
+        do
+            path="/sys/class/net/eth0/statistics/${stat}"
+
+            if [ -r "${path}" ]; then
+                printf '%s=' "${stat}"
+                cat "${path}"
+            fi
+        done
+    } > "${SNAP_DIR}/eth0_statistics.txt" 2>/dev/null
+
+    if command -v ip >/dev/null 2>&1; then
+        ip -s -s link show eth0 \
+            > "${SNAP_DIR}/ip_eth0.txt" 2>&1
+    fi
+
+    if command -v ethtool >/dev/null 2>&1; then
+        ethtool -S eth0 \
+            > "${SNAP_DIR}/ethtool_eth0.txt" 2>&1
+    fi
+
+    if command -v top >/dev/null 2>&1; then
+        top -b -n 1 \
+            > "${SNAP_DIR}/top.txt" 2>&1
+    fi
+}
+
+###############################################################################
+# 测试期间采样
+###############################################################################
+
+sample_runtime()
+{
+    SAMPLE_PID="$1"
+    TARGET_CPU="$2"
+    SAMPLE_FILE="$3"
+
+    echo \
+"epoch,target_cpu,actual_cpu,freq_khz,max_temp_mC,load1,vol_ctx,nvol_ctx,sched_runtime_ns,sched_wait_ns,sched_timeslices" \
+    > "${SAMPLE_FILE}"
+
+    while kill -0 "${SAMPLE_PID}" 2>/dev/null; do
+        NOW="$(date +%s)"
+
+        ACTUAL_CPU="NA"
+        if [ -r "/proc/${SAMPLE_PID}/stat" ]; then
+            ACTUAL_CPU="$(
+                "${AWK_BIN}" '{ print $39 }' \
+                    "/proc/${SAMPLE_PID}/stat" 2>/dev/null
+            )"
+            [ -n "${ACTUAL_CPU}" ] || ACTUAL_CPU="NA"
+        fi
+
+        FREQ_KHZ="NA"
+        FREQ_PATH="/sys/devices/system/cpu/cpu${TARGET_CPU}/cpufreq/scaling_cur_freq"
+        if [ -r "${FREQ_PATH}" ]; then
+            FREQ_KHZ="$(cat "${FREQ_PATH}" 2>/dev/null)"
+            [ -n "${FREQ_KHZ}" ] || FREQ_KHZ="NA"
+        fi
+
+        MAX_TEMP="NA"
+        TEMP_FOUND=0
+        TEMP_MAX_VALUE=0
+
+        for temp_path in /sys/class/thermal/thermal_zone*/temp; do
+            [ -r "${temp_path}" ] || continue
+
+            TEMP_VALUE="$(cat "${temp_path}" 2>/dev/null)"
+
+            case "${TEMP_VALUE}" in
+                ''|*[!0-9]*)
+                    continue
+                    ;;
+            esac
+
+            TEMP_FOUND=1
+
+            if [ "${TEMP_VALUE}" -gt "${TEMP_MAX_VALUE}" ]; then
+                TEMP_MAX_VALUE="${TEMP_VALUE}"
+            fi
+        done
+
+        if [ "${TEMP_FOUND}" -eq 1 ]; then
+            MAX_TEMP="${TEMP_MAX_VALUE}"
+        fi
+
+        LOAD1="NA"
+        if [ -r /proc/loadavg ]; then
+            LOAD1="$("${AWK_BIN}" '{ print $1 }' /proc/loadavg)"
+        fi
+
+        VOL_CTX="NA"
+        NVOL_CTX="NA"
+
+        if [ -r "/proc/${SAMPLE_PID}/status" ]; then
+            VOL_CTX="$(
+                "${AWK_BIN}" \
+                    '/^voluntary_ctxt_switches:/ { print $2 }' \
+                    "/proc/${SAMPLE_PID}/status"
+            )"
+
+            NVOL_CTX="$(
+                "${AWK_BIN}" \
+                    '/^nonvoluntary_ctxt_switches:/ { print $2 }' \
+                    "/proc/${SAMPLE_PID}/status"
+            )"
+
+            [ -n "${VOL_CTX}" ] || VOL_CTX="NA"
+            [ -n "${NVOL_CTX}" ] || NVOL_CTX="NA"
+        fi
+
+        SCHED_RUNTIME="NA"
+        SCHED_WAIT="NA"
+        SCHED_SLICES="NA"
+
+        if [ -r "/proc/${SAMPLE_PID}/schedstat" ]; then
+            SCHED_RUNTIME="$(
+                "${AWK_BIN}" '{ print $1 }' \
+                    "/proc/${SAMPLE_PID}/schedstat"
+            )"
+
+            SCHED_WAIT="$(
+                "${AWK_BIN}" '{ print $2 }' \
+                    "/proc/${SAMPLE_PID}/schedstat"
+            )"
+
+            SCHED_SLICES="$(
+                "${AWK_BIN}" '{ print $3 }' \
+                    "/proc/${SAMPLE_PID}/schedstat"
+            )"
+        fi
+
+        echo \
+"${NOW},${TARGET_CPU},${ACTUAL_CPU},${FREQ_KHZ},${MAX_TEMP},${LOAD1},${VOL_CTX},${NVOL_CTX},${SCHED_RUNTIME},${SCHED_WAIT},${SCHED_SLICES}" \
+        >> "${SAMPLE_FILE}"
+
+        sleep "${SAMPLE_INTERVAL}"
+    done
+}
+
+###############################################################################
+# 从 iperf3 输出提取 sender/receiver Mbps
+###############################################################################
+
+parse_rate_mbps()
+{
+    PARSE_KIND="$1"
+    PARSE_FILE="$2"
+
+    "${AWK_BIN}" -v kind="${PARSE_KIND}" '
+        $NF == kind {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /bits\/sec$/) {
+                    value = $(i - 1)
+                    unit = $i
+                }
+            }
+        }
+
+        END {
+            if (value == "") {
+                print "NA"
+                exit
+            }
+
+            if (unit == "Gbits/sec")
+                value = value * 1000
+            else if (unit == "Kbits/sec")
+                value = value / 1000
+            else if (unit == "bits/sec")
+                value = value / 1000000
+
+            printf "%.3f", value
+        }
+    ' "${PARSE_FILE}"
+}
+
+parse_loss_pct()
+{
+    PARSE_FILE="$1"
+
+    "${AWK_BIN}" '
+        $NF == "receiver" {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^\([0-9.]+%\)$/) {
+                    value = $i
+                    gsub(/[()%]/, "", value)
+                }
+            }
+        }
+
+        END {
+            if (value == "")
+                print "NA"
+            else
+                print value
+        }
+    ' "${PARSE_FILE}"
+}
+
+###############################################################################
+# 从 runtime.csv 提取调度和频率统计
+###############################################################################
+
+parse_runtime_metrics()
+{
+    TARGET_CPU="$1"
+    SAMPLE_FILE="$2"
+
+    "${AWK_BIN}" -F',' -v target="${TARGET_CPU}" '
+        NR > 1 {
+            if ($3 != "NA" && $3 != target)
+                mismatch++
+
+            if ($4 != "NA") {
+                freq_sum += $4
+                freq_count++
+            }
+
+            if ($5 != "NA") {
+                if (!temp_seen || $5 > max_temp)
+                    max_temp = $5
+                temp_seen = 1
+            }
+
+            if ($9 != "NA" && $10 != "NA") {
+                if (!sched_seen) {
+                    first_runtime = $9
+                    first_wait = $10
+                    sched_seen = 1
+                }
+
+                last_runtime = $9
+                last_wait = $10
+            }
+        }
+
+        END {
+            if (freq_count > 0)
+                avg_freq = freq_sum / freq_count
+            else
+                avg_freq = "NA"
+
+            if (!temp_seen)
+                max_temp = "NA"
+
+            if (sched_seen) {
+                runtime_ms = (last_runtime - first_runtime) / 1000000
+                wait_ms = (last_wait - first_wait) / 1000000
+            } else {
+                runtime_ms = "NA"
+                wait_ms = "NA"
+            }
+
+            if (avg_freq == "NA")
+                avg_freq_out = "NA"
+            else
+                avg_freq_out = sprintf("%.0f", avg_freq)
+
+            if (runtime_ms == "NA")
+                runtime_out = "NA"
+            else
+                runtime_out = sprintf("%.3f", runtime_ms)
+
+            if (wait_ms == "NA")
+                wait_out = "NA"
+            else
+                wait_out = sprintf("%.3f", wait_ms)
+
+            printf "%d,%s,%s,%s,%s",
+                   mismatch + 0,
+                   avg_freq_out,
+                   max_temp,
+                   runtime_out,
+                   wait_out
+        }
+    ' "${SAMPLE_FILE}"
+}
+
+###############################################################################
+# 运行一次测试
+###############################################################################
+
+run_one_test()
+{
+    ROUND="$1"
+    CPU="$2"
+
+    TEST_DIR="${OUT_DIR}/round_${ROUND}_cpu_${CPU}"
+    IPERF_LOG="${TEST_DIR}/iperf3.log"
+    RUNTIME_LOG="${TEST_DIR}/runtime.csv"
+
+    mkdir -p "${TEST_DIR}"
+
+    echo
+    echo "============================================================"
+    echo "Round ${ROUND}/${REPEATS}, CPU${CPU}"
+    echo "Bitrate=${BITRATE}, UDP length=${UDP_LEN}"
+    echo "Output=${TEST_DIR}"
+    echo "============================================================"
+
+    if [ ! -d "/sys/devices/system/cpu/cpu${CPU}" ]; then
+        echo "CPU${CPU} does not exist, skip."
+
+        echo \
+"${ROUND},${CPU},${BITRATE},${UDP_LEN},${DURATION},SKIP,NA,NA,NA,NA,NA,NA,NA,NA,${TEST_DIR}" \
+        >> "${SUMMARY}"
+
+        return
+    fi
+
+    if [ "${CPU}" -ne 0 ] &&
+       [ -r "/sys/devices/system/cpu/cpu${CPU}/online" ] &&
+       [ "$(cat "/sys/devices/system/cpu/cpu${CPU}/online")" != "1" ]; then
+        echo "CPU${CPU} is offline, skip."
+
+        echo \
+"${ROUND},${CPU},${BITRATE},${UDP_LEN},${DURATION},OFFLINE,NA,NA,NA,NA,NA,NA,NA,NA,${TEST_DIR}" \
+        >> "${SUMMARY}"
+
+        return
+    fi
+
+    snapshot_system \
+        "before" \
+        "${TEST_DIR}/before"
+
+    {
+        echo "server=${SERVER_IP}"
+        echo "port=${PORT}"
+        echo "cpu=${CPU}"
+        echo "bitrate=${BITRATE}"
+        echo "udp_len=${UDP_LEN}"
+        echo "duration=${DURATION}"
+        echo
+        echo "${IPERF3} -A ${CPU} -p ${PORT} -c ${SERVER_IP} -u -4 -b ${BITRATE} -l ${UDP_LEN} -t ${DURATION} -i ${REPORT_INTERVAL} --udp-counters-64bit"
+    } > "${TEST_DIR}/command.txt"
+
+    "${IPERF3}" \
+        -A "${CPU}" \
+        -p "${PORT}" \
+        -c "${SERVER_IP}" \
+        -u \
+        -4 \
+        -b "${BITRATE}" \
+        -l "${UDP_LEN}" \
+        -t "${DURATION}" \
+        -i "${REPORT_INTERVAL}" \
+        --udp-counters-64bit \
+        > "${IPERF_LOG}" 2>&1 &
+
+    IPERF_PID=$!
+
+    sleep 1
+
+    if [ -r "/proc/${IPERF_PID}/status" ]; then
+        {
+            echo "pid=${IPERF_PID}"
+            grep -E \
+                '^Name:|^Pid:|^Threads:|^Cpus_allowed:|^Cpus_allowed_list:' \
+                "/proc/${IPERF_PID}/status"
+
+            echo
+            echo "current_processor=$(
+                "${AWK_BIN}" '{ print $39 }' \
+                    "/proc/${IPERF_PID}/stat" 2>/dev/null
+            )"
+
+            echo
+            echo "cgroup:"
+            cat "/proc/${IPERF_PID}/cgroup" 2>/dev/null
+        } > "${TEST_DIR}/affinity.txt"
+    fi
+
+    sample_runtime \
+        "${IPERF_PID}" \
+        "${CPU}" \
+        "${RUNTIME_LOG}" &
+
+    SAMPLE_PID=$!
+
+    wait "${IPERF_PID}"
+    IPERF_RC=$?
+
+    wait "${SAMPLE_PID}" 2>/dev/null
+
+    snapshot_system \
+        "after" \
+        "${TEST_DIR}/after"
+
+    SENDER_MBPS="$(parse_rate_mbps sender "${IPERF_LOG}")"
+    RECEIVER_MBPS="$(parse_rate_mbps receiver "${IPERF_LOG}")"
+    LOSS_PCT="$(parse_loss_pct "${IPERF_LOG}")"
+    RUNTIME_METRICS="$(parse_runtime_metrics "${CPU}" "${RUNTIME_LOG}")"
+
+    echo \
+"${ROUND},${CPU},${BITRATE},${UDP_LEN},${DURATION},${IPERF_RC},${SENDER_MBPS},${RECEIVER_MBPS},${LOSS_PCT},${RUNTIME_METRICS},${TEST_DIR}" \
+    >> "${SUMMARY}"
+
+    echo
+    echo "Result:"
+    echo "  sender   = ${SENDER_MBPS} Mbps"
+    echo "  receiver = ${RECEIVER_MBPS} Mbps"
+    echo "  loss     = ${LOSS_PCT}%"
+    echo "  rc       = ${IPERF_RC}"
+
+    if [ "${COOLDOWN}" -gt 0 ]; then
+        echo "Cooling down for ${COOLDOWN} seconds..."
+        sleep "${COOLDOWN}"
+    fi
+}
+
+###############################################################################
+# 主循环
+#
+# 奇数轮：CPU0 -> CPU5
+# 偶数轮：CPU5 -> CPU0
+#
+# 这样可以减少测试顺序和温升对结果的系统性偏差。
+###############################################################################
+
+ROUND=1
+
+while [ "${ROUND}" -le "${REPEATS}" ]; do
+    REMAINDER=$((ROUND % 2))
+
+    if [ "${REMAINDER}" -eq 1 ]; then
+        CPU_ORDER="0 1 2 3 4 5"
+    else
+        CPU_ORDER="5 4 3 2 1 0"
+    fi
+
+    for CPU in ${CPU_ORDER}; do
+        run_one_test "${ROUND}" "${CPU}"
+    done
+
+    ROUND=$((ROUND + 1))
+done
+
+###############################################################################
+# 输出结果汇总
+###############################################################################
+
+echo
+echo "============================================================"
+echo "All tests completed"
+echo "Result directory: ${OUT_DIR}"
+echo "Summary file:     ${SUMMARY}"
+echo "============================================================"
+echo
+
+cat "${SUMMARY}"
+
+echo
+echo "Average receiver bitrate by CPU:"
+echo
+
+"${AWK_BIN}" -F',' '
+    NR > 1 && $8 != "NA" {
+        sum[$2] += $8
+        count[$2]++
+        if (!seen[$2] || $8 > max[$2])
+            max[$2] = $8
+        if (!seen[$2] || $8 < min[$2])
+            min[$2] = $8
+        seen[$2] = 1
+    }
+
+    END {
+        printf "CPU   samples   avg_mbps   min_mbps   max_mbps\n"
+
+        for (cpu = 0; cpu < 6; cpu++) {
+            if (count[cpu] > 0) {
+                printf "%-5d %-9d %-10.2f %-10.2f %-10.2f\n",
+                       cpu,
+                       count[cpu],
+                       sum[cpu] / count[cpu],
+                       min[cpu],
+                       max[cpu]
+            } else {
+                printf "%-5d 0         NA         NA         NA\n", cpu
+            }
+        }
+    }
+' "${SUMMARY}"
