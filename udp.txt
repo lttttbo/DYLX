@@ -1,224 +1,451 @@
-这批测试已经把问题拆得比较清楚了。最初的“Android UDP 上行只有 500～600 Mbps”并不是单一故障，而是两个因素叠加：
-	1.	ServerVM 中实际网络后端线程与 eth0 IRQ 134 的 CPU 亲和性不匹配；
-	2.	Android 系统自带的 iperf3 3.6+ 在当前平台上无法稳定地产生目标为 1000 Mbps 的 1400 字节 UDP 流，而 iperf3 3.17.1+ 可以。
-一、把现有结果放在一起看
-后端模式	后端与 IRQ 状态	Android iperf3	结果
-vhost	vhost、IRQ 同在 CPU0	系统 3.6+，-b 1000M	约 627～642 Mbps
-vhost	vhost、IRQ 同在 CPU0	系统 3.6+，-b 0	约 781～820 Mbps
-vhost	vhost、IRQ 同在 CPU0	本地 3.17.1+，-b 1000M	927～954 Mbps
-vhost	恢复 0-5 自由调度	本地 3.17.1+，-b 1000M	约 558 Mbps
-无 vhost	DSM TX、IRQ 同在 CPU0	系统 3.6+，-b 1000M	约 760～860 Mbps
-无 vhost	DSM TX、IRQ 同在 CPU0	系统 3.6+，-b 0	receiver 约 954 Mbps，但丢包 12%～15%
-无 vhost	DSM TX、IRQ 同在 CPU0	本地 3.17.1+，-b 1000M	约 954 Mbps，基本无丢包
-这个表说明，亲和性和 iperf3 版本都是独立变量，任何一个没有处理好，都可能把结果压到较低水平。
+Android Guest UDP 上行带宽异常问题总结报告
+一、问题概述
+当前产品网络架构如下：
+Android Guest
+    │
+    │ virtio-net TX
+    ▼
+ServerVM 中的网络后端
+    ├─ vhost 开启：vhost-* 内核线程
+    └─ vhost 关闭：DSM vtnet-*:*\ tx 用户态线程
+    │
+    ▼
+tap1
+    │
+    ▼
+br0
+    │
+    ▼
+ServerVM eth0
+    │
+    ▼
+外部 PC
+最初发现的异常为：
+	•	Android Guest → PC 的 UDP 上行只能达到约 500～650 Mbps；
+	•	Android Guest → PC 的 UDP 下行正常；
+	•	Android Guest → PC 的 TCP 上下行正常；
+	•	Android Guest → ServerVM 的 UDP 测试正常；
+	•	ServerVM → PC 的 TCP、UDP 测试正常。
+经过路径对照、CPU 亲和性矩阵、vhost 开关和不同 iperf3 版本测试后，目前已经可以将问题归纳为：
+主问题是 ServerVM 中实际网络后端发送线程与 eth0 中断/驱动完成处理上下文的 CPU 亲和性不匹配；次要问题是 Android 系统自带的 iperf3 3.6+ 在 vhost 场景下不能稳定生成目标为 1000 Mbps 的 1400 字节 UDP 流。
+当满足以下两个条件时，Android→PC UDP 上行能够恢复到接近千兆线速：
+实际网络后端线程与 eth0 IRQ 134 同核
++
+Android 使用 iperf3 3.17.1+
+实测结果为：
+	•	vhost 开启：约 927 Mbps；
+	•	vhost 关闭：约 954 Mbps；
+	•	恢复自由调度后：可能再次下降至约 558 Mbps。
  
 ⸻
  
-二、第一层问题：后端线程与 eth0 IRQ 必须保持同核
-此前路径对照已经表明，Android CPU2 到 ServerVM 本地可达 1260 Mbps，但继续经过 eth0 到 PC 时只有 472 Mbps；Android CPU3 到 ServerVM 本地则达到 3510 Mbps。这个结果已经排除了“virtio-net 公共 TX 路径只有 500 Mbps”的可能性。
- selected_windows.txt
-后续的四象限实验进一步确认：
-后端线程 CPU0 + IRQ CPU0  → 高
-后端线程 CPU0 + IRQ CPU5  → 低
-后端线程 CPU5 + IRQ CPU5  → 高
-后端线程 CPU5 + IRQ CPU0  → 低
-所以关键不是 CPU0 特殊，而是：
-实际向 tap1/eth0 推进数据的线程
-                 ==
-处理 eth0 IRQ/NAPI/TX completion 的 CPU
-在 vhost 模式下，实际后端是：
-vhost-xxx
-在无 vhost 模式下，实际后端是：
-vtnet-0:0 tx
-绑定 DSM 主进程 PID 174 没有效果，原因也由此明确。你执行：
-taskset -pc 0 174
-只改变了 DSM 主线程 PID 174 的 affinity，不会自动改变独立的 vhost 内核线程 TID 1199。vhost 数据面仍由：
-vhost-750 / TID 1199
-执行，所以绑定主进程并不能改善 vhost 网络性能。
-此前用于完成窗口和线程位置联合分析的输入也正是 traffic_windows.csv、worker_categories_by_window.csv 和 worker_cpu_changes.csv。
+二、关键实验结果
+2.1 Android→ServerVM 与 Android→PC 的路径对照
+前期 A/B 测试共识别了 36 个测试窗口，并将 Android 端结果与 ServerVM 的 tap1、eth0 统计进行了对齐。
  summary.txt
+代表性结果如下：
+Android CPU	测试目标	Android 接收端统计	tap1	eth0
+CPU1	ServerVM	3520 Mbps	3566 Mbps	0 Mbps
+CPU1	PC	908 Mbps	921 Mbps	921 Mbps
+CPU2	ServerVM	1260 Mbps	1279 Mbps	0 Mbps
+CPU2	PC	472 Mbps	478 Mbps	478 Mbps
+CPU3	ServerVM	3510 Mbps	3587 Mbps	0 Mbps
+CPU1，另一轮	PC	553 Mbps	560 Mbps	560 Mbps
+selected_windows.txt
+这组结果说明：
+	1.	Android virtio-net TX、DSM/vhost、tap1 和 br0 本地交付路径本身具备明显高于千兆线速的处理能力；
+	2.	性能下降只在报文继续通过 br0 转发到物理 eth0 时出现；
+	3.	tap1 RX 与 eth0 TX 基本同步，且软件接口 drop/error 计数没有明显增长，因此低带宽不是因为 bridge 中途丢掉了大量报文；
+	4.	低性能时 sender 与 receiver 基本一致，说明发送端受下游反压限制，只生成了较低速率，而不是先发送 1000 Mbps 再丢失一半。
+因此可以排除“virtio-net TX 固定只能达到 500～600 Mbps”的假设。
  
 ⸻
  
-三、为什么 restore 后又从 927 降到 558 Mbps
-恢复后状态是：
-backend affinity:       0-5
-backend last CPU:       0
-IRQ requested:          0-5
-IRQ effective:          0
-这里不能把：
+2.2 vhost 模式下的亲和性实验
+当 vhost 和 eth0 IRQ 134 绑定到同一个 ServerVM CPU 时：
+vhost CPU0 + IRQ CPU0：
+约 836、843、843 Mbps
+
+vhost CPU5 + IRQ CPU5：
+约 830 Mbps
+当 vhost 与 IRQ 分布到不同 CPU 时：
+vhost CPU0 + IRQ CPU1～CPU5：
+约 530 Mbps
+这说明：
+CPU0 并不是特殊核心，真正关键的是 vhost 工作线程和 eth0 IRQ 是否同核。
+在更换为 iperf3 3.17.1+ 后，vhost 与 IRQ 同在 CPU0 时又得到：
+sender：928 Mbps
+receiver：927 Mbps
+loss：0
+而恢复为：
+vhost affinity：0-5
+IRQ requested：0-5
+IRQ effective：0
+之后，即使使用同一个 iperf3 3.17.1+，带宽仍下降到约：
+558 Mbps
+这进一步证明，不能只看某一时刻的：
 backend last CPU: 0
-理解成 vhost 会一直在 CPU0。它只表示读取状态时，该线程上一次在 CPU0 执行。允许集合已经恢复为：
-0-5
-所以测试过程中 vhost 可以在任意 CPU 之间迁移。
-IRQ 的 requested=0-5 与 effective=0 也不是矛盾：
-	•	requested 表示允许范围；
-	•	effective 表示当时实际投递位置。
-只要 IRQ 继续留在 CPU0，而 vhost 迁移到 CPU1～CPU5，就重新形成：
-vhost CPUx → eth0 TX → IRQ CPU0
-也就是此前已经证明的跨核低性能状态。因此恢复后使用新的 iperf3 仍下降到约 558 Mbps，是对亲和性结论的再次验证。
+因为线程允许集合为 0-5 时，它在测试过程中仍可能迁移。只要 vhost 迁离 IRQ 实际所在 CPU，就会重新进入低性能状态。
  
 ⸻
  
-四、第二层问题：系统 iperf3 3.6+ 本身是一个测试源瓶颈
-这次最直接的证据不是 receiver，而是 sender。
-在相同的：
-vhost CPU0
-IRQ CPU0
-UDP 1400
-目标 1000M
-条件下：
-系统 iperf3 3.6+
-sender ≈ 636 Mbps
-receiver ≈ 636 Mbps
-loss ≈ 0
-本地 iperf3 3.17.1+
-sender ≈ 1000 Mbps
-receiver ≈ 927～954 Mbps
-当 sender 自己只有 636 Mbps 时，说明不是网络发送了 1000 Mbps 后丢掉了部分报文，而是 iperf3 客户端根本没有产生 1000 Mbps 流量。
--b 是 iperf3 自己在用户态实现的内部码率控制，-b 0 才会关闭这套内部限速逻辑。 你的测试也符合这一点：
-3.6+，-b 1000M → 约636 Mbps
-3.6+，-b 0     → 约800 Mbps
-说明旧二进制的内部发送循环和码率控制确实限制了发送端。
-版本之间存在的重要架构差异
-从 iperf3 3.16 开始，多流由不同 POSIX 线程处理；3.17 又加入了一些针对 Android 构建和运行环境的修复。
-你的版本输出也正好显示：
-3.6+：
-没有 POSIX threads
-
-3.17.1+：
-包含 POSIX threads
-不过，需要谨慎表述：
-当前数据已经证明“两个二进制的运行行为明显不同”，但还不能仅凭 release notes 精确断言是哪一个具体提交令单流 UDP 从 636 提升到 1000 Mbps。
-原因是两个版本都带有 +，它们不一定是完全未经修改的官方发行构建；编译器、优化选项、Android 适配补丁、定时器实现等都可能不同。
-工程上已经不需要继续追究旧版为何只有 636 Mbps：它不适合作为当前产品的千兆 UDP 验收工具。
+2.3 无 vhost 模式下的亲和性实验
+关闭 vhost 后，实际发送线程变为 DSM 用户态线程：
+vtnet-0:0 tx
+最有判别力的两组实验是：
+DSM TX 线程	eth0 IRQ	结果
+CPU1	CPU0	约 625 Mbps
+CPU1	CPU1	约 953 Mbps
+这两组使用相同的：
+UDP长度：1400
+目标速率：1000M
+测试时长：60秒
+仅改变 IRQ 所在 CPU。
+同核后吞吐从约 625 Mbps 提升到约 953 Mbps，提升超过 50%，且高性能组大部分时间稳定在 948～955 Mbps。
+因此可以明确确认：
+该问题不是 vhost 线程特有的问题。关闭 vhost 后，DSM TX 线程接替了原 vhost 的“报文生产者”角色，它仍然需要与 eth0 IRQ/驱动完成处理上下文保持适当的 CPU 局部性。
  
 ⸻
  
-五、为什么旧 iperf3 在无 vhost 模式下有时比 vhost 模式更快
-这并不表示 vhost 本身吞吐更差。
-启用 vhost 时，旧 iperf3 的发送节奏需要与：
-Android send loop
-→ virtqueue
-→ vhost worker
-→ descriptor completion
-配合。
-关闭 vhost 时，后端变成：
-Android send loop
-→ virtqueue
-→ DSM TX线程
-→ writev(tapfd)
-两种后端的描述符回收、线程唤醒和批处理节奏不同。旧 iperf3 3.6+ 的单线程发送循环可能对这种节奏更加敏感，因此出现：
-vhost：约636 Mbps
-无 vhost：约760～860 Mbps
-但换成 3.17.1+ 后：
-vhost：927～954 Mbps
-无 vhost：约954 Mbps
-差异大幅缩小甚至消失。
-因此，当前合理结论是：
-旧 iperf3 与不同后端的调度/回收节奏发生了性能交互，而不是 vhost 数据路径只能处理 636 Mbps。
- 
-⸻
- 
-六、
--b 0
-的结果不适合作为正式验收结果
-无 vhost、3.17.1+、-b 0 时：
-sender ≈ 1.09～1.12 Gbps
-receiver ≈ 954 Mbps
-loss ≈ 12%～15%
-这说明客户端在无节制超发，物理出口只能接收其中一部分。
-它适合验证：
-数据路径最大能力是否达到线速
-但不适合作为产品正式验收，因为它主动制造了明显丢包。
-正式验收应继续使用：
--b 1000M
--l 1400
-而且使用 3.17.1+。
- 
-⸻
- 
-七、当前输出中还有一个统计口径问题需要确认
-新的 iperf3 输出中出现：
-sender：
-5357893 datagrams
-6.99 GBytes
-1000 Mbps
-
-receiver：
-5357892 datagrams
-6.67 GBytes
-954 Mbps
-0 lost
-sender 和 receiver 的数据报数量几乎完全相同，而且报告零丢包，但字节数差约 4.6%。
-按 1400 字节计算：
-954 / 1000 ≈ 0.954
-
-1400 × (1 - 0.954) ≈ 64 字节/数据报
-这更像两个端点对每个 UDP 数据报采用了不同的字节统计口径，而不是实际丢包。
-官方 3.17.1 源码中，接收端正常情况下是把 recv() 返回的实际字节数累加到 bytes_received，发送端则累加 Nwrite() 的返回值。 因此，在相同版本、相同 block size、没有截断的情况下，两端字节数原则上应当接近。
-建议马上确认 PC server 的版本：
-iperf3 -v
-正式验收最好在 Android 与 PC 两端都使用同一个 3.17.1+ 二进制或相同官方版本，并在客户端增加：
---get-server-output
-这样可以排除客户端从旧 server 获取结果时产生的兼容性或统计口径差异。
-这不否定当前链路已经接近线速，但会影响测试报告中“1000 sender、954 receiver、零丢包”的准确解释。
- 
-⸻
- 
-八、对 vhost 和无 vhost 的最终判断
-vhost 模式
-正确绑定后：
-vhost worker → CPU0
-eth0 IRQ134  → CPU0
-使用 iperf3 3.17.1+：
-receiver：927～954 Mbps
-说明 vhost 可以满足千兆 UDP 上行。
-无 vhost 模式
-正确绑定后：
-vtnet TX线程 → CPU0
-eth0 IRQ134  → CPU0
-使用 iperf3 3.17.1+：
-receiver：约954 Mbps
-同样可以满足千兆 UDP 上行。
-目前不能据一两次结果就认定无 vhost 一定优于 vhost。要比较二者，应统一：
-相同 iperf3 版本
-相同 PC server版本
-相同 Android CPU
-相同源端口
-相同后端/IRQ CPU
-相同运行时长
-相同后台负载
-并额外比较 CPU 占用。吞吐都能达到线速后，CPU 开销和长期稳定性才是选择 vhost 与否的主要依据。
- 
-⸻
- 
-九、推荐的最终产品配置
-ServerVM
-建议固定一个网络后端 CPU，例如 CPU0：
-vhost模式：
-    vhost-*       → ServerVM CPU0
-    eth0 IRQ 134  → ServerVM CPU0
-
-无vhost模式：
-    vtnet-*:*\ tx → ServerVM CPU0
-    eth0 IRQ 134  → ServerVM CPU0
-同时防止 irqbalance 覆盖 IRQ 亲和性。
-不要依赖手工运行一次命令。以下时机都应重新应用：
-	•	DSM 启动后；
-	•	vhost 线程创建后；
-	•	eth0 驱动初始化完成后；
-	•	STR resume 后；
-	•	DSM 或 Android Guest 重启后。
-Android 测试工具
-不再使用系统中的：
+2.4 iperf3 版本对结果的影响
+Android 上存在两个不同版本：
+系统版本：
 iperf 3.6+
-统一使用：
+无 POSIX threads 特性标记
+
+本地版本：
 iperf 3.17.1+
-PC server
-也统一使用相同版本：
+包含 POSIX threads 等新特性
+在 vhost 与 IRQ 已经同核的条件下：
+iperf3 版本	sender	receiver
+系统 3.6+	约 627～642 Mbps	约 627～642 Mbps
+本地 3.17.1+	约 928 Mbps	约 927 Mbps
+系统 3.6+ 的 sender 本身只有约 640 Mbps，说明不是网络中途丢包，而是测试工具没有产生目标速率。
+但是需要注意：
+	•	系统 3.6+ 在无 vhost、DSM TX 与 IRQ 同核时也曾达到约 953 Mbps；
+	•	因此不能简单认为 iperf3 3.6+ 永远只能达到 600 Mbps；
+	•		•	更准确的判断是：旧 iperf3 的 UDP 发送节奏与 vhost 的通知、完成和调度节奏发生了不利交互；
+	•	换成 3.17.1+ 后，这一测试工具敏感性基本消失。
+目前还没有通过源码差异精确定位到 iperf3 的某一个具体提交，因此正式报告中应将其描述为：
+旧版测试工具与当前 vhost 后端之间存在性能交互，而不是产品网络链路本身存在固定带宽上限。
+ 
+⸻
+ 
+三、根本原因分析
+3.1 两套发送和回收上下文被串联
+Android→PC UDP 上行包含两套队列生命周期。
+第一套是 virtio TX：
+Android virtio-net 驱动提交 descriptor
+    ↓
+vhost 或 DSM TX线程处理 descriptor
+    ↓
+更新 used ring / 完成 Guest TX
+第二套是物理 eth0 TX：
+vhost 或 DSM TX线程向 tap1 注入报文
+    ↓
+br0 转发
+    ↓
+eth0 驱动提交 TX descriptor
+    ↓
+硬件发送
+    ↓
+IRQ 134 / 驱动完成处理
+    ↓
+回收 TX descriptor 和 SKB
+在当前单队列、高 PPS 场景下，后端线程实际上是 eth0 发送队列的上游生产者，而 IRQ/NAPI/驱动完成路径是下游回收者。
+ 
+⸻
+ 
+3.2 同核时的工作方式
+例如：
+vhost/DSM TX：CPU1
+eth0 IRQ：    CPU1
+其执行关系为：
+CPU1：
+    处理 virtio TX
+    向 tap1 写入
+    bridge转发
+    填充eth0 TX ring
+    处理IRQ/NAPI
+    回收TX descriptor
+    唤醒后续发送
+此时：
+	•	TX ring 和 netdev queue 热点状态主要保留在同一个 CPU 缓存中；
+	•	SKB 和 descriptor 的所有权转换不需要频繁跨核；
+	•	queue stop/wake 更容易在本地完成；
+	•	后端线程能够及时获得可用 TX descriptor；
+	•	Guest virtio TX descriptor 也能及时回收。
+ 
+⸻
+ 
+3.3 跨核时的工作方式
+例如：
+DSM TX：CPU1
+eth0 IRQ：CPU0
+其执行关系变为：
+CPU1：
+    生成和提交报文
+
+CPU0：
+    处理硬件中断
+    回收TX descriptor
+    更新发送队列状态
+最符合实验结果的机制包括：
+	•	eth0 TX ring、队列状态等热点 cache line 在两个 CPU 之间迁移；
+	•	SKB、descriptor 和队列状态出现更多缓存失效；
+	•	queue stop/wake 需要跨 CPU 协作；
+	•	TX completion 回收延迟增加；
+	•	发送队列可用空间恢复变慢；
+	•	反压逐级传回 br0、tap1、vhost/DSM 和 Android virtqueue。
+对于 1400 字节 UDP：
+953 Mbps ≈ 85,000 个 datagram/s
+625 Mbps ≈ 56,000 个 datagram/s
+530 Mbps ≈ 47,000 个 datagram/s
+这是一条典型的小报文高 PPS 路径。每个报文增加少量跨核同步成本，累计后就可能形成数百 Mbps 的差距。
+需要说明的是：
+亲和性 A/B 已经形成很强的因果证据，但尚未通过内核 tracepoint 精确证明最终主导项是 cache line bouncing、queue stop/wake、NAPI 时延还是驱动 TX ring 锁。当前工程级根因已经明确，微观热点仍可继续细化。
+ 
+⸻
+ 
+3.4 为什么没有明显丢包却出现低带宽
+低性能测试通常表现为：
+sender ≈ receiver
+loss ≈ 0
+这是因为问题表现为队列反压，而不是报文丢弃：
+eth0 TX完成回收变慢
+    ↓
+eth0发送队列可用空间不足
+    ↓
+br0向eth0转发变慢
+    ↓
+TAP写入或vhost处理变慢
+    ↓
+virtio TX descriptor回收变慢
+    ↓
+Android网络发送队列受限
+    ↓
+iperf3 sender只能生成约500～650Mbps
+因此，sender 和 receiver 都低，但报文不会大量丢失。
+ 
+⸻
+ 
+四、为什么其他测试场景没有出现同样问题
+4.1 Android→ServerVM UDP 不受影响
+路径为：
+Android
+  → virtio TX
+  → vhost/DSM
+  → tap1
+  → br0本地交付
+  → ServerVM UDP socket
+它不进入：
+eth0 TX ring
+IRQ 134
+物理网卡 TX completion
+因此，vhost/DSM TX 与 eth0 IRQ 是否同核，对该路径没有直接作用。
+这也是为什么 Android→ServerVM 可以达到 1.26～3.5 Gbps，而 Android→PC 可能只有 472～908 Mbps。
+ selected_windows.txt
+ 
+⸻
+ 
+4.2 ServerVM→PC UDP 不受影响
+路径为：
+ServerVM iperf3
+  → ServerVM UDP/IP协议栈
+  → qdisc
+  → eth0
+  → IRQ/NAPI/TX completion
+它不经过：
+Android Guest virtqueue
+vhost/DSM virtio后端
+tap1输入
+br0从tap1向eth0转发
+因此没有形成：
+Guest后端生产线程
+        ↔
+物理网卡完成中断
+这一跨虚拟化层的生产—完成关系。
+ServerVM 本地发送路径更短，每个报文涉及的队列、线程和状态转换更少，即使存在一定 CPU 跨核开销，也尚未达到明显限制千兆带宽的程度。
+ 
+⸻
+ 
+4.3 PC→Android UDP 下行不受影响
+下行路径为：
+PC
+  → eth0 RX
+  → IRQ 134
+  → NAPI批量收包
+  → br0
+  → tap1
+  → vhost/DSM RX
+  → Android
+该方向由物理网卡 RX IRQ/NAPI 驱动，天然以批处理方式处理多个报文。
+同时，Android 侧已经确认：
+generic-receive-offload: on
+接收方向可以通过 GRO 进一步降低 Guest 协议栈的每包开销。
+最关键的区别是，下行没有：
+Guest TX生产者
+  → 物理eth0 TX提交
+  → 远端CPU负责TX completion
+这一敏感链路。
+ 
+⸻
+ 
+4.4 Android→PC TCP 上行不受影响
+TCP 和 -u -l 1400 UDP 虽然最终都经过同一物理路径，但应用和内核发送模型不同。
+UDP：
+一个1400字节datagram
+    → 一次独立UDP send
+    → 独立数据报边界
+    → 独立SKB/virtio处理
+TCP：
+iperf3向内核提交较大的字节流
+    → 内核按MSS拆分
+    → 多个SKB可在一次发送周期中连续处理
+    → ACK和拥塞窗口自动平滑发送节奏
+即使 Android 的 TSO/GSO 没有启用，TCP仍然具有以下优势：
+	•	用户态可以用较少的写调用提交更多数据；
+	•	内核可以连续处理多个 SKB；
+	•	virtqueue descriptor 和 notify 更容易批量化；
+	•	TCP ACK 时钟会平滑下游队列压力；
+	•	不需要 iperf3 对每个 1400 字节独立数据报进行用户态 pacing。
+因此，TCP对每个报文固定跨核开销没有小包 UDP 那么敏感。
+ 
+⸻
+ 
+4.5 增大 UDP 数据报长度后有时性能提高
+当 -l 增大到 5000 或 8000 时，每秒 UDP send 次数明显下降，因而发送能力可能接近线速。
+这支持“每个独立 UDP datagram 的固定处理成本较高”这一判断。
+但大于 MTU 会产生 IP 分片：
+	•	增加重组开销；
+	•	任一分片丢失会导致整个 UDP 数据报丢失；
+	•	不适合作为正式产品配置或验收参数。
+因此正式测试仍应使用：
+-l 1400
+ 
+⸻
+ 
+五、为什么最初直接关闭 vhost 没有改善
+关闭 vhost 只是更换了 virtio TX 的处理者：
+vhost开启：
+vhost-* 内核线程
+    → tap1
+    → br0
+    → eth0
+
+vhost关闭：
+DSM vtnet-*:*\ tx线程
+    → writev(tapfd)
+    → tap1
+    → br0
+    → eth0
+它并没有消除：
+后端报文生产线程
+        ↔
+eth0 IRQ/TX completion
+这一关系。
+最初无 vhost 时，DSM TX 线程没有设置 affinity：
+pthread_create(&net->tx_tid, NULL,
+               virtio_net_tx_thread, net);
+只创建了线程，没有固定其 CPU，因此它可以在 CPU0～CPU5 之间迁移。
+在后续实验中：
+DSM TX CPU1 + IRQ CPU0：
+约625 Mbps
+
+DSM TX CPU1 + IRQ CPU1：
+约953 Mbps
+已经直接证明：
+关闭 vhost 后没有改善，并不是因为问题与亲和性无关，而是因为真正接替 vhost 的 DSM TX 线程仍然没有被正确绑定。
+另外，无 vhost 用户态后端还额外包含：
+	•	pthread 条件变量唤醒；
+	•	用户态 virtqueue descriptor 解析；
+	•	writev() 系统调用；
+	•	用户态与内核态切换。
+因此在 affinity 没有处理好时，关闭 vhost 甚至可能表现得更差或波动更大。
+ 
+⸻
+ 
+六、已经排除或基本排除的原因
+6.1 排除 virtio-net 固定吞吐上限
+Android→ServerVM 本地测试可达到 1.26～3.5 Gbps，因此 virtio TX、DSM/vhost 和 tap1 具备远高于千兆线速的能力。
+6.2 排除物理链路能力不足
+ServerVM→PC 可达到约 950 Mbps；更换 iperf3 并优化 affinity 后，Android→PC 同样达到约 927～954 Mbps。
+6.3 排除 bridge 中途大量丢包
+低速测试中 tap1 RX 与 eth0 TX 基本同步，drop/error 没有明显增长。
+6.4 排除 Guest vCPU 迁移
+当前修改版 Xvisor 中 Guest vCPU 与 pCPU 已经固定绑定，且 iperf3 -A 测试确认 Android 进程也能够固定在指定 Guest CPU。
+6.5 排除 CPU0 本身特殊
+后端线程和 IRQ 同时绑定 CPU5 时也能达到约 830 Mbps；无 vhost 模式下同时绑定 CPU1 更达到约 953 Mbps。
+关键是相对亲和性，而不是固定必须使用 CPU0。
+6.6 排除“vhost 开启本身必然导致低性能”
+使用 iperf3 3.17.1+ 且 vhost/IRQ 同核后，vhost 模式达到约 927 Mbps，已经满足千兆 UDP 上行要求。
+ 
+⸻
+ 
+七、建议的解决方案
+7.1 立即可实施的产品配置
+在 ServerVM 中配置一个专用网络后端 CPU，例如 CPU0：
+vhost 模式
+vhost-* 内核线程 → ServerVM CPU0
+eth0 IRQ 134     → ServerVM CPU0
+无 vhost 模式
+vtnet-*:*\ tx线程 → ServerVM CPU0
+eth0 IRQ 134      → ServerVM CPU0
+当前自动识别脚本可以直接执行：
+sh bind_net_backend_irq.sh set 0
+脚本会自动判断：
+vhost
+或
+userspace
+并绑定实际后端线程，而不是只绑定 DSM 主进程。
+ 
+⸻
+ 
+7.2 不要只绑定 DSM 主进程
+以下命令只改变 DSM 主线程：
+taskset -pc 0 <DSM_PID>
+它不会自动改变：
+	•	已经创建的 vhost 内核线程；
+	•		•	已经创建的 DSM vtnet TX 子线程；
+	•	其他 iothread。
+因此必须绑定实际执行网络 TX 的 TID。
+ 
+⸻
+ 
+7.3 防止 irqbalance 覆盖设置
+测试或产品运行时，应：
+systemctl stop irqbalance
+或者在 irqbalance 配置中排除 IRQ 134。
+绑定后必须检查：
+cat /proc/irq/134/smp_affinity_list
+cat /proc/irq/134/effective_affinity_list
+期望两者都指向所选 CPU。
+ 
+⸻
+ 
+7.4 在关键生命周期后重新应用 affinity
+线程 TID 会随 DSM 重启变化，IRQ 状态也可能在设备恢复后重新初始化。
+因此应在以下时机自动重新绑定：
+	•	ServerVM 启动后；
+	•	eth0 初始化完成后；
+	•	DSM 启动并创建 vhost/DSM TX 线程后；
+	•	Android Guest 重启后；
+	•	DSM 重启后；
+	•	STR resume 后；
+	•	eth0 驱动重新初始化后。
+推荐做成 systemd service 或产品网络初始化脚本，而不是依赖人工执行。
+ 
+⸻
+ 
+7.5 Android 和 PC 统一使用 iperf3 3.17.1+
+不建议继续使用系统中的：
+iperf 3.6+
+正式性能测试应统一使用：
+iperf 3.17.1+
+并尽量让客户端与服务端使用相同版本，避免统计口径和协议兼容差异。
+PC：
 ./iperf3 -s -p 5201 --forceflush
-Android 60 秒验证命令
+Android 60 秒测试：
 ./iperf3 \
     -A 1 \
     --cport 41001 \
@@ -231,7 +458,7 @@ Android 60 秒验证命令
     -i 10 \
     --udp-counters-64bit \
     --get-server-output
-600 秒正式命令
+600 秒长测：
 ./iperf3 \
     -A 1 \
     --cport 41001 \
@@ -247,11 +474,127 @@ Android 60 秒验证命令
  
 ⸻
  
-最终定性
-现在可以把原始问题正式归纳为：
-Android→PC UDP 上行低带宽由两个因素叠加造成：ServerVM 网络后端线程与 eth0 IRQ/TX completion 的 CPU 亲和性失配，以及 Android 系统自带 iperf3 3.6+ 在该平台上的高 PPS UDP 流量生成能力不足或不稳定。
-在：
-实际后端线程与 IRQ 同核
+7.6 不使用 
+-b 0
+作为正式验收
+-b 0 会让发送端尽可能快地超发。
+实测可能出现：
+sender：1.09～1.12 Gbps
+receiver：约954 Mbps
+loss：12%～15%
+这只能用于验证数据路径最大能力，不适合作为产品验收。
+正式验收应使用：
+-b 1000M
+-l 1400
+ 
+⸻
+ 
+八、建议的代码级长期方案
+8.1 无 vhost 模式
+在创建 DSM TX 线程后，增加可配置 affinity：
+cpu_set_t cpuset;
+int rc;
+
+CPU_ZERO(&cpuset);
+CPU_SET(net_backend_cpu, &cpuset);
+
+rc = pthread_setaffinity_np(net->tx_tid,
+                            sizeof(cpuset),
+                            &cpuset);
+if (rc != 0) {
+        pr_err("Failed to bind virtio-net TX thread to CPU%d: %d\n",
+               net_backend_cpu, rc);
+}
+建议增加配置项：
+net_backend_cpu=<cpu>
+ 
+⸻
+ 
+8.2 vhost 模式
+vhost 线程由内核创建，TID 可能随每次启动变化。
+可以采用：
+	•	DSM 启动后自动识别对应 vhost-* TID；
+	•	将该线程加入指定 cpuset；
+	•	或由专用服务在检测到 vhost worker 后调用 sched_setaffinity()。
+不应把 vhost TID 写死。
+ 
+⸻
+ 
+8.3 eth0 IRQ
+建议由以下任一位置设置：
+	•	网卡驱动初始化后；
+	•	ServerVM 网络初始化服务；
+	•	DSM 网络后端启动服务；
+	•	STR resume hook。
+同时记录：
+requested affinity
+effective affinity
+防止仅修改允许集合但实际投递 CPU 未改变。
+ 
+⸻
+ 
+8.4 可选的进一步优化
+当前问题已经可以通过 affinity 达到线速，以下项目不是立即修复的必要条件，但可以降低系统对 CPU 局部性的敏感度：
+	•	virtio-net multiqueue；
+	•	多队列 TAP/vhost；
+	•	VIRTIO_NET_F_MQ；
+	•	checksum offload；
+	•	scatter-gather；
+	•	GSO/TSO/USO；
+	•	增加一次唤醒处理的 descriptor 数量；
+	•	减少 per-packet kick 和中断；
+	•	优化 TX completion batching。
+这些属于后续性能优化，不应代替当前已经验证有效的 affinity 修复。
+ 
+⸻
+ 
+九、建议的验收标准
+建议至少包含以下测试。
+9.1 基础性能
+协议：UDP
+方向：Android → PC
+payload：1400字节
+目标：1000M
+时长：60秒 × 3轮
+建议判定：
+receiver平均带宽 ≥ 900 Mbps
+无持续性异常下降
+丢包率满足产品指标
+9.2 耐久性
+时长：600秒
+输出周期：60秒
+重点检查：
+	•	是否长期保持 900 Mbps 以上；
+	•	后端线程是否迁移；
+	•	IRQ 是否被 irqbalance 移走；
+	•	eth0 drop/error 是否增长；
+	•	qdisc 和 TX ring 是否发生异常。
+9.3 生命周期恢复
+分别在以下场景后重复测试：
+	•	冷启动；
+	•	DSM 重启；
+	•	Android Guest 重启；
+	•	STR suspend/resume；
+	•	eth0 link down/up；
+	•	ServerVM networkd 重载。
+每次都要确认自动 affinity 配置重新生效。
+ 
+⸻
+ 
+十、最终结论
+本次问题不是单一的 virtio-net 功能缺陷，也不是物理网卡带宽不足。
+最终可以归纳为：
+Android→PC 的 1400 字节 UDP 上行是一条高 PPS、单队列、跨 Guest 后端和物理网卡的串行发送路径。实际网络后端线程与 eth0 IRQ/TX completion 不同核时，会产生显著的跨 CPU 状态同步、缓存局部性损失和队列反压，导致吞吐下降到约 500～650 Mbps。
+其他场景没有暴露同样问题，是因为：
+	•	Android→ServerVM 不经过物理 eth0 TX；
+	•	ServerVM→PC 不经过 virtio/vhost/TAP；
+	•	PC→Android 是 RX/NAPI/GRO 批处理路径；
+	•	TCP是字节流，用户态和内核更容易批量处理；
+	•	只有 Android→PC UDP 上行同时串联了 virtio TX、后端线程、TAP、bridge、eth0 TX 和物理完成中断。
+关闭 vhost 最初没有改善，是因为：
+vhost 关闭后，DSM vtnet TX 线程接替了 vhost 的报文生产角色，但该线程仍未绑核，因此同样的生产—完成跨核问题依旧存在。
+通过：
+实际后端TX线程与eth0 IRQ同核
 +
-Android 使用 iperf3 3.17.1+
-后，无论 vhost 开启还是关闭，当前系统都已经证明具备接近千兆线速的 UDP 上行能力。
+使用iperf3 3.17.1+
+当前系统在 vhost 开启和关闭两种模式下都已经验证能够达到接近千兆线速的 UDP 上行性能。
