@@ -1,0 +1,970 @@
+Android Guest 外发网络上行吞吐异常调查文档
+——基于路径隔离、后端亲和性、vhost 对照与 IPI 计数的阶段性结论
+1. 调查目的
+本次调查针对 Android Guest 经 ServerVM 转发到外部 PC 时出现的网络上行吞吐异常。
+最初故障表现为 Android→PC 的 UDP 上行只能达到约 500～650 Mbps，而 UDP 下行、ServerVM→PC 以及 Android→ServerVM 等场景基本正常。后续补充测试发现，Android→PC 的 TCP 上行在使用 -l 1400 进行小块发送时同样可能下降到约 435 Mbps。
+因此，故障不能再简单定义为“UDP 协议上行问题”，更准确的定义是：
+Android Guest 向外部物理网络发送数据时，Guest virtio-net TX、ServerVM 网络后端、TAP/bridge 转发以及物理 eth0 TX 共同组成的发送路径，对实际网络后端线程的 CPU 亲和性高度敏感。小报文 UDP 和 TCP 小块写入最容易暴露该问题。
+本次调查需要回答以下问题：
+	1.	问题位于 Android、virtio-net、vhost/DSM、bridge，还是物理网卡；
+	2.	vhost 是否是根本原因；
+	3.	为什么关闭 vhost 后最初没有改善；
+	4.	为什么主要在 Android→外部 PC 的上行方向出现；
+	5.	CPU 亲和性是否只是相关因素，还是可以被受控实验坐实的原因；
+	6.	跨核执行时是否确实产生了更多 IPI；
+	7.	当前能够形成什么工程结论，以及还缺少哪些代码级证据。
+ 
+⸻
+ 
+2. 系统架构与代码路径
+2.1 网络拓扑
+当前产品中的主要路径为：
+Android Guest
+      │
+      │ virtio-net TX
+      ▼
+DSM / vhost-net
+      │
+      ▼
+    tap1
+      │
+      ▼
+     br0
+      │
+      ▼
+ServerVM eth0
+      │
+      ▼
+   外部 PC
+其中，Android Guest 使用 virtio-net 虚拟网卡；DSM 在 ServerVM 中提供 virtio-net 设备模型；tap1 接入 br0；br0 同时连接 ServerVM 的物理网卡 eth0。
+ 
+⸻
+ 
+2.2 vhost 开启时的数据路径
+DSM 启动参数包含：
+-s 00:0.0,virtio-net,tap=tap1,vhost
+当 Guest 设置 VIRTIO_CONFIG_S_DRIVER_OK 后，代码执行：
+static void virtio_net_set_status(void *vdev, uint64_t status)
+{
+        struct virtio_net *net = vdev;
+        int rc;
+
+        if (!net->vhost_net)
+                return;
+
+        if (!net->vhost_net->vhost_started &&
+            (status & VIRTIO_CONFIG_S_DRIVER_OK)) {
+                if (net->mevp)
+                        mevent_disable(net->mevp);
+
+                rc = vhost_net_start(net->vhost_net);
+                ...
+        }
+}
+vhost_net_start() 继续执行：
+rc = vhost_dev_start(&vhost_net->vdev);
+
+rc = vhost_net_set_backend(&vhost_net->vdev,
+                           vhost_net->tapfd);
+进入 vhost 模式后，主要 TX 数据面由内核 vhost-* 线程处理，而不是 DSM 主线程或 DSM 的用户态 virtio_net_tx_thread：
+Android virtqueue
+    → vhost-* 内核线程
+    → tap1
+    → br0
+    → eth0
+因此，vhost 模式下真正需要观察和绑定的是对应的 vhost-* TID。仅绑定 DSM 主进程 PID，不能约束已经独立存在的 vhost 内核线程。
+ 
+⸻
+ 
+2.3 vhost 关闭时的数据路径
+去掉启动参数中的 vhost 后，DSM 使用用户态 TX 线程处理 virtqueue。
+Guest 通知 TX queue 时：
+static void virtio_net_ping_txq(void *vdev,
+                                struct virtio_vq_info *vq)
+{
+        struct virtio_net *net = vdev;
+
+        if (!vq_has_descs(vq))
+                return;
+
+        pthread_mutex_lock(&net->tx_mtx);
+
+        vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+
+        if (net->tx_in_progress == 0)
+                pthread_cond_signal(&net->tx_cond);
+
+        pthread_mutex_unlock(&net->tx_mtx);
+}
+用户态 TX 线程随后执行：
+static void *virtio_net_tx_thread(void *param)
+{
+        ...
+        do {
+                virtio_net_proctx(net, vq);
+        } while (vq_has_descs(vq));
+        ...
+}
+单个 descriptor chain 的处理逻辑是：
+static void virtio_net_proctx(struct virtio_net *net,
+                              struct virtio_vq_info *vq)
+{
+        n = vq_getchain(vq, &idx, iov,
+                        VIRTIO_NET_MAXSEGS, NULL);
+
+        tiov = tx_rx_iov_trim(iov, &n,
+                              net->tx_vhdrlen);
+
+        net->virtio_net_tx(net, tiov, n, plen);
+
+        vq_relchain(vq, idx, tlen);
+}
+TAP 后端最终调用：
+static void virtio_net_tap_tx(...)
+{
+        ...
+        writev(net->tapfd, iov, iovcnt);
+}
+无 vhost 模式的完整路径为：
+Android virtqueue
+    → DSM vtnet-*:*\ tx线程
+    → vq_getchain()
+    → writev(tapfd)
+    → tap1
+    → br0
+    → eth0
+DSM 创建该线程时仅执行：
+pthread_create(&net->tx_tid,
+               NULL,
+               virtio_net_tx_thread,
+               net);
+代码没有设置 pthread_setaffinity_np()，因此该 TX 线程默认可以在 ServerVM 多个 CPU 之间迁移。
+ 
+⸻
+ 
+2.4 当前 virtio-net 的性能条件
+DSM 当前只配置一个 TX queue：
+#define VIRTIO_NET_RXQ  0
+#define VIRTIO_NET_TXQ  1
+#define VIRTIO_NET_MAXQ 3
+实际对 Guest 暴露的是一个 RX queue 和一个 TX queue。
+同时，DSM 提供的 feature 主要包括：
+VIRTIO_NET_F_MAC
+VIRTIO_NET_F_MRG_RXBUF
+VIRTIO_NET_F_STATUS
+VIRTIO_F_VERSION_1
+VIRTIO_F_NOTIFY_ON_EMPTY
+VIRTIO_RING_F_INDIRECT_DESC
+并未提供完整的：
+TX checksum offload
+scatter-gather
+TSO
+UDP segmentation offload
+Android 的 ethtool -k eth0 也显示：
+tx-checksumming: off
+scatter-gather: off
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+tx-udp-segmentation: off [fixed]
+因此当前 Guest TX 是一条：
+单TX queue
++
+发送卸载基本关闭
++
+每报文固定处理成本较高
+的路径。1400 字节 UDP 在 1 Gbps 目标下约需要：
+1,000,000,000 / (1400 × 8)
+≈ 89,300 个UDP datagram/s
+这类高 PPS 负载会显著放大线程调度、远程回调、队列同步和缓存局部性问题。
+ 
+⸻
+ 
+3. 故障现象与调查假设
+3.1 初始故障现象
+最初观察到：
+场景	结果
+Android→PC UDP 上行	约 500～650 Mbps
+PC→Android UDP 下行	约 930 Mbps以上
+Android→ServerVM UDP	正常，明显超过1 Gbps
+ServerVM→PC UDP	约950 Mbps
+Android→PC TCP	最初认为正常
+后续对 TCP 使用：
+iperf3 \
+    -c 192.168.1.1 \
+    -b 1000M \
+    -l 1400
+发现 TCP 上行也可能只有：
+435 Mbps
+而 TCP -R 下行仍为：
+约939 Mbps
+因此问题定义修正为：
+Android Guest 发往外部物理网络的高频、小粒度上行负载存在性能异常；UDP 最容易暴露，TCP 在强制 1400 字节小块写入时也会暴露。
+ 
+⸻
+ 
+3.2 初始调查假设
+围绕上述现象，依次提出以下假设：
+假设	验证思路
+物理链路或PC只有500 Mbps能力	比较ServerVM→PC
+virtio-net TX存在固定500 Mbps上限	比较Android→ServerVM和Android→PC
+bridge或eth0中途大量丢包	比较tap1 RX、eth0 TX和drop
+vhost实现本身有缺陷	关闭vhost对照
+后端线程和网卡处理CPU不匹配	执行同核/跨核亲和性矩阵
+测试工具无法产生目标流量	比较iperf3 3.6+与3.17.1+
+跨核配置触发更多IPI	比较Linux可见IPI/packet
+ 
+⸻
+ 
+4. 第一阶段：排除物理链路能力不足
+ServerVM 直接向 PC 发送 TCP、UDP 时可以达到约 950 Mbps，说明以下部分具备千兆能力：
+ServerVM协议栈
+→ qdisc
+→ eth0驱动
+→ 物理链路
+→ PC
+因此，“物理网卡或 PC 接收能力只能达到 500 Mbps”的假设被排除。
+PC→Android 的 TCP、UDP 下行也能够达到约 930～940 Mbps，说明：
+eth0 RX
+→ bridge
+→ tap1
+→ virtio RX
+→ Android
+这条接收路径具备线速能力。
+ 
+⸻
+ 
+5. 第二阶段：通过路径 A/B 确定故障边界
+5.1 使用的脚本
+第二阶段使用：
+位置	脚本	作用
+Android	android_udp_path_ab.sh	同一Android CPU分别测试ServerVM和PC
+ServerVM	servervm_net_path_monitor.sh	监控tap1、br0、eth0和后端线程
+Ubuntu后处理	summarize_workers.py	对齐流量窗口和线程CPU位置
+共识别出 36 个有效测试窗口。
+ summary.txt
+ 
+⸻
+ 
+5.2 Android A/B 脚本原理
+android_udp_path_ab.sh 遍历 Android CPU0～CPU5，并对每个 CPU 分别测试：
+Android→ServerVM
+Android→外部PC
+每个 CPU 使用固定 UDP 源端口：
+CPU0 → 41000
+CPU1 → 41001
+...
+CPU5 → 41005
+同时固定：
+CPU
+报文长度
+测试时长
+源端口
+iperf3参数
+只改变目标 IP。
+这样，两条路径在 tap1 之前完全相同：
+Android
+→ virtio TX
+→ vhost/DSM
+→ tap1
+差异仅在：
+Android→ServerVM：
+tap1 → br0本地交付
+
+Android→PC：
+tap1 → br0转发 → eth0
+ 
+⸻
+ 
+5.3 ServerVM 监控脚本原理
+servervm_net_path_monitor.sh 每秒采集：
+tap1 RX bytes/packets/drop/error
+eth0 TX bytes/packets/drop/error
+br0 RX/TX bytes
+同时周期记录：
+vhost
+DSM
+ksoftirqd
+线程所在 CPU，并保存 /proc/interrupts、softnet_stat、qdisc 和 ethtool 快照。
+相邻采样值做差后，可以得到每秒接口速率，并判断报文到底在哪一级开始降速。
+ 
+⸻
+ 
+5.4 路径 A/B 结果
+代表性结果包括：
+Android CPU1 → ServerVM：
+receiver 3520 Mbps
+tap1     3566 Mbps
+eth0        0 Mbps
+
+Android CPU1 → PC：
+receiver 908 Mbps
+tap1     921 Mbps
+eth0     921 Mbps
+以及：
+Android CPU2 → ServerVM：
+receiver 1260 Mbps
+tap1     1279 Mbps
+eth0        0 Mbps
+
+Android CPU2 → PC：
+receiver 472 Mbps
+tap1     478 Mbps
+eth0     478 Mbps
+另有：
+Android CPU3 → ServerVM：3510 Mbps
+Android CPU1另一轮 → PC：553 Mbps
+Android CPU2另一轮 → PC：457 Mbps
+selected_windows.txt
+由此得到以下确定结论。
+结论一：virtio/TAP 公共路径不存在固定 500 Mbps 上限
+Android→ServerVM 已经通过相同的：
+Android virtio frontend
+→ virtqueue
+→ vhost/DSM
+→ tap1
+路径达到 1.26～3.51 Gbps。
+如果 virtio-net 或 TAP 本身只能达到 500 Mbps，上述结果不可能出现。
+结论二：异常只在继续经过物理 eth0 时出现
+Android→ServerVM 不经过 eth0，性能高；Android→PC 继续经过 eth0，性能下降。
+因此，问题边界位于：
+Guest TX后端
+→ tap1
+→ br0
+→ eth0 TX及其完成路径
+的协作过程，而不是 Android virtio-net 的固定容量。
+ 
+⸻
+ 
+5.5 排除 bridge 中途大量丢包
+低性能 Android→PC 测试中：
+tap1 RX速率 ≈ eth0 TX速率
+tap1 RX packets ≈ eth0 TX packets
+drop/error没有明显增长
+sender ≈ receiver
+如果 bridge 或 eth0 中途丢弃了约一半流量，应看到：
+tap1 RX高
+eth0 TX低
+或drop明显增长
+实际并未出现。
+因此，低吞吐更符合反压模型：
+eth0发送完成或队列推进变慢
+    ↓
+bridge向eth0转发变慢
+    ↓
+TAP/vhost处理变慢
+    ↓
+virtio used descriptor返回变慢
+    ↓
+Android发送队列受限
+    ↓
+sender本身只能达到较低速率
+ 
+⸻
+ 
+6. 第三阶段：判断 vhost 是否是根本原因
+6.1 最初关闭 vhost 后没有改善
+最初直接去掉 vhost，吞吐仍然处于约 500～600 Mbps，因此一度怀疑 vhost 不是主要因素。
+结合代码分析后发现，该实验不能排除亲和性问题。
+关闭 vhost 只是将实际 TX 生产者从：
+vhost-* 内核线程
+替换成：
+DSM vtnet-*:*\ tx用户线程
+但 DSM TX 线程没有设置 affinity，仍可以在 CPU0～CPU5 之间迁移。
+所以：
+关闭vhost
+≠
+消除网络后端线程调度问题
+ 
+⸻
+ 
+6.2 绑定 DSM 主进程为什么无效
+执行：
+taskset -pc 0 <DSM_PID>
+只改变 DSM 主线程的 affinity。
+在 vhost 模式中，实际 TX 后端是独立的 vhost-* 内核线程；在无 vhost 模式中，实际 TX 后端是独立 pthread：
+vtnet-*:*\ tx
+Linux 中主线程与其他 TID 可以拥有不同 affinity，因此必须绑定真正执行网络 TX 的 TID，而不是只绑定 DSM PID。
+ 
+⸻
+ 
+7. 第四阶段：亲和性因果验证
+7.1 使用的脚本
+该阶段使用：
+bind_net_backend_irq.sh
+servervm_no_vhost_affinity.sh
+脚本执行以下操作：
+	1.	解析 DSM virtio-net 参数；
+	2.	判断当前是 vhost 模式还是 userspace 模式；
+	3.	vhost 模式查找 vhost-* TID；
+	4.	无 vhost 模式查找 vtnet-*:*\ tx TID；
+	5.	设置实际后端线程 affinity；
+	6.	设置当前 eth0 IRQ affinity；
+	7.	保存原配置并支持恢复。
+需要注意，IRQ 编号会随设备探测发生变化。后续日志中 IRQ 134 曾变成 ISP 中断，因此正式使用时必须动态识别真正的 eth0 IRQ；不能长期写死 IRQ 号。
+当前有效 IPI 测试中，eth0 对应的是：
+IRQ 131
+且 /proc/interrupts 明确显示：
+131: ... GICv3 ... eth0
+ 
+⸻
+ 
+7.2 vhost 模式亲和性结果
+在有效的 eth0 IRQ 对照中：
+vhost CPU0 + eth0 IRQ CPU0：
+约836、843、843 Mbps
+平均约841 Mbps
+
+vhost CPU0 + eth0 IRQ CPU1：
+约546、535、536 Mbps
+平均约539 Mbps
+进一步将两者同时放到 CPU5：
+vhost CPU5 + eth0 IRQ CPU5：
+约830 Mbps
+因此可以排除“CPU0 是特殊高性能核心”。
+真正有因果作用的是：
+实际后端线程与eth0完成处理上下文的相对CPU位置
+ 
+⸻
+ 
+7.3 无 vhost 模式亲和性结果
+无 vhost 模式下最严格的一组 A/B 是：
+DSM TX线程 CPU1 + eth0 IRQ CPU0：
+receiver约625 Mbps
+
+DSM TX线程 CPU1 + eth0 IRQ CPU1：
+receiver约953 Mbps
+两组保持：
+相同DSM后端模式
+相同Android
+相同PC
+相同UDP长度1400
+相同-b 1000M
+相同测试时长
+仅改变 IRQ CPU。
+同核后吞吐提升约：
+(953 - 625) / 625
+≈ 52.5%
+这已经构成受控因果证据。
+ 
+⸻
+ 
+7.4 已坐实的亲和性结论
+当前可以正式确认：
+网络后端线程的 CPU 位置不是一般相关因素，而是导致大幅吞吐变化的直接工程原因。后端线程稳定运行在与 eth0 IRQ/完成处理具有良好局部性的 CPU 上时，吞吐可恢复到约 830～953 Mbps；后端与完成路径跨核时，吞吐可能下降到约 500～650 Mbps。
+同时已经确认：
+	•	问题不只存在于 vhost；
+	•	无 vhost 的 DSM TX 线程同样受影响；
+	•	CPU0 本身不特殊；
+	•	关闭 vhost 不能自动解决问题；
+	•	绑定 DSM 主进程不能替代绑定实际 TX TID。
+ 
+⸻
+ 
+8. 第五阶段：TCP 补充验证
+8.1 TCP 下行
+使用 -R：
+PC发送
+Android接收
+实测：
+sender约938 Mbps
+receiver约939 Mbps
+Retr=0
+说明下行路径具备线速能力。
+ 
+⸻
+ 
+8.2 TCP 小块上行
+使用：
+iperf3 \
+    -b 1000M \
+    -l 1400
+未固定后端线程时：
+约435 Mbps
+绑定 vhost 后端线程后：
+约888 Mbps
+换用 iperf3 3.17.1+ 后：
+约942 Mbps
+需要严格说明：该轮日志中脚本使用的 IRQ 134 已经变为 ISP，并非 eth0，因此这一轮只证明：
+vhost worker绑核显著改善了TCP小块上行
+不能用该轮单独证明 TCP 的 eth0 IRQ 同核效应。
+不过，TCP 和 UDP 在 DSM/vhost 后端均走相同的 virtqueue、TAP、bridge 和 eth0 路径；TCP 小块上行与 UDP 一样属于高频发送负载，因此出现类似亲和性敏感是符合代码路径的。
+ 
+⸻
+ 
+8.3 为什么 TCP 最初看似正常
+TCP 默认是大块字节流发送，应用一次 write 可以提交较多数据，内核和 virtqueue 更容易批量处理。
+本轮 TCP 命令显式使用：
+-l 1400
+这会显著缩小应用层读写粒度，提高 write 循环频率，使其更接近小报文 UDP 压力。
+因此当前应区分：
+标准TCP吞吐测试
+和：
+TCP 1400字节小块压力测试
+问题不是 TCP、UDP 代码分支本身不同，而是高频、小粒度发送会放大后端线程和跨 CPU 处理成本。
+ 
+⸻
+ 
+9. 第六阶段：测试工具版本验证
+Android 中存在：
+系统版本：iperf 3.6+
+本地版本：iperf 3.17.1+
+在 vhost 绑核场景中：
+3.6+：
+约627～642 Mbps
+
+3.17.1+：
+约927 Mbps
+无 vhost 且后端同核时，3.17.1+ 可以稳定产生：
+sender 1000 Mbps
+receiver约954 Mbps
+因此，旧版 iperf3 在部分 vhost 场景中会成为负载生成瓶颈或与 vhost 调度节奏发生不利交互。
+但不能将 3.6+ 定义为固定 600 Mbps 上限，因为在部分无 vhost、同核场景中它也曾达到较高吞吐。
+当前能够坐实的结论是：
+iperf3 版本是重要测试干扰变量。系统 3.6+ 不适合作为当前产品的稳定千兆验收源；3.17.1+ 能更可靠地产生目标负载。该因素不是产品网络路径的根本原因，但会掩盖或放大亲和性问题。
+ 
+⸻
+ 
+10. 第七阶段：IPI 数量验证
+10.1 使用的脚本
+使用：
+ipi_count_compare.sh
+脚本从 ServerVM 的：
+/proc/interrupts
+读取各 CPU 的 IPI 增量，并输出：
+IPI/s
+IPI/10000个eth0 TX packet
+IPI/10000个tap1 RX packet
+按报文归一化是必要的，因为高性能组处理的包数更多，不能只比较 IPI 绝对值。
+该脚本统计的是 ServerVM Linux 可见 IPI，不包括 Xvisor 内部未向 Guest Linux 暴露的 IPI。
+ 
+⸻
+ 
+10.2 UDP 同核与跨核对比
+UDP 同核组的 IPI1 Function call interrupts：
+每10000个eth0 TX packet：
+9993.02
+
+即：
+约0.9993次IPI1/packet
+UDP 跨核组：
+每10000个eth0 TX packet：
+19162.56
+
+即：
+约1.9163次IPI1/packet
+跨核/同核比值为：
+1.9176
+而且跨核组处理的 eth0 TX packet 更少，但 IPI1 绝对数量反而更多。
+因此可以正式确认：
+UDP 跨核配置下，ServerVM Linux 可见的 Function-call IPI 按每个发送报文归一化后接近翻倍。
+该结果坐实了“跨核配置确实触发了更多 Linux Function-call IPI”，但尚不能仅凭数量证明 IPI 执行成本是全部吞吐损失的唯一来源。
+ 
+⸻
+ 
+10.3 跨核 UDP 与跨核 TCP 对比
+跨核 UDP：
+IPI1：
+1.9163次/eth0 TX packet
+跨核 TCP：
+IPI1：
+0.5077次/eth0 TX packet
+因此：
+UDP / TCP
+≈ 3.77倍
+TCP 实际处理的 eth0 TX packet 比 UDP 更多，但 Function-call IPI 反而更少。
+这说明：
+UDP 的发送组织方式比 TCP 更容易触发细粒度跨 CPU callback。UDP 相比 TCP 更早、更严重地暴露上行问题，不只是因为 UDP 报文数量更多，而是因为每个物理发送包对应的 Function-call IPI 密度明显更高。
+ 
+⸻
+ 
+10.4 跨核 UDP 的 IPI 目标 CPU 分布
+当前配置为：
+vhost worker：CPU1
+eth0 IRQ：   CPU0
+UDP 跨核的 IPI1 分布为：
+目标CPU	IPI1数量	占比
+CPU0，eth0 IRQ CPU	2,811	0.06%
+CPU1，vhost CPU	2,280,063	49.59%
+CPU2	491,997	10.70%
+CPU3	1,481,393	32.22%
+CPU4	83,348	1.81%
+CPU5	258,539	5.62%
+TCP 跨核的分布为：
+目标CPU	IPI1数量	占比
+CPU0	885	0.05%
+CPU1	1,220,032	65.72%
+CPU2	229,483	12.36%
+CPU3	18,264	0.98%
+CPU4	59,961	3.23%
+CPU5	327,849	17.66%
+由此得到两个重要结论。
+结论一：不是简单的 CPU0→CPU1 一对一 IPI
+Function-call IPI 并未主要投递到 eth0 IRQ CPU0，而是投递到 vhost CPU1以及 CPU2、CPU3、CPU5。
+因此，跨核问题不能简化为：
+eth0 IRQ CPU0
+每包向vhost CPU1发送一次IPI
+实际 ServerVM 网络处理涉及多个 CPU。
+结论二：UDP 特有的大量 IPI 主要集中在 CPU1 和 CPU3
+UDP 相比 TCP 增加的 IPI 密度中，约 87% 来自 CPU1 和 CPU3。
+其中：
+CPU1：
+vhost worker所在CPU
+
+CPU3：
+UDP场景中特别突出的IPI目标CPU
+这提示 UDP 流量进入 ServerVM 后，还发生了额外的跨 CPU 工作分发。
+ 
+⸻
+ 
+11. 对 IPI 结果的严格解释
+11.1 已经证明
+当前已经证明：
+	1.	跨核 UDP 每包 Function-call IPI 接近同核 UDP 的两倍；
+	2.	跨核 UDP 每包 Function-call IPI 是跨核 TCP 的约 3.77 倍；
+	3.	高频 IPI 类型是 Function call interrupts，不是 Rescheduling interrupts；
+	4.	Reschedule IPI 每秒只有个位数，不足以解释当前每秒数万报文的差异；
+	5.	UDP 的额外 Function-call IPI 被分发到多个 CPU；
+	6.	CPU1 和 CPU3 是主要目标。
+ 
+⸻
+ 
+11.2 尚未证明
+当前尚未证明：
+	1.	IPI 本身的执行时间就是吞吐下降的唯一原因；
+	2.	具体是哪一个 callback 触发了 IPI1；
+	3.	CPU0 是否是大量 IPI 的发送者；
+	4.	IPI1 是由 RPS/RFS、远程 SKB 释放、TLB shootdown，还是其他 smp_call_function*() 路径触发；
+	5.	Xvisor 内部是否还额外产生了 Guest Linux 不可见的 IPI。
+因此，当前合理表述是：
+Function-call IPI 增加是跨核亲和性问题的明确内部表现和重要性能候选机制，但具体 callback 尚未定位，不能把全部性能损失单独归因于 IPI handler 本身。
+ 
+⸻
+ 
+11.3 当前最优先的微观候选
+从 IPI 分布看，RPS/RFS 是当前优先级较高的候选。
+Android→PC 虽然是业务上行，但流量进入 ServerVM 时属于：
+tap1 RX
+→ bridge
+→ eth0 TX
+如果 tap1 开启 RPS，Linux 可能把进入 tap1 的报文放入远端 CPU backlog，并通过 Function-call IPI 触发远端 CPU 处理。
+这可以解释：
+IPI1投递到多个CPU
+CPU3在UDP中异常突出
+Function-call IPI而非Reschedule IPI占绝对多数
+但当前尚未读取：
+tap1/rx-*/rps_cpus
+/proc/net/softnet_stat中的received_rps
+所以 RPS 目前仍是待验证候选，而不是最终结论。
+ 
+⸻
+ 
+12. 为什么其他场景没有同样严重的现象
+12.1 Android→ServerVM
+路径为：
+Android
+→ virtio TX
+→ vhost/DSM
+→ tap1
+→ br0本地交付
+→ ServerVM socket
+该路径不进入：
+eth0 TX
+物理网卡完成处理
+因此不会形成：
+Guest TX后端
+→ bridge
+→ 物理eth0 TX
+→ 网卡完成上下文
+这一完整闭环。
+这就是为什么 Android→ServerVM 能达到 1.26～3.51 Gbps，而 Android→PC 可能只有 472～553 Mbps。
+ selected_windows.txt
+ 
+⸻
+ 
+12.2 ServerVM→PC
+路径为：
+ServerVM应用
+→ ServerVM协议栈
+→ eth0
+→ PC
+它不经过：
+Android virtqueue
+vhost/DSM TX后端
+tap1输入
+bridge从tap1转发
+路径更短，涉及的队列和线程转换更少，不会叠加 Guest TX 后端的调度和回收压力。
+ 
+⸻
+ 
+12.3 PC→Android 下行
+路径为：
+PC
+→ eth0 RX
+→ IRQ/NAPI
+→ br0
+→ tap1
+→ vhost/DSM RX
+→ Android
+它是物理 RX 驱动路径，而不是：
+Guest后端生产eth0 TX
+→ 等待物理TX completion
+的发送闭环。
+接收方向还具备：
+NAPI批处理
+Android GRO开启
+因此每报文固定成本更容易被批量摊薄。
+ 
+⸻
+ 
+12.4 UDP 为什么比 TCP 更严重
+UDP 的每个 datagram 保留独立边界，高 PPS 时容易形成更细粒度的：
+SKB
+virtqueue descriptor
+kick
+completion
+远程callback
+TCP 是字节流，即使应用使用 -l 1400，内核仍可能合并相邻写入、连续处理多个 SKB，并在一次 virtqueue 或后端执行中处理多个 segment。
+IPI 数据已经给出直接支持：
+跨核UDP：
+1.9163次Function-call IPI/packet
+
+跨核TCP：
+0.5077次Function-call IPI/packet
+UDP 的每包 IPI 密度约为 TCP 的 3.77 倍。
+因此，UDP 更容易严重降速并不是单纯的协议推测，而已有 IPI 计数支撑。
+ 
+⸻
+ 
+12.5 两个 Guest 之间
+如果两个 Guest 都通过同一个 ServerVM bridge 通信：
+Guest A
+→ backend A
+→ tapA
+→ br0
+→ tapB
+→ backend B
+→ Guest B
+该路径不经过物理 eth0，因此当前已经坐实的：
+Guest TX后端
+↔
+eth0物理完成上下文
+问题不会以完全相同形式出现。
+但两个后端线程之间仍可能存在另外的跨 CPU 分发和远程唤醒问题，需要单独测试，不能直接从当前结果推断一定没有问题。
+ 
+⸻
+ 
+13. 测试工具版本的定位
+iperf3 版本不属于产品网络路径的根本原因，但属于重要测试变量。
+在 vhost 模式和相同亲和性条件下：
+iperf3 3.6+：
+约630～650 Mbps
+
+iperf3 3.17.1+：
+约927 Mbps
+因此旧版工具可能无法稳定地产生目标负载，或与当前 vhost 调度和 pacing 节奏存在不利交互。
+正式验收必须：
+Android和PC使用相同的iperf3 3.17.1+
+-b 0 只能用于测试路径最大能力，因为会出现超发和丢包；正式验收应使用：
+-b 1000M
+-l 1400
+ 
+⸻
+ 
+14. 当前结论分级
+14.1 已经坐实的系统级结论
+结论一
+Android→PC 上行低吞吐不是物理网卡带宽不足，也不是 virtio-net 固定 500 Mbps 上限。
+结论二
+问题需要同时经过：
+Guest virtio TX
+→ vhost/DSM后端
+→ tap1
+→ bridge
+→ 物理eth0 TX
+才会显著出现。
+结论三
+实际网络后端线程的 CPU 亲和性是导致大幅吞吐变化的直接工程原因。
+结论四
+问题不只存在于 vhost。关闭 vhost 后，如果 DSM TX 线程未正确绑定，同样会降速；将 DSM TX 与 eth0 IRQ 同核后可恢复到约 953 Mbps。
+结论五
+CPU0 本身不特殊；vhost 和 IRQ 同在 CPU5 也能恢复至约 830 Mbps。
+结论六
+跨核 UDP 会触发明显更多的 Linux Function-call IPI：每包数量约为同核的 1.92 倍。
+结论七
+跨核 UDP 的 Function-call IPI 密度约为跨核 TCP 的 3.77 倍，这解释了 UDP 为何比 TCP 更敏感。
+ 
+⸻
+ 
+14.2 高可信度机制判断
+当前最符合全部数据的机制是：
+后端线程与后续网络处理跨CPU
+    ↓
+触发更多Function-call IPI和远程callback
+    ↓
+同时增加队列状态、SKB、descriptor的跨核协作
+    ↓
+eth0发送完成及上游virtio descriptor回收变慢
+    ↓
+反压传回Android
+    ↓
+sender本身下降
+ 
+⸻
+ 
+14.3 尚未完成的代码级闭环
+尚需确认：
+	1.	高频 IPI1 的具体 callback；
+	2.	CPU3 为何在 UDP 中接收大量 IPI；
+	3.	是否由 tap1 RPS/RFS 主导；
+	4.	远程 SKB 释放是否参与；
+	5.	Xvisor 内部是否有额外跨 pCPU IPI；
+	6.	vhost 相比无 vhost 剩余约 2%～10%开销的具体位置。
+这些未完成项不影响亲和性修复的有效性，但会影响最终代码级根因描述。
+ 
+⸻
+ 
+15. 建议的解决方案
+15.1 配置专用网络后端 CPU
+例如选择 ServerVM CPU0。
+vhost 模式：
+对应vhost-* TID → CPU0
+真正eth0 IRQ     → CPU0
+无 vhost 模式：
+vtnet-*:*\ tx TID → CPU0
+真正eth0 IRQ       → CPU0
+不得只绑定 DSM 主进程。
+ 
+⸻
+ 
+15.2 动态识别 eth0 IRQ
+IRQ 编号会变化，不能固定使用 131 或 134。
+必须根据：
+/sys/class/net/eth0/device
+ethtool -i eth0
+/proc/interrupts
+动态识别，并确认中断行确实属于 eth0。
+如果 eth0 存在多个队列 IRQ，应全部识别并制定统一策略。
+ 
+⸻
+ 
+15.3 防止 affinity 被破坏
+应停止或配置 irqbalance，使其不重新移动 eth0 IRQ。
+以下生命周期后重新应用 affinity：
+ServerVM启动
+DSM启动或重启
+vhost线程创建
+Android Guest重启
+STR resume
+eth0驱动重新初始化
+link reset
+ 
+⸻
+ 
+15.4 无 vhost 模式代码化绑定
+建议在线程创建时使用 pthread_attr_setaffinity_np()：
+pthread_attr_t attr;
+cpu_set_t cpuset;
+
+CPU_ZERO(&cpuset);
+CPU_SET(net_backend_cpu, &cpuset);
+
+pthread_attr_init(&attr);
+
+pthread_attr_setaffinity_np(&attr,
+                            sizeof(cpuset),
+                            &cpuset);
+
+pthread_create(&net->tx_tid,
+               &attr,
+               virtio_net_tx_thread,
+               net);
+
+pthread_attr_destroy(&attr);
+这样可以保证 TX 线程从创建开始就只在指定 CPU 上运行。
+ 
+⸻
+ 
+15.5 vhost 模式绑定
+vhost TID 每次启动可能变化，因此应：
+	1.	在 vhost_net_start() 成功后触发管理动作；
+	2.	自动识别对应 vhost-* TID；
+	3.	通过 sched_setaffinity()、cpuset 或 systemd service 绑定；
+	4.	不得写死 TID。
+ 
+⸻
+ 
+15.6 测试工具统一
+Android 与 PC 使用相同的 iperf3 3.17.1+。
+UDP 验收：
+./iperf3 \
+    -A 1 \
+    --cport 41001 \
+    -p 5201 \
+    -c 192.168.1.1 \
+    -u -4 \
+    -b 1000M \
+    -l 1400 \
+    -t 600 \
+    -i 60 \
+    --udp-counters-64bit
+标准 TCP 吞吐应单独测试，不设置 -l 1400：
+./iperf3 \
+    -A 1 \
+    -p 5201 \
+    -c 192.168.1.1 \
+    -t 120 \
+    -i 60
+TCP 小块压力测试再单独使用：
+./iperf3 \
+    -A 1 \
+    -p 5201 \
+    -c 192.168.1.1 \
+    -b 1000M \
+    -l 1400 \
+    -t 120 \
+    -i 60
+ 
+⸻
+ 
+16. 后续代码级调查建议
+当前最优先的下一步不是继续反复测试吞吐，而是定位 IPI1 Function call interrupts 的 callback。
+建议依次检查：
+tap1/rx-*/rps_cpus
+br0/rx-*/rps_cpus
+eth0/rx-*/rps_cpus
+/proc/net/softnet_stat中的received_rps
+如果 UDP 中各 CPU 的 received_rps 增量与 IPI1 分布接近，则可以把主要 Function-call IPI 定位到 RPS 路径。
+如内核支持 tracepoint，应进一步捕获：
+csd_queue_cpu
+ipi_raise
+ipi_entry
+ipi_exit
+并统计 callback 符号，区分：
+RPS callback
+远程SKB释放
+TLB shootdown
+其他smp_call_function回调
+ 
+⸻
+ 
+17. 最终阶段性结论
+当前证据链已经足以形成如下结论：
+Android Guest 发往外部物理网络的上行吞吐异常，根本上是 Guest TX 后端到物理 eth0 发送路径跨 CPU 执行所造成的亲和性问题。该问题在 vhost 和无 vhost 两种模式下均可复现，并可通过绑定实际后端 TX 线程和 eth0 完成处理上下文显著改善或恢复。
+具体表现为：
+跨核：
+约500～650 Mbps
+
+同核：
+vhost约830～927 Mbps
+无vhost约953～954 Mbps
+跨核配置还会使 UDP 每个物理发送包对应的 Linux Function-call IPI 从约 1 次增加到约 1.92 次；UDP 的 IPI 密度又约为 TCP 的 3.77 倍。这证明跨核配置确实引入了额外的高频 SMP callback，并解释了 UDP 和 TCP 小块上行为什么比其他场景更容易受到影响。
+但从严谨性上，当前最终坐实的是：
+亲和性失配
++
+跨CPU Function-call IPI显著增加
++
+吞吐下降
+尚未坐实的是：
+具体哪一个Function-call callback
+以及IPI执行成本占总损失的准确比例
+因此，产品修复可以立即采用后端线程与 eth0 完成上下文的稳定亲和性配置；代码级最终根因则继续通过 RPS、received_rps 和 call-function callback 追踪完成闭环。
