@@ -1,0 +1,250 @@
+这份virtio.c已经把问题说明白了：你现在的vhost,iothread网络配置使用的是asyncio通知，正常vhost启动路径不会启动DSM的定时poll，也不会启动DSM那套用户态virtqueue iothread消费者。
+因此，可以在现有“asyncio＋vhost”基础上单独开启EVENT_IDX，不是在DSM定时poll上强行叠加EVENT_IDX。
+下面给出直接在代码中启用的修改，不再使用环境变量。功能修改集中在DSM的virtio-net.c，另外在DSM的vhost.c增加一条协商结果日志。本轮不需要修改你刚贴出的virtio.c，也不需要更新Linux、CCM、HOS或Android。
+一、先把poll与iothread的关系确认下来
+1. 
+iothread
+不设置DSM poll开关
+你这次提供的判断函数是：
+bool virtio_poll_enabled(struct virtio_base *base)
+{
+        return g_virtio_poll_enabled || base->polling_enable;
+}
+两个开关的来源分别是：
+开关	在本次代码中如何开启
+g_virtio_poll_enabled	acrn_parse_virtio_poll_interval()解析成功后设置
+base->polling_enable	设备选项中存在virtio_poll_interval=...时设置
+base->iothread	网络参数解析iothread后设置，与上述两个字段不同
+你现在使用的：
+-s 00:0.0,virtio-net,tap=tap1,vhost,iothread
+没有设备级virtio_poll_interval参数。iothread本身也不会在这份代码中将polling_enable置为true。
+2. 更关键的是：定时poll和用户态iothread启动都受
+BACKEND_VBSU
+限制
+virtio_pci_status_handler()中：
+if (base->backend_type == BACKEND_VBSU) {
+        if (virtio_poll_enabled(base)) {
+                /* 初始化DSM定时poll */
+                ...
+        }
+
+        if (value & VIRTIO_CONFIG_S_DRIVER_OK) {
+                ...
+                if (base->iothread)
+                        virtio_set_iothread(base, true);
+        }
+}
+而virtio_poll_start()同样有：
+if (... || base->backend_type != BACKEND_VBSU || ...) {
+        return;
+}
+结合前面网络初始化时选择的BACKEND_VHOST，现在可以明确：
+vhost,iothread
+    ├─ 网络后端：内核vhost
+    ├─ iothread标记：用于登记ASYNCIO通知
+    ├─ DSM定时poll：不由这个vhost分支启动
+    └─ virtio_set_iothread(base, true)：不由这个vhost分支调用
+所以，前面担心的“网络iothread是否把通知转给DSM TX线程”，在你已经提供的正常vhost启动路径中，没有发生这样的注册。
+3. 为什么用户态poll模式原本要屏蔽EVENT_IDX
+现在也能解释这项设计：你的virtio_poll_timer()依赖：
+vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+来减少Guest kick；恢复时通过vq_clear_used_ring_flags()清除这个标志。
+但协商EVENT_IDX后，Guest的通知判断改用avail_event，不能再依靠used ring的NO_NOTIFY位实现同一效果。这是virtio规范明确区分的两套通知抑制规则。
+因此，不应直接让这套只操作flags的DSM定时poll与EVENT_IDX混用。当前网络使用内核vhost，走的是另一条实现路径，不存在必须先改造DSM定时poll的问题。
+ 
+⸻
+ 
+二、修改一：修正原来的EVENT_IDX清位表达式
+文件：DSM的virtio-net.c 函数：virtio_net_init()
+找到：
+if (virtio_poll_enabled(&net->base)) {
+        /* in poll mode, vq kick do not need */
+        net->base.device_caps &= ~(uint64_t)(VIRTIO_RING_F_EVENT_IDX);
+}
+替换为：
+if (virtio_poll_enabled(&net->base)) {
+        /* Preserve the existing policy for DSM virtio polling. */
+        net->base.device_caps &=
+                ~(1ULL << VIRTIO_RING_F_EVENT_IDX);
+}
+VIRTIO_RING_F_EVENT_IDX是位编号29，正确掩码是1ULL << 29，不是整数29本身。
+这一步只是修正清位错误，还没有开启EVENT_IDX。
+ 
+⸻
+ 
+三、修改二：vhost初始化成功后，直接向Guest提供EVENT_IDX
+1. 准确插入位置
+仍在**virtio_net_init()**中，找到：
+if ((type != NULL) && (name != NULL)) {
+        if (strcmp(type, "tap") == 0) {
+                virtio_net_tap_setup(net, name);
+        }
+}
+在这段代码结束后、后面生成默认MAC地址的代码之前，插入下面的新代码块。
+这个位置已经完成TAP／vhost初始化，但Guest尚未开始协商设备特征。
+2. 直接插入的代码
+/*
+ * EVENT_IDX experiment: enable for the actual vhost backend only.
+ *
+ * This is a code-level test setting. No environment variable is used.
+ * Keep EVENT_IDX disabled for userspace fallback and when DSM polling
+ * has been explicitly configured.
+ */
+{
+        const uint64_t event_idx_bit =
+                1ULL << VIRTIO_RING_F_EVENT_IDX;
+        const bool poll_configured =
+                virtio_poll_enabled(&net->base);
+        const bool vhost_initialized =
+                net->vhost_net != NULL &&
+                net->base.backend_type == BACKEND_VHOST;
+        uint64_t backend_features = 0;
+
+        if (vhost_initialized)
+                backend_features =
+                        net->vhost_net->vdev.vhost_features;
+
+        /* Default to OFF unless all requirements below are met. */
+        net->base.device_caps &= ~event_idx_bit;
+
+        if (vhost_initialized &&
+            !poll_configured &&
+            (backend_features & event_idx_bit)) {
+                /* Test setting: advertise EVENT_IDX to the guest. */
+                net->base.device_caps |= event_idx_bit;
+        }
+
+        fprintf(stderr,
+                "NET_EVTIDX init: slot=%d func=%d "
+                "vhost_initialized=%u iothread=%u "
+                "poll_configured=%u backend_support=%u "
+                "offered=%u device_caps=0x%llx\n",
+                dev->slot,
+                dev->func,
+                (unsigned int)vhost_initialized,
+                (unsigned int)net->base.iothread,
+                (unsigned int)poll_configured,
+                (unsigned int)!!(backend_features & event_idx_bit),
+                (unsigned int)!!(net->base.device_caps & event_idx_bit),
+                (unsigned long long)net->base.device_caps);
+}
+如果已经插入了上一版读取DSM_NET_EVENT_IDX的代码，用这一块替换旧块，不要两块同时保留。
+3. 为什么不是直接修改
+VIRTIO_NET_S_HOSTCAPS
+你原来的：
+net->base.device_caps = VIRTIO_NET_S_HOSTCAPS;
+没有EVENT_IDX；后面的：
+vdev->base->device_caps &= ~(vhost_features ^ features);
+只能过滤已有位，不能补上缺少的位。
+现在选择在实际vhost初始化成功之后补位，可以同时满足：
+确实使用vhost，不是用户态回退；
+vdev->vhost_features确实包含EVENT_IDX；
+没有额外配置DSM poll；
+仍然保留Guest协商过程。
+这样不会因为直接扩大公共HOSTCAPS，把同一功能未经检查地开放给DSM用户态网络后端。
+这里保留!poll_configured是保守的实验限制。 它表示“没有配置DSM poll”，不是在判断定时器是否已经运行。当前启动配置预期为0；即使某处全局设置使它变成1，这版代码也不会强行忽略。
+4. 你新提供的通用代码已经能够传递这个能力
+virtio_common_cfg_read()直接从：
+base->device_caps
+向Guest返回能力。
+Guest写入特征时，virtio_common_cfg_write()执行：
+features = base->device_caps & value;
+...
+base->negotiated_caps |= features;
+DSM的vhost_dev_start()再执行：
+features =
+        (vdev->base->negotiated_caps & vdev->vhost_features) |
+        vdev->vhost_ext_features;
+因此，新增的能力可以沿现有流程传递：
+device_caps加入EVENT_IDX
+    → Guest读到并选择
+    → negotiated_caps保留EVENT_IDX
+    → VHOST_SET_FEATURES传给内核
+不需要修改这几处协商逻辑，也不要跳过Guest协商直接强制内核开启。
+另外，virtio_vq_enable()已经为avail与used ring的尾部事件字段映射了额外空间，本轮无需额外修改这两个ring的映射长度。
+ 
+⸻
+ 
+四、修改三：打印最终协商结果
+文件：DSM用户态的vhost.c 函数：vhost_dev_start()
+找到这段：
+features = (vdev->base->negotiated_caps & vdev->vhost_features) |
+        vdev->vhost_ext_features;
+
+rc = vhost_kernel_set_features(vdev, features);
+if (rc < 0) {
+        WPRINTF("set_features failed\n");
+        goto fail;
+}
+
+DPRINTF("set_features: 0x%lx\n", features);
+在DPRINTF()之后插入：
+fprintf(stderr,
+        "VHOST_EVTIDX apply: slot=%d func=%d fd=%d "
+        "offered=%u negotiated=%u sent=%u "
+        "busyloop_us=%u features=0x%llx\n",
+        vdev->base->dev->slot,
+        vdev->base->dev->func,
+        vdev->fd,
+        (unsigned int)!!(vdev->base->device_caps &
+                        (1ULL << VIRTIO_RING_F_EVENT_IDX)),
+        (unsigned int)!!(vdev->base->negotiated_caps &
+                        (1ULL << VIRTIO_RING_F_EVENT_IDX)),
+        (unsigned int)!!(features &
+                        (1ULL << VIRTIO_RING_F_EVENT_IDX)),
+        (unsigned int)vdev->busyloop_timeout,
+        (unsigned long long)features);
+这一处只增加启动日志，不额外调用任何ioctl，也不改变通知次数。
+日志中三个值的含义：
+字段	表示什么
+offered=1	DSM已向Guest提供EVENT_IDX
+negotiated=1	Guest已接受该特征
+sent=1	成功传给内核的features中包含EVENT_IDX
+不是看到offered=1就算完成，正常开启需要后面两个值也为1。
+ 
+⸻
+ 
+五、编译、启动和确认
+1. 只更新DSM可执行文件
+本轮改动范围：
+组件	是否修改
+DSM virtio-net.c	是：修正清位、增加直接开启逻辑
+DSM用户态vhost.c	是：增加协商日志
+本次提供的DSM virtio.c	不修改
+Linux、CCM、HOS、Android	不修改
+代码片段依据你提供的函数和结构编写，尚未在你的完整DSM工程中编译或上板验证。
+正常停止现有Guest／DSM后部署新DSM，再通过原管理流程启动。保留旧二进制，方便回退；不要让新旧DSM同时访问原始块设备后端。
+2. 启动参数保持原样
+-s 00:0.0,virtio-net,tap=tap1,vhost,iothread \
+不添加export，不添加poll参数，不修改busyloop。 如果脚本中此前已经加入DSM_NET_EVENT_IDX环境变量，可以删除；新代码不读取它。
+3. 预期日志
+DSM用户态日志应出现：
+NET_EVTIDX init: ... vhost_initialized=1 iothread=1 poll_configured=0 backend_support=1 offered=1 ...
+随后：
+VHOST_EVTIDX apply: ... offered=1 negotiated=1 sent=1 busyloop_us=0 ...
+如果内核中保留了之前的VQCFG初始化日志，再执行：
+dmesg | grep -E 'IOEM_CFG|VQMAP|VQCFG'
+当前网络队列应保持：
+route=asyncio
+event_idx=1
+busyloop_us=0
+注意：NET_EVTIDX、VHOST_EVTIDX属于DSM用户态输出，要在DSM/systemd日志中看；不是在dmesg里查。
+ 
+⸻
+ 
+六、先做最小验证，正常后再跑600秒
+保持当前亲和性及其他配置不变，Android先执行：
+ping -c 10 192.168.1.1
+再测低速UDP，避免只在持续大流量下看似正常：
+./iperf3 -p 5201 -c 192.168.1.1 \
+    -b 1M -t 30 -l 1400 -i 10 -u
+然后沿用你上一轮完全相同的940 Mbps命令：
+./iperf3 -p 5201 -c 192.168.1.1 \
+    -b 940M -t 600 -l 1400 -i 60 -u
+最后做一次下行回归和ping：
+./iperf3 -p 5201 -c 192.168.1.1 \
+    -b 940M -t 60 -l 1400 -i 10 -u -R
+
+ping -c 10 192.168.1.1
+EVENT_IDX是设备协商特征，会影响RX／TX队列的通知处理，不是只修改上行单独一条边。因此，低速通信、下行和停止大流量后的通信也要检查。特征需要在设备初始化时协商，不能对运行中的Guest直接追加。
+本轮先反馈两条DSM特征日志、网络VQCFG，以及上行测试最终sender／receiver／丢包行，并说明低速和下行是否正常。不需要再提供源代码或R6 trace。 当前先确认“协商确实开启、通信没有退化”；带宽本来已接近链路上限，通知量和CPU占用的收益再用相同负载做独立对照。
