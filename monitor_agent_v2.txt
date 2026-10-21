@@ -1,0 +1,4536 @@
+﻿monitor_agent v2 手动合入说明（2026-10-21）
+参考基线：6e1a1fbd596f3da5ed2d244ec333113b2ec70e2f
+本包包含 28 个相对开源基线的新增文件、11 个开源原有文件的修改说明。
+这是完整内容及定位说明，不是 patch，也不是可覆盖私有源码的整树文件包。
+
+新增文件目录中包含完整内容；其中上一版已经新增过的 monitor 文件，本次是完整新版。
+原开源文件按函数名、基线/新版行号和前后文逐段合入。行号仅用于参考，函数与分支语义优先。
+产品 packed-state、GICv3、LPI、auth/mterm 代码不能被上游函数整体替换。
+product 的 guest -> vm 命令适配需保留，必要时同时适配 Guest 查找 API。
+
+重要变化：采样使用 HV 定时器 IRQ；日志队列默认 priority=3；schema=2；
+ready 结束于 selected，dispatch 单独统计；collect 会进行1秒按需诊断。
+平台 sample 覆盖函数必须改成 IRQ-safe；drain/publish 仍在后台。
+
+未关闭：ROM<=5KB 未达标，CPU<0.5% 未板测；精确PMU周期未采集。
+Guest 采集桥需用产品内核构建；只在匹配HVC固件上发送。
+私有GICv3/DM/CCM需按说明接入，公共API模型通过不代表实际产品覆盖完成。
+
+新增文件：
+  commands/cmd_monitor.c
+  core/include/vmm_monitor.h
+  core/include/vmm_monitor_diag.h
+  core/include/vmm_monitor_guest.h
+  core/monitor/monitor_agent.c
+  core/monitor/monitor_diag.c
+  core/monitor/monitor_guest.c
+  core/monitor/monitor_irq.c
+  core/monitor/monitor_stats.c
+  core/monitor/objects.mk
+  core/monitor/openconf.cfg
+  docs/monitor_agent.txt
+  docs/monitor_agent_v2.md
+  tests/monitor/arm64_12cpu.config
+  tests/monitor/cross_compile.py
+  tests/monitor/elf_budget.py
+  tests/monitor/host.h
+  tests/monitor/run_boundary_tests.py
+  tests/monitor/run_host_tests.py
+  tests/monitor/test_disabled.c
+  tests/monitor/test_guest_parse.c
+  tests/monitor/test_monitor.c
+  tools/monitor_guest/Makefile
+  tools/monitor_guest/monitor_guest.c
+  tools/monitor_guest/monitor_parse.h
+  tools/monitor_guest/monitor_uapi.h
+  tools/monitor_guest/parse_monitor_jsonl.py
+  tools/monitor_guest/xvisor_monitor_bridge.c
+
+原开源修改文件：
+  arch/arm/cpu/arm64/cpu_interrupts.c
+  arch/arm/cpu/arm64/cpu_vcpu_excep.c
+  arch/arm/cpu/common/vgic.c
+  commands/objects.mk
+  commands/openconf.cfg
+  core/include/vmm_shmem.h
+  core/openconf.cfg
+  core/vmm_host_irq.c
+  core/vmm_main.c
+  core/vmm_scheduler.c
+  core/vmm_shmem.c
+
+==============================================================================
+原开源文件：arch/arm/cpu/arm64/cpu_interrupts.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Sukanto Ghosh (sukantoghosh@gmail.com)
+ * @brief source code for handling cpu interrupts
+ */
+
+#include <vmm_error.h>
+#include <vmm_smp.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+#include <vmm_scheduler.h>
+#include <cpu_inline_asm.h>
+
+[修改后的完整对应片段]
+ * @author Sukanto Ghosh (sukantoghosh@gmail.com)
+ * @brief source code for handling cpu interrupts
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_monitor_diag.h>
+#include <vmm_monitor_guest.h>
+#include <vmm_smp.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+#include <vmm_scheduler.h>
+#include <cpu_inline_asm.h>
+
+
+位置：do_sync()
+干净开源基线第 69 行附近；新版第 72 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	int rc = VMM_OK;
+	u32 ec, il, iss;
+	u64 esr, far, elr;
+	physical_addr_t fipa = 0;
+	struct vmm_vcpu *vcpu;
+
+	esr = mrs(esr_el2);
+	far = mrs(far_el2);
+	elr = mrs(elr_el2);
+
+
+[修改后的完整对应片段]
+	int rc = VMM_OK;
+	u32 ec, il, iss;
+	u64 esr, far, elr;
+	physical_addr_t fipa = 0;
+	struct vmm_vcpu *vcpu;
+#ifdef CONFIG_MONITOR_AGENT
+	u64 diagnostic_start;
+#endif
+
+	esr = mrs(esr_el2);
+	far = mrs(far_el2);
+	elr = mrs(elr_el2);
+
+
+
+位置：do_sync()
+干净开源基线第 100 行附近；新版第 106 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+			   __func__, elr, far, mrs(hpfar_el2));
+		cpu_vcpu_dump_user_reg(regs);
+		vmm_panic("%s: please reboot ...\n", __func__);
+	}
+
+	vmm_scheduler_irq_enter(regs, TRUE);
+
+	switch (ec) {
+	case EC_UNKNOWN:
+		/* We dont expect to get this trap so error */
+
+[修改后的完整对应片段]
+			   __func__, elr, far, mrs(hpfar_el2));
+		cpu_vcpu_dump_user_reg(regs);
+		vmm_panic("%s: please reboot ...\n", __func__);
+	}
+
+	vmm_monitor_exit(vcpu, ec);
+#ifdef CONFIG_MONITOR_AGENT
+	diagnostic_start = vmm_monitor_diag_begin();
+#endif
+	vmm_scheduler_irq_enter(regs, TRUE);
+
+	switch (ec) {
+	case EC_UNKNOWN:
+		/* We dont expect to get this trap so error */
+
+
+位置：do_sync()
+干净开源基线第 166 行附近；新版第 176 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		/* HVC emulation for A32 guest */
+		rc = cpu_vcpu_emulate_hvc32(vcpu, regs, il, iss);
+		break;
+	case EC_TRAP_HVC_A64:
+		/* HVC emulation for A64 guest */
+		rc = cpu_vcpu_emulate_hvc64(vcpu, regs, il, iss);
+		break;
+	case EC_TRAP_MSR_MRS_SYSTEM:
+		/* MSR/MRS/SystemRegs emulation */
+		rc = cpu_vcpu_emulate_msr_mrs_system(vcpu, regs, il, iss);
+
+[修改后的完整对应片段]
+		/* HVC emulation for A32 guest */
+		rc = cpu_vcpu_emulate_hvc32(vcpu, regs, il, iss);
+		break;
+	case EC_TRAP_HVC_A64:
+		/* HVC emulation for A64 guest */
+#ifdef CONFIG_MONITOR_AGENT
+		if (iss == VMM_MONITOR_HVC_IMM && regs->gpr[0] == VMM_MONITOR_HVC_MAGIC) {
+			/* HVC ELR already points at the next instruction. */
+			regs->gpr[0] = !regs->gpr[2] ? 1 :
+				vmm_monitor_guest_report(vcpu, regs->gpr[1], regs->gpr[2],
+					regs->gpr[3], regs->gpr[4], regs->gpr[5], regs->gpr[6], regs->gpr[7]);
+			break;
+		}
+#endif
+		rc = cpu_vcpu_emulate_hvc64(vcpu, regs, il, iss);
+		break;
+	case EC_TRAP_MSR_MRS_SYSTEM:
+		/* MSR/MRS/SystemRegs emulation */
+		rc = cpu_vcpu_emulate_msr_mrs_system(vcpu, regs, il, iss);
+
+
+位置：do_sync()
+干净开源基线第 203 行附近；新版第 222 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		/* Unhandled or unknown EC value so error */
+		rc = VMM_EFAIL;
+		break;
+	};
+
+	if (rc) {
+		vmm_printf("%s: CPU%d VCPU=%s sync failed (error %d)\n", 
+			   __func__, vmm_smp_processor_id(), 
+			   (vcpu) ? vcpu->name : "(NULL)", rc);
+		vmm_printf("%s: ESR=0x%016lx EC=0x%x IL=0x%x ISS=0x%x\n",
+
+[修改后的完整对应片段]
+		/* Unhandled or unknown EC value so error */
+		rc = VMM_EFAIL;
+		break;
+	};
+
+	vmm_monitor_diag_end(vcpu, elr, esr, diagnostic_start, rc);
+	if (rc) {
+		vmm_printf("%s: CPU%d VCPU=%s sync failed (error %d)\n", 
+			   __func__, vmm_smp_processor_id(), 
+			   (vcpu) ? vcpu->name : "(NULL)", rc);
+		vmm_printf("%s: ESR=0x%016lx EC=0x%x IL=0x%x ISS=0x%x\n",
+
+
+位置：do_irq()
+干净开源基线第 221 行附近；新版第 241 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	vmm_scheduler_irq_exit(regs);
+}
+
+void do_irq(arch_regs_t *regs)
+{
+	vmm_scheduler_irq_enter(regs, FALSE);
+
+	vmm_host_active_irq_exec(EXC_HYP_IRQ_SPx);
+
+	vmm_scheduler_irq_exit(regs);
+
+[修改后的完整对应片段]
+	vmm_scheduler_irq_exit(regs);
+}
+
+void do_irq(arch_regs_t *regs)
+{
+	if ((regs->pstate & PSR_EL_MASK) != PSR_EL_2)
+		vmm_monitor_exit(vmm_scheduler_current_vcpu(), 0x100);
+	vmm_scheduler_irq_enter(regs, FALSE);
+
+	vmm_host_active_irq_exec(EXC_HYP_IRQ_SPx);
+
+	vmm_scheduler_irq_exit(regs);
+
+
+位置：do_hyp_fiq()
+干净开源基线第 230 行附近；新版第 252 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	vmm_scheduler_irq_exit(regs);
+}
+
+void do_hyp_fiq(arch_regs_t *regs)
+{
+	vmm_scheduler_irq_enter(regs, FALSE);
+
+	vmm_host_active_irq_exec(CPU_EXTERNAL_FIQ);
+
+	vmm_scheduler_irq_exit(regs);
+
+[修改后的完整对应片段]
+	vmm_scheduler_irq_exit(regs);
+}
+
+void do_hyp_fiq(arch_regs_t *regs)
+{
+	if ((regs->pstate & PSR_EL_MASK) != PSR_EL_2)
+		vmm_monitor_exit(vmm_scheduler_current_vcpu(), 0x100);
+	vmm_scheduler_irq_enter(regs, FALSE);
+
+	vmm_host_active_irq_exec(CPU_EXTERNAL_FIQ);
+
+	vmm_scheduler_irq_exit(regs);
+
+
+==============================================================================
+原开源文件：arch/arm/cpu/arm64/cpu_vcpu_excep.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief Source file for VCPU exception handling
+ */
+
+#include <vmm_error.h>
+#include <vmm_stdio.h>
+#include <vmm_host_aspace.h>
+#include <vmm_guest_aspace.h>
+#include <libs/stringlib.h>
+#include <generic_mmu.h>
+
+[修改后的完整对应片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief Source file for VCPU exception handling
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_stdio.h>
+#include <vmm_host_aspace.h>
+#include <vmm_guest_aspace.h>
+#include <libs/stringlib.h>
+#include <generic_mmu.h>
+
+
+位置：cpu_vcpu_stage2_map()
+干净开源基线第 56 行附近；新版第 57 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	size = TTBL_L3_BLOCK_SIZE;
+
+	rc = vmm_guest_physical_map(vcpu->guest, inaddr, size,
+				    &outaddr, &availsz, &reg_flags);
+	if (rc) {
+		vmm_printf("%s: IPA=0x%lx size=0x%lx map failed\n",
+			   __func__, inaddr, size);
+		return rc;
+	}
+
+
+[修改后的完整对应片段]
+	size = TTBL_L3_BLOCK_SIZE;
+
+	rc = vmm_guest_physical_map(vcpu->guest, inaddr, size,
+				    &outaddr, &availsz, &reg_flags);
+	if (rc) {
+		vmm_monitor_mem_fault(vcpu, VMM_MONITOR_MAP_REJECT, fipa, rc);
+		vmm_printf("%s: IPA=0x%lx size=0x%lx map failed\n",
+			   __func__, inaddr, size);
+		return rc;
+	}
+
+
+
+位置：cpu_vcpu_inst_abort()
+干净开源基线第 124 行附近；新版第 126 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+int cpu_vcpu_inst_abort(struct vmm_vcpu *vcpu,
+			arch_regs_t *regs,
+			u32 il, u32 iss,
+			physical_addr_t fipa)
+{
+	switch (iss & ISS_ABORT_FSC_MASK) {
+	case FSC_TRANS_FAULT_LEVEL1:
+	case FSC_TRANS_FAULT_LEVEL2:
+	case FSC_TRANS_FAULT_LEVEL3:
+		return cpu_vcpu_stage2_map(vcpu, regs, fipa);
+
+[修改后的完整对应片段]
+int cpu_vcpu_inst_abort(struct vmm_vcpu *vcpu,
+			arch_regs_t *regs,
+			u32 il, u32 iss,
+			physical_addr_t fipa)
+{
+	if ((iss & ISS_ABORT_FSC_MASK) >= FSC_PERM_FAULT_LEVEL0 &&
+	    (iss & ISS_ABORT_FSC_MASK) <= FSC_PERM_FAULT_LEVEL3)
+		vmm_monitor_mem_fault(vcpu, VMM_MONITOR_ACCESS_DENIED, fipa, iss);
+
+	switch (iss & ISS_ABORT_FSC_MASK) {
+	case FSC_TRANS_FAULT_LEVEL1:
+	case FSC_TRANS_FAULT_LEVEL2:
+	case FSC_TRANS_FAULT_LEVEL3:
+		return cpu_vcpu_stage2_map(vcpu, regs, fipa);
+
+
+位置：cpu_vcpu_data_abort()
+干净开源基线第 143 行附近；新版第 149 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+			u32 il, u32 iss,
+			physical_addr_t fipa)
+{
+	u32 read_count, inst;
+	physical_addr_t inst_pa;
+
+	switch (iss & ISS_ABORT_FSC_MASK) {
+	case FSC_TRANS_FAULT_LEVEL1:
+	case FSC_TRANS_FAULT_LEVEL2:
+	case FSC_TRANS_FAULT_LEVEL3:
+
+[修改后的完整对应片段]
+			u32 il, u32 iss,
+			physical_addr_t fipa)
+{
+	u32 read_count, inst;
+	physical_addr_t inst_pa;
+
+	if ((iss & ISS_ABORT_FSC_MASK) >= FSC_PERM_FAULT_LEVEL0 &&
+	    (iss & ISS_ABORT_FSC_MASK) <= FSC_PERM_FAULT_LEVEL3)
+		vmm_monitor_mem_fault(vcpu, VMM_MONITOR_ACCESS_DENIED, fipa, iss);
+
+	switch (iss & ISS_ABORT_FSC_MASK) {
+	case FSC_TRANS_FAULT_LEVEL1:
+	case FSC_TRANS_FAULT_LEVEL2:
+	case FSC_TRANS_FAULT_LEVEL3:
+
+
+==============================================================================
+原开源文件：arch/arm/cpu/common/vgic.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 28 行附近；新版第 28 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * This source is based on GICv2 software emulator located at:
+ * emulators/pic/gic.c
+ */
+
+#include <vmm_error.h>
+#include <vmm_limits.h>
+#include <vmm_smp.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+
+[修改后的完整对应片段]
+ * This source is based on GICv2 software emulator located at:
+ * emulators/pic/gic.c
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_limits.h>
+#include <vmm_smp.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+
+
+位置：__vgic_set_pending()
+干净开源基线第 170 行附近；新版第 171 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+{
+	u32 i;
+	for (i = 0; i < s->num_cpu; i++) {
+		if (!(cm & (1 << i)))
+			continue;
+		s->irq_pending[i][irq >> 5] |= (1 << (irq & 0x1f));
+	}
+}
+
+/* Clear interrupt pending
+
+[修改后的完整对应片段]
+{
+	u32 i;
+	for (i = 0; i < s->num_cpu; i++) {
+		if (!(cm & (1 << i)))
+			continue;
+		if (!(s->irq_pending[i][irq >> 5] & (1 << (irq & 0x1f))))
+			vmm_monitor_irq_pending(s->vstate[i].vcpu, irq, s->irq_state[irq].host_irq);
+		s->irq_pending[i][irq >> 5] |= (1 << (irq & 0x1f));
+	}
+}
+
+/* Clear interrupt pending
+
+
+位置：__vgic_clear_pending()
+干净开源基线第 184 行附近；新版第 187 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	u32 i;
+	for (i = 0; i < s->num_cpu; i++) {
+		if (!(cm & (1 << i)))
+			continue;
+		s->irq_pending[i][irq >> 5] &= ~(1 << (irq & 0x1f));
+	}
+}
+
+/* Test interrupt pending
+ * Note: Must be called with VGIC distributor lock held
+
+[修改后的完整对应片段]
+	u32 i;
+	for (i = 0; i < s->num_cpu; i++) {
+		if (!(cm & (1 << i)))
+			continue;
+		s->irq_pending[i][irq >> 5] &= ~(1 << (irq & 0x1f));
+		vmm_monitor_irq_cancel(s->vstate[i].vcpu, irq);
+	}
+}
+
+/* Test interrupt pending
+ * Note: Must be called with VGIC distributor lock held
+
+
+位置：__vgic_queue_irq()
+干净开源基线第 285 行附近；新版第 289 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	    VGIC_TEST_LR_USED(vs, lr)) {
+		vgich.ops.get_lr(lr, &lrv, VGIC_MODEL_V2);
+		if (lrv.virtid == irq) {
+			lrv.flags |= VGIC_LR_STATE_PENDING;
+			vgich.ops.set_lr(lr, &lrv, VGIC_MODEL_V2);
+			return TRUE;
+		}
+	}
+
+	/* Try to use another LR for this interrupt */
+
+[修改后的完整对应片段]
+	    VGIC_TEST_LR_USED(vs, lr)) {
+		vgich.ops.get_lr(lr, &lrv, VGIC_MODEL_V2);
+		if (lrv.virtid == irq) {
+			lrv.flags |= VGIC_LR_STATE_PENDING;
+			vgich.ops.set_lr(lr, &lrv, VGIC_MODEL_V2);
+			vmm_monitor_irq_injected(vs->vcpu, irq);
+			return TRUE;
+		}
+	}
+
+	/* Try to use another LR for this interrupt */
+
+
+位置：__vgic_queue_irq()
+干净开源基线第 317 行附近；新版第 322 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		lrv.flags |= VGIC_LR_HW;
+		lrv.physid = hirq;
+	}
+
+	vgich.ops.set_lr(lr, &lrv, VGIC_MODEL_V2);
+
+	return TRUE;
+}
+
+/* Queue software generated interrupt to given VCPU
+
+[修改后的完整对应片段]
+		lrv.flags |= VGIC_LR_HW;
+		lrv.physid = hirq;
+	}
+
+	vgich.ops.set_lr(lr, &lrv, VGIC_MODEL_V2);
+	vmm_monitor_irq_injected(vs->vcpu, irq);
+
+	return TRUE;
+}
+
+/* Queue software generated interrupt to given VCPU
+
+
+==============================================================================
+新增文件：commands/cmd_monitor.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor.h>
+#include <vmm_monitor_guest.h>
+#include <vmm_monitor_diag.h>
+#include <vmm_manager.h>
+#include <vmm_delay.h>
+#include <vmm_mutex.h>
+#include <libs/mathlib.h>
+#include <vmm_cmdmgr.h>
+#include <vmm_modules.h>
+#include <vmm_stdio.h>
+#include <vmm_timer.h>
+#include <libs/stringlib.h>
+
+#define MON_ULL(x) ((unsigned long long)(x))
+static DEFINE_MUTEX(diagnose_lock);
+
+static void monitor_usage(struct vmm_chardev *cdev)
+{
+	vmm_cprintf(cdev, "monitor start|stop|status|collect|cpu|irq|events|guest\n"
+		"monitor diagnose [1..5000 ms] (default 1000)\n"
+		"monitor mem <guest_name>\n"
+		"monitor config <exit_rate|sustain_seconds|ready_ns|irq_ns|cpu_bp|log|publish> <decimal>\n"
+		"cpu/irq/collect: cached JSON; cpu affinity: vcpu normal_list\n");
+}
+
+static int number(const char *s, u64 *n)
+{
+	*n = 0;
+	if (!*s) return VMM_EINVALID;
+	while (*s) {
+		if (*s < '0' || *s > '9' || *n > (~0ULL - (*s - '0')) / 10)
+			return VMM_EINVALID;
+		*n = *n * 10 + (*s++ - '0');
+	}
+	return VMM_OK;
+}
+
+static void latency(struct vmm_chardev *cdev, const char *name,
+		    const struct vmm_monitor_latency *s)
+{
+	vmm_cprintf(cdev, "\"%s\":{\"count\":%llu,\"mean_ns\":%llu,"
+		"\"p99_upper_ns\":%llu,\"max_ns\":%llu,\"jitter_range_ns\":%llu}",
+		name, MON_ULL(s->count), MON_ULL(s->mean_ns), MON_ULL(s->p99_upper_ns),
+		MON_ULL(s->max_ns), MON_ULL(s->max_ns - s->min_ns));
+}
+
+static void guest_status(struct vmm_chardev *cdev, u32 id)
+{
+	struct vmm_monitor_guest r;
+	u64 now = vmm_timer_timestamp();
+	if (vmm_monitor_guest_get(id, &r)) {
+		vmm_cprintf(cdev, "{\"schema\":2,\"kind\":\"guest_os\",\"guest\":%u,\"quality\":\"missing\"}\n", id);
+		return;
+	}
+	vmm_cprintf(cdev, "{\"schema\":2,\"kind\":\"guest_os\",\"guest\":%u,\"session\":%llu,\"seq\":%llu,"
+		"\"received_ns\":%llu,\"age_ns\":%llu,\"quality\":\"%s\",\"valid\":%u,\"cpu_bp\":%u,"
+		"\"total_bytes\":%llu,\"available_bytes\":%llu,\"free_bytes\":%llu,\"used_estimate_bytes\":%llu}\n",
+		id, MON_ULL(r.session), MON_ULL(r.sequence), MON_ULL(r.received_ns),
+		MON_ULL(now >= r.received_ns ? now - r.received_ns : 0), !vmm_monitor_enabled() ? "disabled" :
+		now < r.received_ns || now - r.received_ns > 3 * VMM_MONITOR_NS ? "stale" : "valid",
+		r.valid, r.cpu_bp, MON_ULL(r.total_bytes), MON_ULL(r.available_bytes), MON_ULL(r.free_bytes),
+		MON_ULL(r.total_bytes - r.available_bytes));
+}
+
+static int diagnose(struct vmm_chardev *cdev, u32 ms)
+{
+	u32 i, ec, suspect;
+	int rc;
+	struct vmm_monitor_diag_record r;
+	vmm_mutex_lock(&diagnose_lock);
+	rc = vmm_monitor_diag_start(ms);
+	if (rc) goto done;
+	vmm_msleep(ms);
+	vmm_monitor_diag_stop();
+	for (i = 0; i < VMM_MONITOR_DIAG_SLOTS; i++) {
+		if (vmm_monitor_diag_get(i, &r)) continue;
+		ec = (r.esr >> 26) & 63;
+		/* WFI/WFE is excluded from repetition/latency suspicion. */
+		suspect = r.errors ? 4 : 0;
+		if (ec != 1) {
+			if (r.count * 1000 > (u64)1000 * ms) suspect |= 1;
+			if (r.max_ns > 1000000) suspect |= 2;
+		}
+		vmm_cprintf(cdev, "{\"schema\":2,\"kind\":\"trap_diagnostic\",\"guest\":%u,\"vcpu\":%u,"
+			"\"elr\":%llu,\"esr\":%llu,\"ec\":%u,\"count\":%llu,\"mean_service_ns\":%llu,"
+			"\"max_service_ns\":%llu,\"last_ns\":%llu,\"errors\":%u,\"suspect\":%u}\n",
+			r.guest, r.vcpu, MON_ULL(r.pc), MON_ULL(r.esr), ec, MON_ULL(r.count),
+			MON_ULL(udiv64(r.sum_ns, r.count)), MON_ULL(r.max_ns), MON_ULL(r.last_ns), r.errors, suspect);
+	}
+	vmm_cprintf(cdev, "{\"schema\":2,\"kind\":\"diagnostic_summary\",\"window_ms\":%u,"
+		"\"untracked\":%llu,\"pmu_cycles\":\"not_collected\"}\n", ms, MON_ULL(vmm_monitor_diag_overflow()));
+	/* Preserve the product's optional diagnostic extension after built-in data. */
+	rc = vmm_monitor_platform_diagnose(cdev);
+	if (rc == VMM_ENOTAVAIL) rc = VMM_OK;
+done:
+	vmm_mutex_unlock(&diagnose_lock);
+	return rc;
+}
+
+static int monitor_exec(struct vmm_chardev *cdev, int argc, char **argv)
+{
+	u32 i;
+	u64 value, seq, now;
+	int rc;
+	struct vmm_monitor_status st;
+	struct vmm_monitor_snapshot s;
+	struct vmm_monitor_event e;
+	if (argc < 2) goto usage;
+	if (argc == 2 && !strcmp(argv[1], "start")) return vmm_monitor_enable(TRUE);
+	if (argc == 2 && !strcmp(argv[1], "stop")) return vmm_monitor_enable(FALSE);
+	if ((argc == 2 || argc == 3) && !strcmp(argv[1], "diagnose")) {
+		value = 1000;
+		if (argc == 3 && number(argv[2], &value)) return VMM_EINVALID;
+		return value && value <= 5000 ? diagnose(cdev, value) : VMM_EINVALID;
+	}
+	vmm_monitor_status(&st);
+	if (argc == 4 && !strcmp(argv[1], "config")) {
+		if (number(argv[3], &value)) return VMM_EINVALID;
+		if (!strcmp(argv[2], "ready_ns")) st.config.ready_limit_ns = value;
+		else if (!strcmp(argv[2], "irq_ns")) st.config.irq_limit_ns = value;
+		else if (!strcmp(argv[2], "exit_rate") && value <= 1000000000) st.config.exit_rate = value;
+		else if (!strcmp(argv[2], "sustain_seconds") && value <= 60) st.config.sustain_seconds = value;
+		else if (!strcmp(argv[2], "log") && value <= 1) st.config.log = value;
+		else if (!strcmp(argv[2], "publish") && value <= 1) st.config.publish = value;
+		else if (!strcmp(argv[2], "cpu_bp") && value <= 10000) st.config.guest_cpu_limit_bp = value;
+		else return VMM_EINVALID;
+		return vmm_monitor_configure(&st.config);
+	}
+	if (argc == 3 && !strcmp(argv[1], "mem")) {
+		struct vmm_guest *guest = vmm_manager_guest_find(argv[2]);
+		char *args[] = { "guest", "region_list", argv[2] };
+		if (!guest) return VMM_ENOTAVAIL;
+		guest_status(cdev, guest->id);
+		return vmm_cmdmgr_execute_cmd(cdev, 3, args);
+	}
+	if (argc != 2) goto usage;
+	if (!strcmp(argv[1], "guest") || !strcmp(argv[1], "cpu")) {
+		for (i = 0; i < CONFIG_MAX_GUEST_COUNT; i++)
+			if (vmm_manager_guest(i)) guest_status(cdev, i);
+		if (!strcmp(argv[1], "guest")) return VMM_OK;
+	}
+	if (!strcmp(argv[1], "status")) {
+		vmm_cprintf(cdev, "{\"schema\":2,\"enabled\":%u,\"samples\":%llu,"
+			"\"late_samples\":%llu,\"sample_max_ns\":%llu,\"events\":%llu,"
+			"\"overwritten\":%llu,\"publish_errors\":%llu,\"work_errors\":%llu,"
+			"\"irq_untracked\":%llu,\"exit_rate\":%u,\"sustain_seconds\":%u,"
+			"\"ready_ns\":%llu,\"irq_ns\":%llu,\"log\":%u,\"publish\":%u,\"busy_snapshots\":%llu,\"cpu_bp\":%u}\n",
+			st.enabled, MON_ULL(st.samples), MON_ULL(st.late_samples), MON_ULL(st.sample_max_ns),
+			MON_ULL(st.events), MON_ULL(st.overwritten), MON_ULL(st.publish_errors), MON_ULL(st.work_errors),
+			MON_ULL(st.irq_untracked), st.config.exit_rate, st.config.sustain_seconds,
+			MON_ULL(st.config.ready_limit_ns), MON_ULL(st.config.irq_limit_ns), st.config.log, st.config.publish,
+			MON_ULL(st.busy_snapshots), st.config.guest_cpu_limit_bp);
+		return VMM_OK;
+	}
+	if (!strcmp(argv[1], "events")) {
+		seq = st.events > VMM_MONITOR_EVENTS ? st.events - VMM_MONITOR_EVENTS + 1 : 1;
+		for (; seq <= st.events; seq++) {
+			if (vmm_monitor_event_get(seq, &e)) continue;
+			vmm_cprintf(cdev, "{\"schema\":2,\"seq\":%llu,\"time_ns\":%llu,\"type\":%u,"
+				"\"guest\":%u,\"vcpu\":%u,\"generation\":%u,\"value\":%llu,\"detail\":%llu,\"code\":%u}\n",
+				MON_ULL(e.sequence), MON_ULL(e.timestamp_ns), e.type, e.guest_id,
+				e.vcpu_id, e.generation, MON_ULL(e.value), MON_ULL(e.detail), e.code);
+		}
+		return VMM_OK;
+	}
+	if (!strcmp(argv[1], "cpu") || !strcmp(argv[1], "irq") || !strcmp(argv[1], "collect")) {
+		now = vmm_timer_timestamp();
+		for (i = 0; i <= CONFIG_MAX_VCPU_COUNT; i++) {
+			if (vmm_monitor_snapshot(i, &s)) continue;
+			vmm_cprintf(cdev, "{\"schema\":2,\"guest\":%u,\"vcpu\":%u,\"generation\":%u,"
+				"\"hcpu\":%u,\"state\":%u,\"quality\":\"%s\",\"time_ns\":%llu,\"interval_ns\":%llu,"
+				"\"ready_age_ns\":%llu,\"exits\":%llu,\"exit_rate\":%llu,\"last_exit\":%u,",
+				s.guest_id, s.vcpu_id, s.generation, s.hcpu, s.state,
+				!st.enabled ? "disabled" : !s.timestamp_ns ? "warmup" :
+				now - s.timestamp_ns > 2 * VMM_MONITOR_NS ? "stale" : s.valid ? "valid" : "warmup_or_gap",
+				MON_ULL(s.timestamp_ns), MON_ULL(s.interval_ns), MON_ULL(s.ready_age_ns),
+				MON_ULL(s.exits), MON_ULL(s.exit_rate), s.last_exit);
+			latency(cdev, "ready", &s.ready);
+			vmm_cprintf(cdev, ",");
+			latency(cdev, "host_irq_to_lr", &s.irq);
+			vmm_cprintf(cdev, ",");
+			latency(cdev, "dispatch", &s.dispatch);
+			vmm_cprintf(cdev, ",\"faults_pending_summary\":%llu,\"last_address\":%llu,"
+				"\"last_fault\":%u,\"last_detail\":%llu}\n", MON_ULL(s.faults),
+				MON_ULL(s.last_address), s.last_fault, MON_ULL(s.last_detail));
+		}
+		if (!strcmp(argv[1], "collect")) {
+			rc = diagnose(cdev, 1000);
+			if (rc) return rc;
+		}
+		return VMM_OK;
+	}
+usage:
+	monitor_usage(cdev);
+	return argc == 2 && !strcmp(argv[1], "help") ? VMM_OK : VMM_EINVALID;
+}
+
+static struct vmm_cmd monitor_cmd = {
+	.name = "monitor", .desc = "Lightweight hypervisor monitoring",
+	.usage = monitor_usage, .exec = monitor_exec,
+};
+static int __init monitor_cmd_init(void) { return vmm_cmdmgr_register_cmd(&monitor_cmd); }
+static void __exit monitor_cmd_exit(void) { vmm_cmdmgr_unregister_cmd(&monitor_cmd); }
+VMM_DECLARE_MODULE("Monitor command", "Xvisor contributors", "GPL", 0,
+		   monitor_cmd_init, monitor_cmd_exit);
+
+
+==============================================================================
+原开源文件：commands/objects.mk
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 43 行附近；新版第 43 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+commands-objs-$(CONFIG_CMD_STDIO)+= cmd_stdio.o
+commands-objs-$(CONFIG_CMD_HEAP)+= cmd_heap.o
+commands-objs-$(CONFIG_CMD_WALLCLOCK)+= cmd_wallclock.o
+commands-objs-$(CONFIG_CMD_MODULE)+= cmd_module.o
+commands-objs-$(CONFIG_CMD_PROFILE)+= cmd_profile.o
+
+commands-objs-$(CONFIG_CMD_VMSG)+= cmd_vmsg.o
+commands-objs-$(CONFIG_CMD_VSERIAL)+= cmd_vserial.o
+commands-objs-$(CONFIG_CMD_VDISK)+= cmd_vdisk.o
+commands-objs-$(CONFIG_CMD_VDISPLAY)+= cmd_vdisplay.o
+
+[修改后的完整对应片段]
+commands-objs-$(CONFIG_CMD_STDIO)+= cmd_stdio.o
+commands-objs-$(CONFIG_CMD_HEAP)+= cmd_heap.o
+commands-objs-$(CONFIG_CMD_WALLCLOCK)+= cmd_wallclock.o
+commands-objs-$(CONFIG_CMD_MODULE)+= cmd_module.o
+commands-objs-$(CONFIG_CMD_PROFILE)+= cmd_profile.o
+commands-objs-$(CONFIG_CMD_MONITOR)+= cmd_monitor.o
+
+commands-objs-$(CONFIG_CMD_VMSG)+= cmd_vmsg.o
+commands-objs-$(CONFIG_CMD_VSERIAL)+= cmd_vserial.o
+commands-objs-$(CONFIG_CMD_VDISK)+= cmd_vdisk.o
+commands-objs-$(CONFIG_CMD_VDISPLAY)+= cmd_vdisplay.o
+
+
+==============================================================================
+原开源文件：commands/openconf.cfg
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 142 行附近；新版第 142 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	tristate "profile"
+	depends on CONFIG_PROFILE
+	default y
+	help
+		Enable/Disable profile command.
+
+comment "Virtual I/O Commands"
+
+config CONFIG_CMD_VMSG
+	tristate "vmsg"
+
+[修改后的完整对应片段]
+	tristate "profile"
+	depends on CONFIG_PROFILE
+	default y
+	help
+		Enable/Disable profile command.
+
+config CONFIG_CMD_MONITOR
+	bool "monitor"
+	depends on CONFIG_MONITOR_AGENT
+	select CONFIG_CMD_GUEST
+	select CONFIG_CMD_VCPU
+	default y
+	help
+	  Static diagnostic command, structured snapshots and runtime control.
+
+comment "Virtual I/O Commands"
+
+config CONFIG_CMD_VMSG
+	tristate "vmsg"
+
+
+==============================================================================
+新增文件：core/include/vmm_monitor.h
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef __VMM_MONITOR_H__
+#define __VMM_MONITOR_H__
+
+#include <vmm_types.h>
+#include <vmm_error.h>
+
+#define VMM_MONITOR_BUCKETS 16
+#define VMM_MONITOR_EVENTS 32
+#define VMM_MONITOR_BATCH 8
+#define VMM_MONITOR_NS 1000000000ULL
+#define VMM_MONITOR_UNKNOWN ((u32)-1)
+
+struct vmm_vcpu;
+struct vmm_chardev;
+
+enum vmm_monitor_fault {
+	VMM_MONITOR_SHMEM_BOUNDS = 1,
+	VMM_MONITOR_MAP_REJECT,
+	VMM_MONITOR_ACCESS_DENIED,
+};
+enum vmm_monitor_event_type {
+	VMM_MONITOR_EXIT_STORM = 1,
+	VMM_MONITOR_EXIT_RECOVER,
+	VMM_MONITOR_MEMORY,
+	VMM_MONITOR_READY_SLOW,
+	VMM_MONITOR_IRQ_SLOW,
+	VMM_MONITOR_GUEST_CPU_HIGH,
+};
+
+struct vmm_monitor_hist {
+	u64 count, sum, min, max;
+	u64 bins[VMM_MONITOR_BUCKETS];
+};
+struct vmm_monitor_latency {
+	u64 count, mean_ns, min_ns, max_ns, p99_upper_ns;
+};
+struct vmm_monitor_streak {
+	u64 elapsed;
+	u32 windows;
+	bool active;
+};
+struct vmm_monitor_snapshot {
+	u32 guest_id, vcpu_id, generation, hcpu, state;
+	bool present, valid;
+	u64 timestamp_ns, interval_ns, ready_age_ns;
+	u64 exits, exit_rate, faults, last_address, last_detail;
+	u32 last_fault, last_exit;
+	struct vmm_monitor_latency ready, irq, dispatch;
+};
+struct vmm_monitor_event {
+	u64 sequence, timestamp_ns, value, detail;
+	u32 type, guest_id, vcpu_id, generation, code;
+};
+struct vmm_monitor_config {
+	u32 exit_rate, sustain_seconds;
+	u64 ready_limit_ns, irq_limit_ns;
+	bool log, publish;
+	u32 guest_cpu_limit_bp;
+};
+struct vmm_monitor_status {
+	bool enabled;
+	u64 samples, late_samples, sample_max_ns, busy_snapshots;
+	u64 events, overwritten, publish_errors, work_errors;
+	u64 irq_untracked;
+	struct vmm_monitor_config config;
+};
+
+struct vmm_monitor_hirq_context {
+	u64 timestamp_ns;
+	u32 hirq;
+};
+
+/* Pure bounded arithmetic, also used by host-side tests. */
+void vmm_monitor_hist_add(struct vmm_monitor_hist *h, u64 ns);
+void vmm_monitor_hist_read(const struct vmm_monitor_hist *h,
+			   struct vmm_monitor_latency *out);
+int vmm_monitor_storm_step(struct vmm_monitor_streak *s, u64 count,
+			   u64 dt, u32 rate, u32 seconds, bool valid);
+static inline bool vmm_monitor_range_valid(u64 size, u64 offset, u64 length)
+{
+	return offset <= size && length <= size - offset;
+}
+
+#ifdef CONFIG_MONITOR_AGENT
+int vmm_monitor_init(void);
+bool vmm_monitor_enabled(void);
+int vmm_monitor_enable(bool enabled);
+int vmm_monitor_configure(const struct vmm_monitor_config *config);
+void vmm_monitor_status(struct vmm_monitor_status *out);
+int vmm_monitor_snapshot(u32 id, struct vmm_monitor_snapshot *out);
+int vmm_monitor_event_get(u64 sequence, struct vmm_monitor_event *out);
+/* Scheduler calls with sched_lock held. No monitor path acquires sched_lock. */
+void vmm_monitor_state(struct vmm_vcpu *vcpu, u32 state, u64 now);
+void vmm_monitor_selected(struct vmm_vcpu *vcpu, u64 now);
+/* Scheduler invocation to selected context installed; distinct from READY wait. */
+void vmm_monitor_dispatch(struct vmm_vcpu *vcpu, u64 begin, u64 end);
+void vmm_monitor_exit(struct vmm_vcpu *vcpu, u32 reason);
+void vmm_monitor_mem_fault(struct vmm_vcpu *actor, u32 kind,
+			   u64 address, u64 detail);
+/* Caller guarantees one matched sample, monotonic clock and stable vCPU. */
+void vmm_monitor_irq_sample(struct vmm_vcpu *vcpu, u64 start_ns, u64 end_ns);
+struct vmm_monitor_hirq_context vmm_monitor_hirq_enter(u32 hirq);
+void vmm_monitor_hirq_exit(struct vmm_monitor_hirq_context previous);
+void vmm_monitor_irq_pending(struct vmm_vcpu *vcpu, u32 virq, u32 hirq);
+/* Explicit source time for asynchronous/LPI routes; no virq-indexed array. */
+void vmm_monitor_irq_pending_at(struct vmm_vcpu *vcpu, u32 virq, u64 start);
+void vmm_monitor_irq_move(struct vmm_vcpu *from, struct vmm_vcpu *to, u32 virq);
+void vmm_monitor_irq_injected(struct vmm_vcpu *vcpu, u32 virq);
+void vmm_monitor_irq_cancel(struct vmm_vcpu *vcpu, u32 virq);
+void vmm_monitor_irq_reset(struct vmm_vcpu *vcpu);
+u64 vmm_monitor_irq_untracked(void);
+/* IRQ-safe sampler, independent sleepable worker. Never print from sample. */
+void vmm_monitor_sample(u64 now);
+void vmm_monitor_drain(void);
+
+/* Link-time project adapters: no allocation, no waiting for a Guest reply.
+ * publish must copy the entire JSON record before returning VMM_OK.
+ * These are intentionally not raw Guest physical-address interfaces.
+ */
+int vmm_monitor_platform_publish(const char *json, u32 length);
+void vmm_monitor_platform_sample(u64 now);
+int vmm_monitor_platform_diagnose(struct vmm_chardev *cdev);
+#else
+static inline int vmm_monitor_init(void) { return VMM_OK; }
+static inline bool vmm_monitor_enabled(void) { return FALSE; }
+/* Macros deliberately do not evaluate timestamp/current-vCPU arguments. */
+#define vmm_monitor_state(...) do { } while (0)
+#define vmm_monitor_selected(...) do { } while (0)
+#define vmm_monitor_dispatch(...) do { } while (0)
+#define vmm_monitor_exit(...) do { } while (0)
+#define vmm_monitor_mem_fault(...) do { } while (0)
+#define vmm_monitor_irq_sample(...) do { } while (0)
+#define vmm_monitor_irq_pending(...) do { } while (0)
+#define vmm_monitor_irq_pending_at(...) do { } while (0)
+#define vmm_monitor_irq_move(...) do { } while (0)
+#define vmm_monitor_irq_injected(...) do { } while (0)
+#define vmm_monitor_irq_cancel(...) do { } while (0)
+#endif
+#endif
+
+
+==============================================================================
+新增文件：core/include/vmm_monitor_diag.h
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef __VMM_MONITOR_DIAG_H__
+#define __VMM_MONITOR_DIAG_H__
+#include <vmm_monitor.h>
+#define VMM_MONITOR_DIAG_SLOTS 16
+struct vmm_monitor_diag_record {
+	u64 pc, esr, count, sum_ns, max_ns, last_ns;
+	u32 guest, vcpu, errors;
+};
+#ifdef CONFIG_MONITOR_AGENT
+void vmm_monitor_diag_init(void);
+u64 vmm_monitor_diag_begin(void);
+void vmm_monitor_diag_end(struct vmm_vcpu *v, u64 pc, u64 esr, u64 start, int rc);
+int vmm_monitor_diag_start(u32 ms);
+void vmm_monitor_diag_stop(void);
+int vmm_monitor_diag_get(u32 index, struct vmm_monitor_diag_record *out);
+u64 vmm_monitor_diag_overflow(void);
+#else
+#define vmm_monitor_diag_begin() 0ULL
+#define vmm_monitor_diag_end(...) do { } while (0)
+#endif
+#endif
+
+
+==============================================================================
+新增文件：core/include/vmm_monitor_guest.h
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef __VMM_MONITOR_GUEST_H__
+#define __VMM_MONITOR_GUEST_H__
+#include <vmm_monitor.h>
+
+/* Private ARM64 HVC ABI, deliberately separate from PSCI/SMCCC hvc #0. */
+#define VMM_MONITOR_HVC_IMM 0x4d4f
+#define VMM_MONITOR_HVC_MAGIC 0x584d4f4e00000001ULL
+#define VMM_MONITOR_GUEST_CPU_VALID 1
+#define VMM_MONITOR_GUEST_MEMORY_VALID 2
+struct vmm_monitor_guest {
+	u64 session, sequence, received_ns;
+	u64 total_bytes, available_bytes, free_bytes;
+	u32 cpu_bp, valid;
+};
+#ifdef CONFIG_MONITOR_AGENT
+void vmm_monitor_guest_init(void);
+void vmm_monitor_guest_reset(u32 guest);
+int vmm_monitor_guest_report(struct vmm_vcpu *actor, u64 session, u64 sequence,
+		u64 cpu_bp, u64 total, u64 available, u64 free_bytes, u64 valid);
+int vmm_monitor_guest_get(u32 guest, struct vmm_monitor_guest *out);
+void vmm_monitor_guest_sample(u64 now, u32 limit_bp);
+void vmm_monitor_guest_event(u32 guest, u64 now, u64 value, u32 limit);
+#endif
+#endif
+
+
+==============================================================================
+原开源文件：core/include/vmm_shmem.h
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 40 行附近；新版第 40 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	physical_addr_t addr;
+	physical_size_t size;
+	u32 align_order;
+	void *priv;
+};
+
+/** Read from shared memory instance */
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable);
+
+
+[修改后的完整对应片段]
+	physical_addr_t addr;
+	physical_size_t size;
+	u32 align_order;
+	void *priv;
+};
+
+struct vmm_vcpu;
+/* Guest-authorized access: mapping and object must cover the entire request.
+ * Caller holds valid Guest/shmem references and serializes mapping changes.
+ * Alias mappings are rejected; no inference of the caller from current CPU.
+ */
+u32 vmm_shmem_guest_read(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+	physical_addr_t gpa, physical_addr_t off, void *dst, u32 len, bool cacheable);
+u32 vmm_shmem_guest_write(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+	physical_addr_t gpa, physical_addr_t off, void *src, u32 len, bool cacheable);
+
+/** Read from shared memory instance */
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable);
+
+
+
+==============================================================================
+新增文件：core/monitor/monitor_agent.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor.h>
+#include <vmm_monitor_guest.h>
+#include <vmm_monitor_diag.h>
+#include <vmm_smp.h>
+#include <vmm_manager.h>
+#include <vmm_timer.h>
+#include <vmm_mutex.h>
+#include <vmm_stdio.h>
+#include <vmm_modules.h>
+#include <arch_barrier.h>
+#include <libs/stringlib.h>
+#include <libs/mathlib.h>
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+#include <vmm_threads.h>
+#include <vmm_workqueue.h>
+#include <vmm_delay.h>
+#endif
+
+/* No retained vCPU pointers, no allocation in any collection/report path. */
+struct monitor_data {
+	struct vmm_monitor_snapshot snap;
+	struct vmm_monitor_hist ready, irq, dispatch;
+	struct vmm_monitor_streak storm;
+	u64 epoch_ns, ready_since, previous_ns, exits, faults;
+	u64 notice_ns[3];
+	bool waiting;
+};
+struct monitor_slot {
+	vmm_spinlock_t lock;
+	struct monitor_data data;
+};
+/* Extra slot records faults with no attributable Guest (e.g. host shmem API). */
+static struct monitor_slot slots[CONFIG_MAX_VCPU_COUNT + 1];
+static DEFINE_SPINLOCK(control_lock);
+static DEFINE_SPINLOCK(sample_lock);
+static struct vmm_mutex drain_lock;
+static atomic_t initialized = { 0 }, enabled = { 0 };
+static struct vmm_monitor_status status;
+static struct vmm_monitor_event events[VMM_MONITOR_EVENTS];
+static u64 report_sequence = 1;
+extern void vmm_monitor_irq_init(void);
+extern void vmm_monitor_irq_restart(u64 now);
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+static struct vmm_workqueue *report_queue;
+static struct vmm_work report_work;
+static struct vmm_timer_event sample_timer;
+static u64 next_sample;
+static atomic_t executor_state = {0}, timer_start_result = {VMM_EINPROGRESS};
+#endif
+
+bool vmm_monitor_enabled(void)
+{
+	return arch_atomic_read(&enabled) != 0;
+}
+
+static struct monitor_slot *slot_for(struct vmm_vcpu *vcpu)
+{
+	if (!arch_atomic_read(&initialized) || !vcpu || !vcpu->is_normal ||
+	    vcpu->id >= CONFIG_MAX_VCPU_COUNT)
+		return NULL;
+	return &slots[vcpu->id];
+}
+
+static void identify(struct monitor_data *d, struct vmm_vcpu *vcpu)
+{
+	d->snap.present = TRUE;
+	d->snap.vcpu_id = vcpu ? vcpu->id : VMM_MONITOR_UNKNOWN;
+	d->snap.guest_id = vcpu ? vcpu->guest->id : VMM_MONITOR_UNKNOWN;
+}
+
+static void reset_data(struct monitor_data *d, u64 now)
+{
+	u32 generation = d->snap.generation + 1;
+	memset(d, 0, sizeof(*d));
+	d->snap.generation = generation;
+	d->epoch_ns = now;
+}
+
+void vmm_monitor_state(struct vmm_vcpu *vcpu, u32 state, u64 now)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s = slot_for(vcpu);
+	struct monitor_data *d;
+	if (!s)
+		return;
+	/* Lifecycle must invalidate cached data even while collection is off. */
+	if (!vmm_monitor_enabled() && state != VMM_VCPU_STATE_RESET &&
+	    state != VMM_VCPU_STATE_UNKNOWN)
+		return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	d = &s->data;
+	if (state == VMM_VCPU_STATE_RESET || state == VMM_VCPU_STATE_UNKNOWN)
+		reset_data(d, now);
+	identify(d, vcpu);
+	d->snap.present = state != VMM_VCPU_STATE_UNKNOWN;
+	d->snap.state = state;
+	d->snap.hcpu = vcpu->hcpu;
+	if (vmm_monitor_enabled()) {
+		if (state == VMM_VCPU_STATE_READY && !d->waiting) {
+			d->ready_since = now;
+			d->waiting = TRUE;
+		} else if (state != VMM_VCPU_STATE_READY) {
+			if (state == VMM_VCPU_STATE_RUNNING && d->waiting &&
+			    now >= d->ready_since)
+				vmm_monitor_hist_add(&d->ready, now - d->ready_since);
+			d->waiting = FALSE;
+		}
+	}
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+	if (state == VMM_VCPU_STATE_RESET || state == VMM_VCPU_STATE_UNKNOWN)
+		vmm_monitor_irq_reset(vcpu);
+	if (state == VMM_VCPU_STATE_RESET || state == VMM_VCPU_STATE_UNKNOWN)
+		vmm_monitor_guest_reset(vcpu->guest->id);
+}
+
+void vmm_monitor_selected(struct vmm_vcpu *vcpu, u64 now)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s;
+	if (!vmm_monitor_enabled() || !(s = slot_for(vcpu))) return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	if (vmm_monitor_enabled() && s->data.waiting) {
+		if (now >= s->data.ready_since)
+			vmm_monitor_hist_add(&s->data.ready, now - s->data.ready_since);
+		s->data.waiting = FALSE;
+	}
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+}
+
+void vmm_monitor_dispatch(struct vmm_vcpu *vcpu, u64 begin, u64 end)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s;
+	if (!vmm_monitor_enabled() || end < begin || !(s = slot_for(vcpu))) return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	if (vmm_monitor_enabled()) vmm_monitor_hist_add(&s->data.dispatch, end - begin);
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+}
+
+void vmm_monitor_exit(struct vmm_vcpu *vcpu, u32 reason)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s;
+	if (!vmm_monitor_enabled() || !(s = slot_for(vcpu)))
+		return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	if (vmm_monitor_enabled()) {
+		identify(&s->data, vcpu);
+		s->data.exits++;
+		s->data.snap.last_exit = reason;
+	}
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+}
+
+void vmm_monitor_mem_fault(struct vmm_vcpu *actor, u32 kind,
+			   u64 address, u64 detail)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s;
+	if (!vmm_monitor_enabled())
+		return;
+	s = actor ? slot_for(actor) : &slots[CONFIG_MAX_VCPU_COUNT];
+	if (!s)
+		return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	if (vmm_monitor_enabled()) {
+		identify(&s->data, actor);
+		s->data.faults++;
+		s->data.snap.last_address = address;
+		s->data.snap.last_detail = detail;
+		s->data.snap.last_fault = kind;
+	}
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+}
+
+void vmm_monitor_irq_sample(struct vmm_vcpu *vcpu, u64 start_ns, u64 end_ns)
+{
+	irq_flags_t flags;
+	struct monitor_slot *s;
+	if (!vmm_monitor_enabled() || !(s = slot_for(vcpu)))
+		return;
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	if (vmm_monitor_enabled() && start_ns >= s->data.epoch_ns &&
+	    end_ns >= start_ns) {
+		identify(&s->data, vcpu);
+		vmm_monitor_hist_add(&s->data.irq, end_ns - start_ns);
+	}
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+}
+
+static void record_event(struct vmm_monitor_snapshot *s, u32 type,
+			 u64 value, u64 detail, u32 code)
+{
+	irq_flags_t flags;
+	struct vmm_monitor_event *e;
+	vmm_spin_lock_irqsave_lite(&control_lock, flags);
+	status.events++;
+	if (status.events - report_sequence >= VMM_MONITOR_EVENTS) {
+		report_sequence++;
+		status.overwritten++;
+	}
+	e = &events[(status.events - 1) % VMM_MONITOR_EVENTS];
+	e->sequence = status.events;
+	e->timestamp_ns = s->timestamp_ns;
+	e->guest_id = s->guest_id;
+	e->vcpu_id = s->vcpu_id;
+	e->generation = s->generation;
+	e->type = type;
+	e->value = value;
+	e->detail = detail;
+	e->code = code;
+	vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+}
+
+void vmm_monitor_guest_event(u32 guest, u64 now, u64 value, u32 limit)
+{
+	struct vmm_monitor_snapshot s = {0};
+	s.guest_id = guest; s.vcpu_id = VMM_MONITOR_UNKNOWN; s.timestamp_ns = now;
+	record_event(&s, VMM_MONITOR_GUEST_CPU_HIGH, value, limit, 0);
+}
+
+void vmm_monitor_status(struct vmm_monitor_status *out)
+{
+	irq_flags_t flags;
+	vmm_spin_lock_irqsave_lite(&control_lock, flags);
+	*out = status;
+	out->enabled = vmm_monitor_enabled();
+	out->irq_untracked = vmm_monitor_irq_untracked();
+	vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+}
+
+int vmm_monitor_snapshot(u32 id, struct vmm_monitor_snapshot *out)
+{
+	irq_flags_t flags;
+	u64 now;
+	struct monitor_slot *s;
+	if (!out || id > CONFIG_MAX_VCPU_COUNT || !arch_atomic_read(&initialized))
+		return VMM_EINVALID;
+	s = &slots[id];
+	vmm_spin_lock_irqsave_lite(&s->lock, flags);
+	*out = s->data.snap;
+	now = vmm_timer_timestamp();
+	out->ready_age_ns = s->data.waiting && vmm_monitor_enabled() &&
+		now >= s->data.ready_since ? now - s->data.ready_since : 0;
+	vmm_spin_unlock_irqrestore_lite(&s->lock, flags);
+	return out->present ? VMM_OK : VMM_ENOTAVAIL;
+}
+
+int vmm_monitor_event_get(u64 sequence, struct vmm_monitor_event *out)
+{
+	int rc = VMM_ENOTAVAIL;
+	irq_flags_t flags;
+	if (!sequence || !out)
+		return VMM_EINVALID;
+	vmm_spin_lock_irqsave_lite(&control_lock, flags);
+	if (sequence <= status.events && status.events - sequence < VMM_MONITOR_EVENTS) {
+		*out = events[(sequence - 1) % VMM_MONITOR_EVENTS];
+		rc = VMM_OK;
+	}
+	vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+	return rc;
+}
+
+int vmm_monitor_enable(bool on)
+{
+	u32 i;
+	u64 now;
+	irq_flags_t flags, sample_flags;
+	if (!arch_atomic_read(&initialized))
+		return VMM_ENOTAVAIL;
+	vmm_spin_lock_irqsave_lite(&sample_lock, sample_flags);
+	if (on == vmm_monitor_enabled())
+		goto done;
+	arch_atomic_write(&enabled, 0);
+	if (on) {
+		now = vmm_timer_timestamp();
+		vmm_monitor_irq_restart(now);
+		for (i = 0; i <= CONFIG_MAX_VCPU_COUNT; i++) {
+			vmm_spin_lock_irqsave_lite(&slots[i].lock, flags);
+			reset_data(&slots[i].data, now);
+			vmm_spin_unlock_irqrestore_lite(&slots[i].lock, flags);
+		}
+		for (i = 0; i < CONFIG_MAX_GUEST_COUNT; i++) vmm_monitor_guest_reset(i);
+		arch_wmb();
+		arch_atomic_write(&enabled, 1);
+	}
+done:
+	vmm_spin_unlock_irqrestore_lite(&sample_lock, sample_flags);
+	return VMM_OK;
+}
+
+int vmm_monitor_configure(const struct vmm_monitor_config *c)
+{
+	u32 i;
+	irq_flags_t flags, sample_flags;
+	if (!c || !c->exit_rate || c->exit_rate > 1000000000 ||
+	    !c->sustain_seconds || c->sustain_seconds > 60 || c->guest_cpu_limit_bp > 10000 ||
+	    !arch_atomic_read(&initialized))
+		return VMM_EINVALID;
+	vmm_spin_lock_irqsave_lite(&sample_lock, sample_flags);
+	vmm_spin_lock_irqsave_lite(&control_lock, flags);
+	status.config = *c;
+	vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+	for (i = 0; i <= CONFIG_MAX_VCPU_COUNT; i++) {
+		vmm_spin_lock_irqsave_lite(&slots[i].lock, flags);
+		memset(&slots[i].data.storm, 0, sizeof(slots[i].data.storm));
+		slots[i].data.previous_ns = 0;
+		vmm_spin_unlock_irqrestore_lite(&slots[i].lock, flags);
+	}
+	vmm_spin_unlock_irqrestore_lite(&sample_lock, sample_flags);
+	return VMM_OK;
+}
+
+void vmm_monitor_sample(u64 now)
+{
+	u32 i, alarms;
+	int storm;
+	u64 start = vmm_timer_timestamp(), dt;
+	irq_flags_t flags, sample_flags;
+	struct monitor_data *d;
+	struct vmm_monitor_snapshot snap;
+	struct vmm_monitor_status config;
+	if (!vmm_monitor_enabled())
+		return;
+	if (!vmm_spin_trylock_irqsave(&sample_lock, sample_flags)) {
+		vmm_spin_lock_irqsave_lite(&control_lock, flags);
+		status.busy_snapshots++;
+		vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+		return;
+	}
+	if (!vmm_monitor_enabled())
+		goto done;
+	vmm_monitor_status(&config);
+	for (i = 0; i <= CONFIG_MAX_VCPU_COUNT; i++) {
+		/* Never let a contended/stuck producer stall the periodic sampler. */
+		if (!vmm_spin_trylock_irqsave(&slots[i].lock, flags)) {
+			vmm_spin_lock_irqsave_lite(&control_lock, flags);
+			status.busy_snapshots++;
+			vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+			continue;
+		}
+		d = &slots[i].data;
+		if (!d->snap.present) {
+			vmm_spin_unlock_irqrestore(&slots[i].lock, flags);
+			continue;
+		}
+		dt = now >= d->previous_ns ? now - d->previous_ns : 0;
+		d->snap.valid = d->previous_ns && dt >= VMM_MONITOR_NS * 3 / 4 &&
+			dt <= VMM_MONITOR_NS * 5 / 4;
+		d->snap.interval_ns = d->previous_ns ? dt : 0;
+		d->previous_ns = now;
+		d->snap.timestamp_ns = now;
+		d->snap.ready_age_ns = d->waiting && now >= d->ready_since ? now - d->ready_since : 0;
+		d->snap.exits = d->exits;
+		/* Divide first for absurd long gaps to keep multiplication bounded. */
+		d->snap.exit_rate = dt && d->exits <= (~0ULL / VMM_MONITOR_NS) ?
+			udiv64(d->exits * VMM_MONITOR_NS, dt) : 0;
+		d->snap.faults = d->faults;
+		vmm_monitor_hist_read(&d->ready, &d->snap.ready);
+		vmm_monitor_hist_read(&d->irq, &d->snap.irq);
+		vmm_monitor_hist_read(&d->dispatch, &d->snap.dispatch);
+		storm = vmm_monitor_storm_step(&d->storm, d->exits, dt,
+			config.config.exit_rate, config.config.sustain_seconds, d->snap.valid);
+		alarms = 0;
+		if (d->faults && (!d->notice_ns[0] || now - d->notice_ns[0] >= 10 * VMM_MONITOR_NS))
+			alarms |= 1;
+		if (config.config.ready_limit_ns &&
+		    ((d->snap.ready.count && d->snap.ready.p99_upper_ns > config.config.ready_limit_ns) ||
+		     d->snap.ready_age_ns > config.config.ready_limit_ns) &&
+		    (!d->notice_ns[1] || now - d->notice_ns[1] >= 10 * VMM_MONITOR_NS))
+			alarms |= 2;
+		if (config.config.irq_limit_ns && d->snap.irq.count &&
+		    d->snap.irq.p99_upper_ns > config.config.irq_limit_ns &&
+		    (!d->notice_ns[2] || now - d->notice_ns[2] >= 10 * VMM_MONITOR_NS))
+			alarms |= 4;
+		if (alarms & 1) { d->notice_ns[0] = now; d->faults = 0; }
+		if (alarms & 2) d->notice_ns[1] = now;
+		if (alarms & 4) d->notice_ns[2] = now;
+		d->exits = 0;
+		memset(&d->ready, 0, sizeof(d->ready));
+		memset(&d->irq, 0, sizeof(d->irq));
+		memset(&d->dispatch, 0, sizeof(d->dispatch));
+		snap = d->snap;
+		vmm_spin_unlock_irqrestore(&slots[i].lock, flags);
+		if (storm)
+			record_event(&snap, storm > 0 ? VMM_MONITOR_EXIT_STORM :
+				VMM_MONITOR_EXIT_RECOVER, snap.exit_rate, config.config.exit_rate, snap.last_exit);
+		if (alarms & 1)
+			record_event(&snap, VMM_MONITOR_MEMORY, snap.faults, snap.last_address, snap.last_fault);
+		if (alarms & 2)
+			record_event(&snap, VMM_MONITOR_READY_SLOW,
+				snap.ready_age_ns > snap.ready.p99_upper_ns ? snap.ready_age_ns : snap.ready.p99_upper_ns,
+				config.config.ready_limit_ns, snap.ready_age_ns > snap.ready.p99_upper_ns);
+		if (alarms & 4)
+			record_event(&snap, VMM_MONITOR_IRQ_SLOW, snap.irq.p99_upper_ns, config.config.irq_limit_ns, 0);
+	}
+	vmm_monitor_guest_sample(now, config.config.guest_cpu_limit_bp);
+	vmm_monitor_platform_sample(now);
+	dt = vmm_timer_timestamp() - start;
+	vmm_spin_lock_irqsave_lite(&control_lock, flags);
+	status.samples++;
+	if (dt > status.sample_max_ns) status.sample_max_ns = dt;
+	vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+done:
+	vmm_spin_unlock_irqrestore_lite(&sample_lock, sample_flags);
+}
+
+int __weak vmm_monitor_platform_publish(const char *json, u32 length)
+{
+	return VMM_ENOTAVAIL;
+}
+void __weak vmm_monitor_platform_sample(u64 now) { }
+int __weak vmm_monitor_platform_diagnose(struct vmm_chardev *cdev)
+{
+	return VMM_ENOTAVAIL;
+}
+
+/* Sole worker; all formatting and potentially slow output stays here. */
+void vmm_monitor_drain(void)
+{
+	u32 n;
+	int len, rc;
+	irq_flags_t flags;
+	char json[384];
+	struct vmm_monitor_event e;
+	struct vmm_monitor_status c;
+	if (!arch_atomic_read(&initialized))
+		return;
+	vmm_mutex_lock(&drain_lock);
+	vmm_monitor_status(&c);
+	for (n = 0; n < VMM_MONITOR_BATCH; n++) {
+		vmm_spin_lock_irqsave_lite(&control_lock, flags);
+		if (report_sequence > status.events) {
+			vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+			break;
+		}
+		e = events[(report_sequence++ - 1) % VMM_MONITOR_EVENTS];
+		vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+		len = vmm_snprintf(json, sizeof(json),
+			"{\"schema\":2,\"seq\":%llu,\"time_ns\":%llu,\"type\":%u,"
+			"\"guest\":%u,\"vcpu\":%u,\"generation\":%u,\"value\":%llu,"
+			"\"detail\":%llu,\"code\":%u}\n",
+			(unsigned long long)e.sequence, (unsigned long long)e.timestamp_ns,
+			e.type, e.guest_id, e.vcpu_id, e.generation,
+			(unsigned long long)e.value, (unsigned long long)e.detail, e.code);
+		if (len < 0 || len >= sizeof(json))
+			continue;
+		if (c.config.log)
+			vmm_printf("%s", json);
+		if (c.config.publish) {
+			rc = vmm_monitor_platform_publish(json, len);
+			if (rc) {
+				vmm_spin_lock_irqsave_lite(&control_lock, flags);
+				status.publish_errors++;
+				vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+			}
+		}
+	}
+	vmm_mutex_unlock(&drain_lock);
+}
+
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+static void report_fn(struct vmm_work *work) { vmm_monitor_drain(); }
+/* IRQ context: no mutex, allocation, formatting, or Guest calls. */
+static void monitor_timer(struct vmm_timer_event *ev)
+{
+	u64 now = vmm_timer_timestamp();
+	irq_flags_t flags;
+	int rc;
+	if (arch_atomic_read(&executor_state) != 1) {
+		if (!arch_atomic_read(&executor_state))
+			vmm_timer_event_start(ev, VMM_MONITOR_NS);
+		return;
+	}
+	if (vmm_monitor_enabled() && now > next_sample && now - next_sample >= VMM_MONITOR_NS / 4) {
+		vmm_spin_lock_irqsave_lite(&control_lock, flags);
+		status.late_samples++;
+		vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+	}
+	vmm_monitor_sample(now);
+	rc = vmm_workqueue_schedule_work(report_queue, &report_work);
+	if (rc && rc != VMM_EALREADY) {
+		vmm_spin_lock_irqsave_lite(&control_lock, flags);
+		status.work_errors++;
+		vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+	}
+	now = vmm_timer_timestamp();
+	next_sample += (udiv64(now >= next_sample ? now - next_sample : 0, VMM_MONITOR_NS) + 1) * VMM_MONITOR_NS;
+	if (vmm_timer_event_start(ev, next_sample - now)) {
+		vmm_spin_lock_irqsave_lite(&control_lock, flags);
+		status.work_errors++;
+		vmm_spin_unlock_irqrestore_lite(&control_lock, flags);
+	}
+}
+
+static void monitor_timer_start(void *unused0, void *unused1, void *unused2)
+{
+	/* Static result avoids a stack pointer escaping a timed-out IPI call. */
+	if (arch_atomic_read(&executor_state) < 0) return;
+	next_sample = vmm_timer_timestamp() + VMM_MONITOR_NS;
+	arch_atomic_write(&timer_start_result, vmm_timer_event_start(&sample_timer, VMM_MONITOR_NS));
+}
+#endif
+
+int __init vmm_monitor_init(void)
+{
+	u32 i;
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+	int rc;
+	u64 init_deadline;
+#endif
+	for (i = 0; i <= CONFIG_MAX_VCPU_COUNT; i++)
+		INIT_SPIN_LOCK(&slots[i].lock);
+	vmm_monitor_irq_init();
+	INIT_SPIN_LOCK(&sample_lock);
+	vmm_monitor_guest_init();
+	vmm_monitor_diag_init();
+	INIT_MUTEX(&drain_lock);
+	status.config.exit_rate = 50000;
+	status.config.sustain_seconds = 5;
+	status.config.log = TRUE;
+	status.config.guest_cpu_limit_bp = 9000;
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+	INIT_TIMER_EVENT(&sample_timer, monitor_timer, NULL);
+	INIT_WORK(&report_work, report_fn);
+	if (CONFIG_MONITOR_HCPU >= CONFIG_CPU_COUNT ||
+	    !vmm_cpu_online(CONFIG_MONITOR_HCPU))
+		return VMM_ENOTAVAIL;
+	report_queue = vmm_workqueue_create("monitor_wq", CONFIG_MONITOR_PRIORITY);
+	if (!report_queue)
+		return VMM_ENOMEM;
+	rc = vmm_threads_set_affinity(vmm_workqueue_get_thread(report_queue),
+				      vmm_cpumask_of(CONFIG_MONITOR_HCPU));
+	if (rc)
+		goto fail_queue;
+	/* Timer starts on the configured core, independently of vCPU priorities. */
+	rc = vmm_smp_ipi_sync_call(vmm_cpumask_of(CONFIG_MONITOR_HCPU), 1000,
+				   monitor_timer_start, NULL, NULL, NULL);
+	if (rc) goto fail_queue;
+	/* Upstream sync IPI waits for dequeue, not necessarily callback completion. */
+	init_deadline = vmm_timer_timestamp() + VMM_MONITOR_NS;
+	while (arch_atomic_read(&timer_start_result) == VMM_EINPROGRESS &&
+	       vmm_timer_timestamp() < init_deadline)
+		vmm_udelay(1);
+	rc = arch_atomic_read(&timer_start_result);
+	if (rc == VMM_EINPROGRESS) rc = VMM_ETIMEDOUT;
+	if (rc) goto fail_queue;
+#endif
+	arch_wmb();
+	arch_atomic_write(&initialized, 1);
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+	arch_atomic_write(&executor_state, 1);
+#endif
+#ifdef CONFIG_MONITOR_START_ENABLED
+	vmm_monitor_enable(TRUE);
+#endif
+	return VMM_OK;
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+fail_queue:
+	arch_atomic_write(&executor_state, -1);
+	vmm_workqueue_destroy(report_queue);
+	return rc;
+#endif
+}
+
+VMM_EXPORT_SYMBOL(vmm_monitor_enabled);
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_sample);
+VMM_EXPORT_SYMBOL(vmm_monitor_mem_fault);
+VMM_EXPORT_SYMBOL(vmm_monitor_exit);
+
+
+==============================================================================
+新增文件：core/monitor/monitor_diag.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor_diag.h>
+#include <vmm_manager.h>
+#include <vmm_timer.h>
+#include <libs/stringlib.h>
+
+static DEFINE_SPINLOCK(diag_lock);
+static atomic_t armed = {0};
+static u64 begin_ns, end_ns, overflow;
+static struct vmm_monitor_diag_record records[VMM_MONITOR_DIAG_SLOTS];
+
+void vmm_monitor_diag_init(void) { INIT_SPIN_LOCK(&diag_lock); }
+
+int vmm_monitor_diag_start(u32 ms)
+{
+	irq_flags_t flags;
+	if (!ms || ms > 5000) return VMM_EINVALID;
+	vmm_spin_lock_irqsave_lite(&diag_lock, flags);
+	if (arch_atomic_read(&armed)) {
+		vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+		return VMM_EBUSY;
+	}
+	memset(records, 0, sizeof(records)); overflow = 0;
+	begin_ns = vmm_timer_timestamp(); end_ns = begin_ns + (u64)ms * 1000000;
+	arch_atomic_write(&armed, 1);
+	vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+	return VMM_OK;
+}
+
+u64 vmm_monitor_diag_begin(void)
+{
+	return arch_atomic_read(&armed) ? vmm_timer_timestamp() : 0;
+}
+
+void vmm_monitor_diag_end(struct vmm_vcpu *v, u64 pc, u64 esr, u64 start, int rc)
+{
+	u32 i;
+	u64 now, ns;
+	irq_flags_t flags;
+	struct vmm_monitor_diag_record *r;
+	if (!start || !arch_atomic_read(&armed) || !v || !v->is_normal) return;
+	now = vmm_timer_timestamp();
+	vmm_spin_lock_irqsave_lite(&diag_lock, flags);
+	if (!arch_atomic_read(&armed) || start < begin_ns || now < start || now > end_ns)
+		goto done;
+	ns = now - start;
+	for (i = 0; i < VMM_MONITOR_DIAG_SLOTS; i++) {
+		r = &records[i];
+		if (!r->count || (r->guest == v->guest->id && r->vcpu == v->id &&
+		    r->pc == pc && (r->esr >> 26) == (esr >> 26))) {
+			r->guest = v->guest->id; r->vcpu = v->id;
+			r->pc = pc; r->esr = esr; r->last_ns = now;
+			r->count++; r->sum_ns += ns; if (ns > r->max_ns) r->max_ns = ns;
+			if (rc) r->errors++;
+			goto done;
+		}
+	}
+	overflow++;
+done:
+	vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+}
+
+void vmm_monitor_diag_stop(void)
+{
+	irq_flags_t flags;
+	vmm_spin_lock_irqsave_lite(&diag_lock, flags);
+	arch_atomic_write(&armed, 0);
+	vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+}
+
+int vmm_monitor_diag_get(u32 index, struct vmm_monitor_diag_record *out)
+{
+	irq_flags_t flags;
+	if (!out || index >= VMM_MONITOR_DIAG_SLOTS) return VMM_EINVALID;
+	vmm_spin_lock_irqsave_lite(&diag_lock, flags);
+	*out = records[index];
+	vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+	return out->count ? VMM_OK : VMM_ENOTAVAIL;
+}
+
+u64 vmm_monitor_diag_overflow(void)
+{
+	u64 count;
+	irq_flags_t flags;
+	vmm_spin_lock_irqsave_lite(&diag_lock, flags);
+	count = overflow;
+	vmm_spin_unlock_irqrestore_lite(&diag_lock, flags);
+	return count;
+}
+
+
+==============================================================================
+新增文件：core/monitor/monitor_guest.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor_guest.h>
+#include <vmm_manager.h>
+#include <vmm_timer.h>
+#include <libs/stringlib.h>
+
+static struct {
+	vmm_spinlock_t lock;
+	struct vmm_monitor_guest report;
+	u64 last_notice, last_sample_sequence;
+} guests[CONFIG_MAX_GUEST_COUNT];
+
+void vmm_monitor_guest_init(void)
+{
+	u32 i;
+	for (i = 0; i < CONFIG_MAX_GUEST_COUNT; i++)
+		INIT_SPIN_LOCK(&guests[i].lock);
+}
+
+void vmm_monitor_guest_reset(u32 id)
+{
+	irq_flags_t flags;
+	if (id >= CONFIG_MAX_GUEST_COUNT) return;
+	vmm_spin_lock_irqsave_lite(&guests[id].lock, flags);
+	memset(&guests[id].report, 0, sizeof(guests[id].report));
+	guests[id].last_notice = guests[id].last_sample_sequence = 0;
+	vmm_spin_unlock_irqrestore_lite(&guests[id].lock, flags);
+}
+
+int vmm_monitor_guest_report(struct vmm_vcpu *actor, u64 session, u64 sequence,
+		u64 cpu_bp, u64 total, u64 available, u64 free_bytes, u64 valid)
+{
+	u32 id;
+	int rc = VMM_EINVALID;
+	irq_flags_t flags;
+	struct vmm_monitor_guest *r;
+	/* Identity comes only from the trapping vCPU, never from Guest input. */
+	if (!actor || !actor->is_normal || !actor->guest ||
+	    actor->guest->id >= CONFIG_MAX_GUEST_COUNT || !session || !sequence ||
+	    !valid || valid > 3 || cpu_bp > 10000 || available > total ||
+	    free_bytes > total || ((valid & 2) && !total))
+		return VMM_EINVALID;
+	if (!vmm_monitor_enabled()) return VMM_ENOTAVAIL;
+	id = actor->guest->id;
+	vmm_spin_lock_irqsave_lite(&guests[id].lock, flags);
+	r = &guests[id].report;
+	if (r->session != session || sequence > r->sequence) {
+		if (r->session != session) {
+			guests[id].last_notice = 0;
+			guests[id].last_sample_sequence = 0;
+		}
+		r->session = session; r->sequence = sequence;
+		r->received_ns = vmm_timer_timestamp();
+		r->total_bytes = total; r->available_bytes = available;
+		r->free_bytes = free_bytes; r->cpu_bp = cpu_bp; r->valid = valid;
+		rc = VMM_OK;
+	}
+	vmm_spin_unlock_irqrestore_lite(&guests[id].lock, flags);
+	return rc;
+}
+
+int vmm_monitor_guest_get(u32 id, struct vmm_monitor_guest *out)
+{
+	irq_flags_t flags;
+	if (id >= CONFIG_MAX_GUEST_COUNT || !out) return VMM_EINVALID;
+	vmm_spin_lock_irqsave_lite(&guests[id].lock, flags);
+	*out = guests[id].report;
+	vmm_spin_unlock_irqrestore_lite(&guests[id].lock, flags);
+	return out->sequence ? VMM_OK : VMM_ENOTAVAIL;
+}
+
+void vmm_monitor_guest_sample(u64 now, u32 limit_bp)
+{
+	u32 i, value;
+	bool alarm;
+	irq_flags_t flags;
+	struct vmm_monitor_guest *r;
+	for (i = 0; i < CONFIG_MAX_GUEST_COUNT; i++) {
+		if (!vmm_spin_trylock_irqsave(&guests[i].lock, flags)) continue;
+		r = &guests[i].report;
+		alarm = FALSE; value = r->cpu_bp;
+		if (r->sequence != guests[i].last_sample_sequence && now >= r->received_ns &&
+		    now - r->received_ns <= 3 * VMM_MONITOR_NS) {
+			guests[i].last_sample_sequence = r->sequence;
+			if ((r->valid & 1) && limit_bp && value > limit_bp &&
+			    (!guests[i].last_notice || now - guests[i].last_notice >= 10 * VMM_MONITOR_NS)) {
+				guests[i].last_notice = now; alarm = TRUE;
+			}
+		}
+		vmm_spin_unlock_irqrestore(&guests[i].lock, flags);
+		if (alarm) vmm_monitor_guest_event(i, now, value, limit_bp);
+	}
+}
+
+
+==============================================================================
+新增文件：core/monitor/monitor_irq.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor.h>
+#include <vmm_manager.h>
+#include <vmm_timer.h>
+#include <vmm_smp.h>
+#include <vmm_modules.h>
+#include <arch_atomic64.h>
+
+/* One slot per outstanding physical-to-virtual delivery, not per interrupt.
+ * Static storage: no changes to the allocation size of Guest/VGIC objects.
+ * Caller holds VGIC dist_lock for pending/injected/reset routing operations.
+ */
+struct pending_irq { u64 start; u32 virq; };
+static struct {
+	vmm_spinlock_t lock;
+	u64 epoch_ns;
+	struct pending_irq irq[CONFIG_MONITOR_IRQ_SLOTS];
+} pending[CONFIG_MAX_VCPU_COUNT];
+static struct vmm_monitor_hirq_context current[CONFIG_CPU_COUNT];
+static atomic64_t untracked = { 0 };
+
+/* Called once from monitor init, before collection can be enabled. */
+void vmm_monitor_irq_init(void)
+{
+	u32 i;
+	for (i = 0; i < CONFIG_MAX_VCPU_COUNT; i++)
+		INIT_SPIN_LOCK(&pending[i].lock);
+}
+
+void vmm_monitor_irq_restart(u64 now)
+{
+	u32 v, i;
+	irq_flags_t flags;
+	for (v = 0; v < CONFIG_MAX_VCPU_COUNT; v++) {
+		vmm_spin_lock_irqsave_lite(&pending[v].lock, flags);
+		pending[v].epoch_ns = now;
+		for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++)
+			pending[v].irq[i].start = 0;
+		vmm_spin_unlock_irqrestore_lite(&pending[v].lock, flags);
+	}
+}
+
+struct vmm_monitor_hirq_context vmm_monitor_hirq_enter(u32 hirq)
+{
+	u32 cpu = vmm_smp_processor_id();
+	struct vmm_monitor_hirq_context old = current[cpu];
+	current[cpu].timestamp_ns = vmm_monitor_enabled() ? vmm_timer_timestamp() : 0;
+	current[cpu].hirq = hirq;
+	return old;
+}
+
+void vmm_monitor_hirq_exit(struct vmm_monitor_hirq_context old)
+{
+	current[vmm_smp_processor_id()] = old;
+}
+
+void vmm_monitor_irq_reset(struct vmm_vcpu *v)
+{
+	u32 i;
+	irq_flags_t flags;
+	if (!v || !v->is_normal || v->id >= CONFIG_MAX_VCPU_COUNT)
+		return;
+	vmm_spin_lock_irqsave_lite(&pending[v->id].lock, flags);
+	pending[v->id].epoch_ns = vmm_timer_timestamp();
+	for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++)
+		pending[v->id].irq[i].start = 0;
+	vmm_spin_unlock_irqrestore_lite(&pending[v->id].lock, flags);
+}
+
+void vmm_monitor_irq_pending(struct vmm_vcpu *v, u32 virq, u32 hirq)
+{
+	struct vmm_monitor_hirq_context c;
+	if (!vmm_monitor_enabled() || !v || !v->is_normal ||
+	    v->id >= CONFIG_MAX_VCPU_COUNT || hirq == VMM_MONITOR_UNKNOWN)
+		return;
+	c = current[vmm_smp_processor_id()];
+	/* Do not pair an unrelated interrupt or a software-generated assertion. */
+	if (!c.timestamp_ns || c.hirq != hirq) {
+		arch_atomic64_inc(&untracked);
+		return;
+	}
+	vmm_monitor_irq_pending_at(v, virq, c.timestamp_ns);
+}
+
+void vmm_monitor_irq_pending_at(struct vmm_vcpu *v, u32 virq, u64 start)
+{
+	u32 i, free_slot = CONFIG_MONITOR_IRQ_SLOTS;
+	irq_flags_t flags;
+	struct pending_irq *p;
+	if (!vmm_monitor_enabled() || !v || !v->is_normal ||
+	    v->id >= CONFIG_MAX_VCPU_COUNT || !start) return;
+	vmm_spin_lock_irqsave_lite(&pending[v->id].lock, flags);
+	if (!vmm_monitor_enabled() || start < pending[v->id].epoch_ns)
+		goto done;
+	p = pending[v->id].irq;
+	for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++) {
+		if (p[i].start && p[i].virq == virq)
+			goto done; /* Coalesced level: preserve earliest receipt. */
+		if (!p[i].start)
+			free_slot = i;
+	}
+	if (free_slot < CONFIG_MONITOR_IRQ_SLOTS) {
+		p[free_slot].virq = virq;
+		p[free_slot].start = start;
+	} else {
+		arch_atomic64_inc(&untracked);
+	}
+done:
+	vmm_spin_unlock_irqrestore_lite(&pending[v->id].lock, flags);
+}
+
+/* Caller serializes the real IRQ route/MOVI with pending/injection operations. */
+void vmm_monitor_irq_move(struct vmm_vcpu *from, struct vmm_vcpu *to, u32 virq)
+{
+	u32 first, second, i, free_slot = CONFIG_MONITOR_IRQ_SLOTS;
+	u64 start = 0;
+	irq_flags_t f1, f2;
+	struct pending_irq *p;
+	if (!vmm_monitor_enabled() || !from || !to || !from->is_normal || !to->is_normal ||
+	    from->id >= CONFIG_MAX_VCPU_COUNT || to->id >= CONFIG_MAX_VCPU_COUNT ||
+	    from->id == to->id || from->guest != to->guest) return;
+	first = from->id < to->id ? from->id : to->id;
+	second = from->id < to->id ? to->id : from->id;
+	vmm_spin_lock_irqsave_lite(&pending[first].lock, f1);
+	vmm_spin_lock_irqsave_lite(&pending[second].lock, f2);
+	for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++)
+		if (pending[from->id].irq[i].start && pending[from->id].irq[i].virq == virq) {
+			start = pending[from->id].irq[i].start; pending[from->id].irq[i].start = 0; break;
+		}
+	if (!start) goto done;
+	if (start < pending[to->id].epoch_ns) goto lost;
+	p = pending[to->id].irq;
+	for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++) {
+		if (p[i].start && p[i].virq == virq) {
+			if (start < p[i].start) p[i].start = start;
+			goto done;
+		}
+		if (!p[i].start) free_slot = i;
+	}
+	if (free_slot < CONFIG_MONITOR_IRQ_SLOTS) {
+		p[free_slot].virq = virq; p[free_slot].start = start; goto done;
+	}
+lost:
+	arch_atomic64_inc(&untracked);
+done:
+	vmm_spin_unlock_irqrestore_lite(&pending[second].lock, f2);
+	vmm_spin_unlock_irqrestore_lite(&pending[first].lock, f1);
+}
+
+static void irq_finish(struct vmm_vcpu *v, u32 virq, bool injected)
+{
+	u32 i;
+	u64 start = 0, end;
+	irq_flags_t flags;
+	if (!vmm_monitor_enabled() || !v || !v->is_normal || v->id >= CONFIG_MAX_VCPU_COUNT)
+		return;
+	end = injected ? vmm_timer_timestamp() : 0;
+	vmm_spin_lock_irqsave_lite(&pending[v->id].lock, flags);
+	for (i = 0; i < CONFIG_MONITOR_IRQ_SLOTS; i++) {
+		if (pending[v->id].irq[i].start && pending[v->id].irq[i].virq == virq) {
+			start = pending[v->id].irq[i].start;
+			pending[v->id].irq[i].start = 0;
+			break;
+		}
+	}
+	vmm_spin_unlock_irqrestore_lite(&pending[v->id].lock, flags);
+	if (start && end)
+		vmm_monitor_irq_sample(v, start, end);
+}
+
+void vmm_monitor_irq_injected(struct vmm_vcpu *v, u32 virq)
+{
+	irq_finish(v, virq, TRUE);
+}
+
+void vmm_monitor_irq_cancel(struct vmm_vcpu *v, u32 virq)
+{
+	irq_finish(v, virq, FALSE);
+}
+
+u64 vmm_monitor_irq_untracked(void)
+{
+	return arch_atomic64_read(&untracked);
+}
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_pending);
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_pending_at);
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_move);
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_injected);
+VMM_EXPORT_SYMBOL(vmm_monitor_irq_cancel);
+
+
+==============================================================================
+新增文件：core/monitor/monitor_stats.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <vmm_monitor.h>
+#include <libs/mathlib.h>
+
+void vmm_monitor_hist_add(struct vmm_monitor_hist *h, u64 ns)
+{
+	u32 b = 0;
+	u64 upper = 1000;
+	while (b < VMM_MONITOR_BUCKETS - 1 && ns > upper) {
+		upper <<= 1;
+		b++;
+	}
+	if (!h->count || ns < h->min)
+		h->min = ns;
+	if (ns > h->max)
+		h->max = ns;
+	h->count++;
+	h->sum += ns;
+	h->bins[b]++;
+}
+
+void vmm_monitor_hist_read(const struct vmm_monitor_hist *h,
+			   struct vmm_monitor_latency *out)
+{
+	u32 b;
+	u64 n = 0, target = h->count - udiv64(h->count, 100);
+	out->count = h->count;
+	out->min_ns = h->min;
+	out->max_ns = h->max;
+	out->mean_ns = h->count ? udiv64(h->sum, h->count) : 0;
+	out->p99_upper_ns = 0;
+	if (!h->count)
+		return;
+	for (b = 0; b < VMM_MONITOR_BUCKETS; b++) {
+		n += h->bins[b];
+		if (n >= target) {
+			/* Last bucket is unbounded; observed maximum is a safe bound. */
+			out->p99_upper_ns = b == VMM_MONITOR_BUCKETS - 1 ?
+				h->max : (1000ULL << b);
+			return;
+		}
+	}
+}
+
+int vmm_monitor_storm_step(struct vmm_monitor_streak *s, u64 count,
+			   u64 dt, u32 rate, u32 seconds, bool valid)
+{
+	/* dt is bounded before multiplying; do not credit missing windows. */
+	if (!valid || dt < VMM_MONITOR_NS * 3 / 4 ||
+	    dt > VMM_MONITOR_NS * 5 / 4) {
+		s->elapsed = 0;
+		s->windows = 0;
+		return 0;
+	}
+	/* count > rate * dt / 1e9 implements strict 'greater than'. */
+	if (count > udiv64((u64)rate * dt, VMM_MONITOR_NS)) {
+		if (s->elapsed < (u64)seconds * VMM_MONITOR_NS)
+			s->elapsed += dt;
+		if (s->windows < seconds)
+			s->windows++;
+		if (!s->active && s->windows >= seconds &&
+		    s->elapsed >= (u64)seconds * VMM_MONITOR_NS) {
+			s->active = TRUE;
+			return 1;
+		}
+	} else {
+		bool was_active = s->active;
+		s->elapsed = 0;
+		s->windows = 0;
+		s->active = FALSE;
+		return was_active ? -1 : 0;
+	}
+	return 0;
+}
+
+
+==============================================================================
+新增文件：core/monitor/objects.mk
+完整内容：
+core-objs-$(CONFIG_MONITOR_AGENT) += monitor/monitor_agent.o
+core-objs-$(CONFIG_MONITOR_AGENT) += monitor/monitor_stats.o
+core-objs-$(CONFIG_MONITOR_AGENT) += monitor/monitor_irq.o
+core-objs-$(CONFIG_MONITOR_AGENT) += monitor/monitor_guest.o
+core-objs-$(CONFIG_MONITOR_AGENT) += monitor/monitor_diag.o
+
+
+==============================================================================
+新增文件：core/monitor/openconf.cfg
+完整内容：
+menu "Monitor Agent"
+
+config CONFIG_MONITOR_AGENT
+	bool "Lightweight hypervisor monitor agent"
+	default n
+	help
+	  Static counters, bounded event history and one-second sampling.
+	  ARM64 exit hooks and the hardware-assisted VGIC path are integrated.
+	  Guest OS CPU/memory reports use a private ARM64 HVC. Phase two is excluded.
+
+config CONFIG_MONITOR_START_ENABLED
+	bool "Collect from boot"
+	depends on CONFIG_MONITOR_AGENT
+	default n
+
+config CONFIG_MONITOR_HCPU
+	int "Timer sampler and reporter host CPU"
+	depends on CONFIG_MONITOR_AGENT
+	default 0
+	range 0 255
+
+config CONFIG_MONITOR_PRIORITY
+	int "Background reporter priority (sampling runs in timer IRQ)"
+	depends on CONFIG_MONITOR_AGENT
+	default 3
+	range 0 7
+	help
+	  Sampling uses a static timer event, independent of Guest task priority.
+	  Only output uses this priority. Long IRQ masking still delays timers.
+
+config CONFIG_MONITOR_IRQ_SLOTS
+	int "Outstanding physical IRQ deliveries per vCPU"
+	depends on CONFIG_MONITOR_AGENT
+	default 16
+	range 1 64
+	help
+	  Fixed static slots. Unpaired/overflow deliveries are counted, never
+	  fabricated as zero-latency samples. Coalesced IRQs use first receipt.
+
+config CONFIG_MONITOR_EXTERNAL_EXECUTOR
+	bool "Use pre-existing platform sampler and worker"
+	depends on CONFIG_MONITOR_AGENT
+	default n
+	help
+	  Create no timer/workqueue. Platform calls the IRQ-safe sample once
+	  per second and drain in a separate sleepable worker. Platform sample
+	  callbacks must also be IRQ-safe. Drain must never run in IRQ context.
+
+endmenu
+
+
+==============================================================================
+原开源文件：core/openconf.cfg
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 172 行附近；新版第 172 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+
+comment "Scheduler Configuration"
+
+source "core/schedalgo/openconf.cfg"
+
+choice
+	prompt "Default Time Slice (milliseconds)"
+	default CONFIG_TSLICE_10MS
+	help
+	  Select the default time slice for each VCPU in milliseconds. 
+
+[修改后的完整对应片段]
+
+comment "Scheduler Configuration"
+
+source "core/schedalgo/openconf.cfg"
+
+source "core/monitor/openconf.cfg"
+
+choice
+	prompt "Default Time Slice (milliseconds)"
+	default CONFIG_TSLICE_10MS
+	help
+	  Select the default time slice for each VCPU in milliseconds. 
+
+
+==============================================================================
+原开源文件：core/vmm_host_irq.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source code for host interrupts
+ */
+
+#include <vmm_error.h>
+#include <vmm_smp.h>
+#include <vmm_cpuhp.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+
+[修改后的完整对应片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source code for host interrupts
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_smp.h>
+#include <vmm_cpuhp.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_host_irq.h>
+
+
+位置：vmm_host_generic_irq_exec()
+干净开源基线第 145 行附近；新版第 146 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+}
+
+int vmm_host_generic_irq_exec(u32 hirq_no)
+{
+	u32 cpu;
+	struct vmm_host_irq *irq = NULL;
+
+	if (NULL == (irq = vmm_host_irq_get(hirq_no)))
+		return VMM_ENOTAVAIL;
+
+
+[修改后的完整对应片段]
+}
+
+int vmm_host_generic_irq_exec(u32 hirq_no)
+{
+	u32 cpu;
+#ifdef CONFIG_MONITOR_AGENT
+	struct vmm_monitor_hirq_context previous;
+#endif
+	struct vmm_host_irq *irq = NULL;
+
+	if (NULL == (irq = vmm_host_irq_get(hirq_no)))
+		return VMM_ENOTAVAIL;
+
+
+
+位置：vmm_host_generic_irq_exec()
+干净开源基线第 151 行附近；新版第 155 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+
+	if (NULL == (irq = vmm_host_irq_get(hirq_no)))
+		return VMM_ENOTAVAIL;
+
+	cpu = vmm_smp_processor_id();
+	irq->count[cpu]++;
+	irq->percpu_state[cpu] |= VMM_PERCPU_IRQ_STATE_IN_PROG;
+	if (irq->handler) {
+		irq->handler(irq, cpu, irq->handler_data);
+	}
+
+[修改后的完整对应片段]
+
+	if (NULL == (irq = vmm_host_irq_get(hirq_no)))
+		return VMM_ENOTAVAIL;
+
+	cpu = vmm_smp_processor_id();
+#ifdef CONFIG_MONITOR_AGENT
+	previous = vmm_monitor_hirq_enter(hirq_no);
+#endif
+	irq->count[cpu]++;
+	irq->percpu_state[cpu] |= VMM_PERCPU_IRQ_STATE_IN_PROG;
+	if (irq->handler) {
+		irq->handler(irq, cpu, irq->handler_data);
+	}
+
+
+位置：vmm_host_generic_irq_exec()
+干净开源基线第 157 行附近；新版第 164 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	irq->percpu_state[cpu] |= VMM_PERCPU_IRQ_STATE_IN_PROG;
+	if (irq->handler) {
+		irq->handler(irq, cpu, irq->handler_data);
+	}
+	irq->percpu_state[cpu] &= ~VMM_PERCPU_IRQ_STATE_IN_PROG;
+
+	return VMM_OK;
+}
+
+int vmm_host_active_irq_exec(u32 cpu_irq_no)
+
+[修改后的完整对应片段]
+	irq->percpu_state[cpu] |= VMM_PERCPU_IRQ_STATE_IN_PROG;
+	if (irq->handler) {
+		irq->handler(irq, cpu, irq->handler_data);
+	}
+	irq->percpu_state[cpu] &= ~VMM_PERCPU_IRQ_STATE_IN_PROG;
+#ifdef CONFIG_MONITOR_AGENT
+	vmm_monitor_hirq_exit(previous);
+#endif
+
+	return VMM_OK;
+}
+
+int vmm_host_active_irq_exec(u32 cpu_irq_no)
+
+
+==============================================================================
+原开源文件：core/vmm_main.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief main source file to start, stop and reset hypervisor
+ */
+
+#include <vmm_error.h>
+#include <vmm_heap.h>
+#include <vmm_pagepool.h>
+#include <vmm_devtree.h>
+#include <vmm_params.h>
+#include <vmm_stdio.h>
+
+[修改后的完整对应片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief main source file to start, stop and reset hypervisor
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_heap.h>
+#include <vmm_pagepool.h>
+#include <vmm_devtree.h>
+#include <vmm_params.h>
+#include <vmm_stdio.h>
+
+
+位置：system_init_work()
+干净开源基线第 438 行附近；新版第 439 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	if (ret) {
+		goto fail;
+	}
+
+	/* Initialize hypervisor modules */
+	vmm_init_printf("hypervisor modules\n");
+	ret = vmm_modules_init();
+	if (ret) {
+		goto fail;
+	}
+
+[修改后的完整对应片段]
+	if (ret) {
+		goto fail;
+	}
+
+	/* Initialize hypervisor modules */
+	/* Optional monitor failure must not prevent Guest boot. */
+	ret = vmm_monitor_init();
+	if (ret)
+		vmm_printf("monitor_agent unavailable (error %d)\n", ret);
+
+	vmm_init_printf("hypervisor modules\n");
+	ret = vmm_modules_init();
+	if (ret) {
+		goto fail;
+	}
+
+
+==============================================================================
+原开源文件：core/vmm_scheduler.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source file for hypervisor scheduler
+ */
+
+#include <vmm_error.h>
+#include <vmm_smp.h>
+#include <vmm_percpu.h>
+#include <vmm_cpumask.h>
+#include <vmm_cpuhp.h>
+#include <vmm_stdio.h>
+
+[修改后的完整对应片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source file for hypervisor scheduler
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_smp.h>
+#include <vmm_percpu.h>
+#include <vmm_cpumask.h>
+#include <vmm_cpuhp.h>
+#include <vmm_stdio.h>
+
+
+位置：__vmm_scheduler_next1()
+干净开源基线第 164 行附近；新版第 165 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		vmm_panic("%s: dequeue error %d\n", __func__, rc);
+	}
+
+	vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
+
+	arch_vcpu_switch(NULL, next, regs);
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+	next->state_tstamp = tstamp;
+
+[修改后的完整对应片段]
+		vmm_panic("%s: dequeue error %d\n", __func__, rc);
+	}
+
+	vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
+
+	vmm_monitor_selected(next, vmm_timer_timestamp());
+	arch_vcpu_switch(NULL, next, regs);
+	vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+	vmm_monitor_state(next, VMM_VCPU_STATE_RUNNING, vmm_timer_timestamp());
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+
+
+位置：__vmm_scheduler_next1()
+干净开源基线第 165 行附近；新版第 167 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	}
+
+	vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
+
+	arch_vcpu_switch(NULL, next, regs);
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+	next->state_tstamp = tstamp;
+	schedp->current_vcpu = next;
+
+[修改后的完整对应片段]
+
+	vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
+
+	vmm_monitor_selected(next, vmm_timer_timestamp());
+	arch_vcpu_switch(NULL, next, regs);
+	vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+	vmm_monitor_state(next, VMM_VCPU_STATE_RUNNING, vmm_timer_timestamp());
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+	next->state_tstamp = tstamp;
+	schedp->current_vcpu = next;
+
+
+位置：__vmm_scheduler_next2()
+干净开源基线第 215 行附近；新版第 219 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+			__vmm_scheduler_sync_system_time(schedp, current);
+			current->state_running_nsecs +=
+				tstamp - current->state_tstamp;
+			arch_atomic_write(&current->state, VMM_VCPU_STATE_READY);
+			current->state_tstamp = tstamp;
+			rq_enqueue(schedp, current);
+		}
+		tcurrent = current;
+	}
+
+
+[修改后的完整对应片段]
+			__vmm_scheduler_sync_system_time(schedp, current);
+			current->state_running_nsecs +=
+				tstamp - current->state_tstamp;
+			arch_atomic_write(&current->state, VMM_VCPU_STATE_READY);
+			current->state_tstamp = tstamp;
+			vmm_monitor_state(current, VMM_VCPU_STATE_READY, tstamp);
+			rq_enqueue(schedp, current);
+		}
+		tcurrent = current;
+	}
+
+
+
+位置：__vmm_scheduler_next2()
+干净开源基线第 242 行附近；新版第 247 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		 */
+		if (arch_atomic_read(&next->state) != VMM_VCPU_STATE_READY) {
+			vmm_write_unlock_irqrestore_lite(&next->sched_lock, nf);
+			goto dequeue_again;
+		}
+		arch_vcpu_switch(tcurrent, next, regs);
+	}
+
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+
+[修改后的完整对应片段]
+		 */
+		if (arch_atomic_read(&next->state) != VMM_VCPU_STATE_READY) {
+			vmm_write_unlock_irqrestore_lite(&next->sched_lock, nf);
+			goto dequeue_again;
+		}
+		vmm_monitor_selected(next, vmm_timer_timestamp());
+		arch_vcpu_switch(tcurrent, next, regs);
+	} else {
+		vmm_monitor_selected(next, vmm_timer_timestamp());
+	}
+
+
+
+位置：__vmm_scheduler_next2()
+干净开源基线第 243 行附近；新版第 249 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+		if (arch_atomic_read(&next->state) != VMM_VCPU_STATE_READY) {
+			vmm_write_unlock_irqrestore_lite(&next->sched_lock, nf);
+			goto dequeue_again;
+		}
+		arch_vcpu_switch(tcurrent, next, regs);
+	}
+
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+
+[修改后的完整对应片段]
+			vmm_write_unlock_irqrestore_lite(&next->sched_lock, nf);
+			goto dequeue_again;
+		}
+		vmm_monitor_selected(next, vmm_timer_timestamp());
+		arch_vcpu_switch(tcurrent, next, regs);
+	} else {
+		vmm_monitor_selected(next, vmm_timer_timestamp());
+	}
+
+	vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+	vmm_monitor_state(next, VMM_VCPU_STATE_RUNNING, vmm_timer_timestamp());
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+
+
+位置：__vmm_scheduler_next2()
+干净开源基线第 245 行附近；新版第 253 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+			goto dequeue_again;
+		}
+		arch_vcpu_switch(tcurrent, next, regs);
+	}
+
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+	next->state_tstamp = tstamp;
+	schedp->current_vcpu = next;
+
+[修改后的完整对应片段]
+		arch_vcpu_switch(tcurrent, next, regs);
+	} else {
+		vmm_monitor_selected(next, vmm_timer_timestamp());
+	}
+
+	vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+	vmm_monitor_state(next, VMM_VCPU_STATE_RUNNING, vmm_timer_timestamp());
+	next->state_ready_nsecs += tstamp - next->state_tstamp;
+	arch_atomic_write(&next->state, VMM_VCPU_STATE_RUNNING);
+	next->resumed = FALSE;
+	next->state_tstamp = tstamp;
+	schedp->current_vcpu = next;
+
+
+位置：vmm_scheduler_state_change()
+干净开源基线第 665 行附近；新版第 675 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+			vcpu->state_paused_nsecs = 0;
+			vcpu->state_halted_nsecs = 0;
+			vcpu->system_nsecs = 0;
+			vcpu->reset_tstamp = tstamp;
+		}
+		arch_atomic_write(&vcpu->state, new_state);
+		vcpu->state_tstamp = tstamp;
+	}
+
+skip_state_change:
+
+[修改后的完整对应片段]
+			vcpu->state_paused_nsecs = 0;
+			vcpu->state_halted_nsecs = 0;
+			vcpu->system_nsecs = 0;
+			vcpu->reset_tstamp = tstamp;
+		}
+		vmm_monitor_state(vcpu, new_state, tstamp);
+		arch_atomic_write(&vcpu->state, new_state);
+		vcpu->state_tstamp = tstamp;
+	}
+
+skip_state_change:
+
+
+==============================================================================
+原开源文件：core/vmm_shmem.c
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 25 行附近；新版第 25 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source file for shared memory subsystem
+ */
+
+#include <vmm_error.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_mutex.h>
+#include <vmm_host_ram.h>
+#include <vmm_host_aspace.h>
+
+[修改后的完整对应片段]
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source file for shared memory subsystem
+ */
+
+#include <vmm_error.h>
+#include <vmm_monitor.h>
+#include <vmm_heap.h>
+#include <vmm_stdio.h>
+#include <vmm_mutex.h>
+#include <vmm_host_ram.h>
+#include <vmm_host_aspace.h>
+
+
+位置：文件级 include / 声明 / 配置区域
+干净开源基线第 31 行附近；新版第 32 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+#include <vmm_stdio.h>
+#include <vmm_mutex.h>
+#include <vmm_host_ram.h>
+#include <vmm_host_aspace.h>
+#include <vmm_shmem.h>
+#include <libs/stringlib.h>
+
+struct vmm_shmem_ctrl {
+	struct vmm_mutex lock;
+	struct dlist shmem_list;
+
+[修改后的完整对应片段]
+#include <vmm_stdio.h>
+#include <vmm_mutex.h>
+#include <vmm_host_ram.h>
+#include <vmm_host_aspace.h>
+#include <vmm_shmem.h>
+#include <vmm_guest_aspace.h>
+#include <libs/stringlib.h>
+
+struct vmm_shmem_ctrl {
+	struct vmm_mutex lock;
+	struct dlist shmem_list;
+
+
+位置：shmem_guest_allowed()、vmm_shmem_guest_read()、vmm_shmem_guest_write()
+干净开源基线第 40 行附近；新版第 42 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+	struct dlist shmem_list;
+};
+
+static struct vmm_shmem_ctrl shmctrl;
+
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable)
+{
+	if (!shm || !dst)
+		return 0;
+
+[修改后的完整对应片段]
+	struct dlist shmem_list;
+};
+
+static struct vmm_shmem_ctrl shmctrl;
+
+static bool shmem_guest_allowed(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+	physical_addr_t gpa, physical_addr_t off, u32 len, bool write)
+{
+	physical_addr_t hpa;
+	physical_size_t available;
+	u32 flags;
+	struct vmm_region *region;
+	if (!actor || !actor->is_normal || !shm) return FALSE;
+	if (!vmm_monitor_range_valid(shm->size, off, len) ||
+	    !vmm_monitor_range_valid(~0ULL, shm->addr, off) ||
+	    !vmm_monitor_range_valid(~0ULL, shm->addr + off, len) ||
+	    !vmm_monitor_range_valid(~0ULL, gpa, len)) {
+		vmm_monitor_mem_fault(actor, VMM_MONITOR_SHMEM_BOUNDS, gpa, len);
+		return FALSE;
+	}
+	region = vmm_guest_find_region(actor->guest, gpa, VMM_REGION_MEMORY, FALSE);
+	if (!region || (region->flags & VMM_REGION_ALIAS) ||
+	    vmm_guest_physical_map(actor->guest, gpa, len, &hpa, &available, &flags) ||
+	    available < len || hpa != shm->addr + off || !(flags & VMM_REGION_REAL) ||
+	    !(flags & (VMM_REGION_ISRAM | VMM_REGION_ISSHARED)) ||
+	    (write && (flags & VMM_REGION_READONLY))) {
+		vmm_monitor_mem_fault(actor, VMM_MONITOR_ACCESS_DENIED, gpa, write);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+u32 vmm_shmem_guest_read(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+	physical_addr_t gpa, physical_addr_t off, void *dst, u32 len, bool cacheable)
+{
+	if (!dst || !shmem_guest_allowed(actor, shm, gpa, off, len, FALSE)) return 0;
+	return vmm_shmem_read(shm, off, dst, len, cacheable);
+}
+
+u32 vmm_shmem_guest_write(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+	physical_addr_t gpa, physical_addr_t off, void *src, u32 len, bool cacheable)
+{
+	if (!src || !shmem_guest_allowed(actor, shm, gpa, off, len, TRUE)) return 0;
+	return vmm_shmem_write(shm, off, src, len, cacheable);
+}
+
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable)
+{
+	if (!shm || !dst)
+		return 0;
+
+
+位置：vmm_shmem_read()
+干净开源基线第 45 行附近；新版第 88 行附近。
+动作：replace；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable)
+{
+	if (!shm || !dst)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_read(shm->addr + off, dst, len, cacheable);
+}
+
+
+[修改后的完整对应片段]
+u32 vmm_shmem_read(struct vmm_shmem *shm, physical_addr_t off,
+		   void *dst, u32 len, bool cacheable)
+{
+	if (!shm || !dst)
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_read(shm->addr + off, dst, len, cacheable);
+}
+
+
+位置：vmm_shmem_read()
+干净开源基线第 47 行附近；新版第 92 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+{
+	if (!shm || !dst)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_read(shm->addr + off, dst, len, cacheable);
+}
+
+u32 vmm_shmem_write(struct vmm_shmem *shm, physical_addr_t off,
+
+[修改后的完整对应片段]
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_read(shm->addr + off, dst, len, cacheable);
+}
+
+u32 vmm_shmem_write(struct vmm_shmem *shm, physical_addr_t off,
+
+
+位置：vmm_shmem_write()
+干净开源基线第 56 行附近；新版第 102 行附近。
+动作：replace；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+u32 vmm_shmem_write(struct vmm_shmem *shm, physical_addr_t off,
+		    void *src, u32 len, bool cacheable)
+{
+	if (!shm || !src)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_write(shm->addr + off, src, len, cacheable);
+}
+
+
+[修改后的完整对应片段]
+u32 vmm_shmem_write(struct vmm_shmem *shm, physical_addr_t off,
+		    void *src, u32 len, bool cacheable)
+{
+	if (!shm || !src)
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_write(shm->addr + off, src, len, cacheable);
+}
+
+
+位置：vmm_shmem_write()
+干净开源基线第 58 行附近；新版第 106 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+{
+	if (!shm || !src)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_write(shm->addr + off, src, len, cacheable);
+}
+
+u32 vmm_shmem_set(struct vmm_shmem *shm, physical_addr_t off,
+
+[修改后的完整对应片段]
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_write(shm->addr + off, src, len, cacheable);
+}
+
+u32 vmm_shmem_set(struct vmm_shmem *shm, physical_addr_t off,
+
+
+位置：vmm_shmem_set()
+干净开源基线第 67 行附近；新版第 116 行附近。
+动作：replace；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+u32 vmm_shmem_set(struct vmm_shmem *shm, physical_addr_t off,
+		  u8 byte, u32 len, bool cacheable)
+{
+	if (!shm)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_set(shm->addr + off, byte, len, cacheable);
+}
+
+
+[修改后的完整对应片段]
+u32 vmm_shmem_set(struct vmm_shmem *shm, physical_addr_t off,
+		  u8 byte, u32 len, bool cacheable)
+{
+	if (!shm)
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_set(shm->addr + off, byte, len, cacheable);
+}
+
+
+位置：vmm_shmem_set()
+干净开源基线第 69 行附近；新版第 120 行附近。
+动作：insert；以下前后文用于定位，不要覆盖产品同函数中的其他改动。
+
+[修改前的定位片段]
+{
+	if (!shm)
+		return 0;
+	if (shm->size < (off + len))
+		return 0;
+
+	return vmm_host_memory_set(shm->addr + off, byte, len, cacheable);
+}
+
+int vmm_shmem_iterate(int (*iter)(struct vmm_shmem *, void *),
+
+[修改后的完整对应片段]
+		return 0;
+	/* Subtraction also rejects offset+length wraparound. */
+	if (!vmm_monitor_range_valid(shm->size, off, len)) {
+		vmm_monitor_mem_fault(NULL, VMM_MONITOR_SHMEM_BOUNDS, off, len);
+		return 0;
+	}
+
+	return vmm_host_memory_set(shm->addr + off, byte, len, cacheable);
+}
+
+int vmm_shmem_iterate(int (*iter)(struct vmm_shmem *, void *),
+
+
+==============================================================================
+新增文件：docs/monitor_agent.txt
+完整内容：
+monitor_agent 第二版（2026-10-21）
+
+完整说明：docs/monitor_agent_v2.md
+
+本版采用 HV 定时器 IRQ 采样，后台日志优先级默认3；新增独立调度延迟、Guest CPU/内存采集链路、共享内存授权读写、LPI稀疏ID/MOVI配对和按需陷入诊断。
+
+ROM <=5KB 仍未达标；CPU <0.5% 尚未板测；陷入服务耗时不等于精确PMU周期。产品GICv3/DM/CCM需按手工合入说明接入。
+
+运行：monitor start / status / cpu / irq / guest / mem <name> / diagnose [ms] / collect / events / stop。
+
+请勿继续使用第一版的优先级6采样线程配置说明；现在只有日志线程使用 CONFIG_MONITOR_PRIORITY。Guest HVC 桥只在合入匹配固件后运行。
+
+
+==============================================================================
+新增文件：docs/monitor_agent_v2.md
+完整内容：
+# monitor_agent 第二版：实现、合入与验收说明
+
+日期：2026-10-21。基于当前 Xvisor 开源参考树，ARM64、12 核；产品 auth=4、mterm=3。本版的日志工作队列默认优先级为 3，采样改为定时器 IRQ。**这不是全部指标已经验收通过的声明：5 KB ROM 仍未达标，目标板 CPU <0.5% 未验证，精确 PMU 周期数未实现。**
+
+## 1. 对修改后的需求逐项回答
+
+“已有代码”与“产品路径已接入、板端验收通过”分别记录。新的要求只要求 exit 风暴触发日志，不再要求死机现场；当前结构化风暴/恢复日志可以对应这一功能。
+
+| 条款 | 本版实现 | 状态/验收边界 |
+|---|---|---|
+| CPU 1：调度延迟、就绪等待 | 新增 `selected` 打点结束 READY 等待；新增 `dispatch` 统计调度函数进入到目标上下文安装完成 | 两种指标独立；不把唤醒请求发生到进入 READY 前的时间包含进来。产品调度器需按语义合入 |
+| CPU 2：一键识别异常指令周期 | `monitor diagnose [ms]`、`collect`：有界时间内采集 ELR、ESR/EC、重复次数、处理耗时、错误，标疑似异常 | 实现了**异常指令陷入诊断**。耗时为 ns，不是 CPU 硬件周期；不定位没有任何 trap 的 Guest 内纯计算死循环。若本条指 PMU 周期/指令数，仍未完成，不能把这两种能力混称 |
+| CPU 3：Guest CPU 超限与 HV 查询 | Linux/Android 通用采集程序、ARM64 内核 HVC 桥、HV 静态接收缓存、`monitor guest/cpu`；Guest 输出超限标记，HV 也有限频事件 | 源码链路已提供；需要在两个 Guest 构建部署采集端。当前数据为整个 Guest 汇总 CPU 利用率，iowait 归入空闲，不是进程利用率 |
+| 内存 1：Guest 内存使用与 shell | `monitor mem <name>` 同时输出 Guest OS 遥测和区域表；OS 总量/可用/空闲/估算占用，带时间、valid 位和过期状态 | 不再把区域大小当 OS 使用量。没有部署 Guest 采集端时明确 missing；不是 0 使用量 |
+| 内存 2：域与共享内存越界/越权 | stage-2 拒绝/permission fault；三个原 shmem API 范围保护；新增显式 actor 的共享内存授权读写接口 | 公开路径有实现。私有 DM/CCM 必须调用新授权接口或接入既有拒绝点；Guest 授权页内部的对象越界、DMA/IOMMU 不会自动被 MMU 捕获 |
+| IRQ 1：注入延迟 | 原物理分发→成功写 LR 配对；新增显式原始时间戳、稀疏大 IRQ ID、同域迁移接口 | 上游 VGIC 已接入。LPI/MOVI 算法已模型测试，但私有 GICv3/fastpath 的实际调用位置仍需产品合入；不能将接口存在当作板端覆盖完成 |
+| IRQ 2：exit 风暴触发日志 | >50000/s，连续有效窗口至少 5 个且累计至少 5 秒，结构化开始/恢复事件 | 已有实现并回归；不是 panic/reset；门限可命令配置 |
+| 通用 1：ROM ≤5 KB | 对象段统计与预算失败检查，含新增对象及已有路径增量 | **未达标**；完整结果见附带容量报告。`-Os`、`-Oz` 均测量；没有通过排除命令/诊断/接入成本宣称通过 |
+| 通用 1：无动态分配 | 运行期静态数组、固定缓冲；启动时创建一个日志工作队列 | 符合之前确认的“允许启动分配”口径。Guest 程序、内核设备注册各有自身 OS 分配，不属于 HV 运行期统计分配 |
+| 通用 1：CPU <0.5% | 采集路径有界、诊断按命令开启；提供测量方法 | **目标板未验证**；sample_max_ns 不是 CPU 占用率证明 |
+| 通用 2：高优先级确定性采集 | HV 定时器 IRQ 采样，不依赖 monitor 线程能否被 Guest 调度让出；trylock 竞争则计缺口 | 已改执行机制。长时间关 IRQ、宿主锁争用、硬件故障仍会推迟；需按最大 IRQ 屏蔽时间及 WCET 验收，不能承诺绝对实时 |
+| 通用 3：JSON 通道或命令 | 本地 shell JSON、后台异常日志；保留 platform_publish 接口 | 选择需求中的**命令查询分支**已有实现。远程 virtio-serial/共享内存 JSON 发布仍为产品适配接口；Guest HVC 遥测不是该远程发布通道 |
+| 通用 4：编译与运行开关 | CONFIG_MONITOR_AGENT、CONFIG_CMD_MONITOR、start/stop、量产编译关闭 | 已实现；stop 保留历史及每秒一次的 timer 轻量唤醒。只有编译关闭才去掉监控执行上下文 |
+
+## 2. 执行模型
+
+```mermaid
+flowchart LR
+    S[调度器及异常打点] --> A[静态 vCPU 统计]
+    P[物理 IRQ 分发] --> I[有界 IRQ 关联表]
+    I --> A
+    T[HV 定时器 IRQ 每秒] --> A
+    T --> E[固定事件环]
+    T --> W[后台日志工作队列 优先级3]
+    E --> W
+    W --> J[JSON 日志]
+    G[Linux或Android采集程序] --> B[Guest内核HVC桥]
+    B --> R[HV按真实调用Guest接收]
+    R --> T
+    C[monitor命令] --> A
+    C --> R
+    C --> D[按需指令陷入诊断]
+```
+
+内部模式只创建一个专用输出工作队列，没有优先级 6 的常驻采样线程。静态 timer 在 `CONFIG_MONITOR_HCPU` 对应核启动，默认 0；队列使用同一 affinity、优先级默认 3。`CONFIG_MONITOR_PRIORITY` 现在**只控制日志线程**。不要因 mterm/auth 偶现问题重新把采样搬回前台忙轮询。
+
+`sample_lock` 已由 mutex 改为自旋控制锁，采样只尝试取得它；拿不到就记录 busy，不等待配置路径。单槽也 trylock；统计不全时按实际 dt 标质量，不制造完整窗口。生产者、控制和事件仍使用短锁，不能将 trylock 描述成整个系统完全无等待。
+
+`vmm_monitor_platform_sample()` 现在处于 IRQ 上下文：产品覆盖函数必须无等待、无分配、无日志、无递归 sample/enable/configure。`vmm_monitor_drain()` 仍使用 mutex，仅可后台调用。发布函数也仅在后台调用。
+
+初始化为 IPI 延迟/超时和 timer 启动失败设置静态状态；失败后的晚到回调不访问已经销毁的队列。配置核必须在线；CPU 热拔出不在本产品静态 12 核设计中，若产品支持 hotplug 需增加迁移/停用流程。
+
+stop 后不新增周期指标及 Guest 遥测；历史事件仍可排出。再次 start 清监控槽、IRQ 起点和 Guest 遥测缓存，下一轮预热。诊断命令是独立按需能力，允许在周期 monitor 停止时使用。
+
+## 3. CPU 时间口径和打点
+
+| 指标 | 起点 | 终点 | 不包含 |
+|---|---|---|---|
+| ready | 状态真正转为 READY 的通知 | 选出且已验证目标 vCPU，准备安装上下文的 selected 通知 | selected 后的上下文切换耗时；进入 READY 前的唤醒处理 |
+| dispatch | `__vmm_scheduler_next1/next2` 入口原有 tstamp | arch_vcpu_switch 完成后打点；同一 vCPU 再选中也记录 | Guest 实际执行；调度函数后续记账尾部 |
+| host_irq_to_lr | 确认有效物理 IRQ 后的分发软件时间 | 成功 set_lr 后 | 硬件边沿到软件入口、Guest ISR 开始及执行 |
+
+`dispatch` 是该次调度路径延迟，包含出队、必要的旧状态处理、锁和上下文安装；不是仅测汇编切换，也不是从唤醒请求到 Guest 第一条指令。两个区间可以重叠，不能简单相加得出总延迟。
+
+`vmm_monitor_selected()` 在目标 sched_lock 保护下记录 READY 样本并清 waiting。`vmm_monitor_state(RUNNING)` 保留兼容兜底：遗漏 selected 的旧集成仍能得到 READY→RUNNING 样本，但这不符合新版精确口径，产品验收须确认 selected 已合入。
+
+直方图仍为 16 桶；P99 是桶上界，允许大于实测最大值；零 count 是无样本。PAUSE/HALT/RESET/UNKNOWN 撤销未完成等待。一直 READY 时仍通过 ready_age_ns 检测饥饿。
+
+由于 ready 口径变化，HV JSON **schema 升为 2**；旧 QEMU schema=1 数据不被重解释。新版解析脚本兼容读入 1 和 2，并保留 schema。
+
+## 4. 一键指令陷入诊断
+
+```text
+monitor diagnose
+monitor diagnose 2000
+monitor collect
+```
+
+diagnose 默认观察 1000 ms，允许 1～5000 ms；命令阻塞等待但采用 sleep，不忙轮询。collect 输出缓存后执行一次 1000 ms 诊断。命令 mutex 防止两次诊断互相清空数据。
+
+ARM64 `do_sync()` 排除 EL2 自身异常后开始计时，仿真处理完成、原有错误日志之前结束；保存进入时的 ELR/ESR，避免处理函数修改 regs 后丢失位置。静态表保存最先遇到的最多 16 个 `(guest, vcpu, ELR, EC)` 组合，重复项累计；容量不足记 `untracked`，它不是精确 Top-N。
+
+诊断行包含：guest/vcpu、elr、esr、ec、count、mean_service_ns、max_service_ns、last_ns、errors、suspect。suspect 位：1=同位置速率严格超过 1000 次/秒；2=最大服务经过时间 >1 ms；4=异常处理返回错误。WFI/WFE 不参与位 1/2 判断，避免把正常等待当重复指令异常；错误位仍保留。
+
+这些是疑似条件而非故障定论；经过时间包含该路径上的等待/抢占，不等于 CPU 执行周期。HVC/SMC 的 ELR 可能是返回地址，定位 A64 调用指令时结合 EC 和反汇编处理，不能把 ELR 统一当成 fault 指令地址。
+
+内置诊断汇总明确输出 `pmu_cycles="not_collected"`。随后保留调用 `vmm_monitor_platform_diagnose()`，产品覆盖该接口时应输出独立记录；默认返回不支持，不影响内置诊断成功。没有修改 PMCR/PMU 计数器，避免占用 Guest 或平台已有 PMU。要实现真正 cycles/instructions/CPI，必须先确定 PMU 所有权、虚拟化方式和过滤口径；本包未将服务耗时换算成伪造的 CPU 周期。
+
+## 5. Guest CPU/内存采集与 HV 查询
+
+### 5.1 Guest 端构建和部署
+
+新增目录 `tools/monitor_guest/`：
+
+- `monitor_guest.c`、`monitor_parse.h`：Linux/Android 用户态采集程序。
+- `xvisor_monitor_bridge.c`、`monitor_uapi.h`：ARM64 Guest 内核设备桥。
+- `Makefile`：用户程序和内核模块构建入口。
+- `parse_monitor_jsonl.py`：HV 输出解析示例。
+
+Linux 示例（使用 Guest 对应的内核构建树和工具链）：
+
+```sh
+make -C tools/monitor_guest CC=aarch64-linux-gnu-gcc
+make -C tools/monitor_guest bridge KDIR=/path/to/guest-kernel-build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+# 将程序和按产品策略签名/集成的驱动放入 Guest
+insmod xvisor_monitor_bridge.ko
+./monitor_guest --interval-ms 1000 --cpu-limit-bp 9000
+```
+
+Android 用户程序使用对应 NDK 的 AArch64 clang 构建；桥按 Android 产品内核构建，模块或内建均需符合项目的内核配置和签名方式。采集服务需访问 `/proc/stat`、`/proc/meminfo` 和 `/dev/xvisor_monitor`，并具有 CAP_SYS_ADMIN；设备默认 0600，SELinux 权限由产品配置。
+
+**仅在已合入本包 HVC 分支的 ARM64 Guest 环境运行上报。**旧固件会把私有 HVC 交给原处理路径；可能注入未定义指令，不能盲测。驱动加载本身不执行 HVC，首次 write 才发送。只查看 Guest 统计时可使用：
+
+```sh
+./monitor_guest --stdout-only
+./monitor_guest --stdout-only --once
+```
+
+采集周期允许 100～2000 ms，默认 1000 ms。CPU 使用 `/proc/stat` 前八个汇总字段的增量；guest/guest_nice 已包括在原 CPU 字段中，不再累加。idle+iowait 计入空闲；计数倒退、总增量为零时 CPU valid 位不置位，重新建立基线。
+
+内存采集 `MemTotal`、`MemAvailable`、`MemFree`，kB 按 1024 转成字节；缺少字段、溢出或容量关系异常时内存 valid 位不置位。`used_estimate_bytes=total-available` 是约定估算口径，不等于所有进程 RSS/PSS 相加。CMA 不在本次新增需求中，没有额外实现。
+
+Guest 每期输出 JSON，其中 `cpu_high` 表示超过 Guest 命令门限。HV 独立门限使用 `monitor config cpu_bp 9000`；10000=100%，9000=90%，0=关闭该告警。部署时同步设置两端门限。
+
+### 5.2 私有 HVC ABI
+
+| 位置 | 值/含义 |
+|---|---|
+| 指令 | `hvc #0x4d4f`，与 PSCI 常用 `hvc #0` 分离 |
+| x0 输入 | `0x584d4f4e00000001`，协议 magic/version |
+| x1 | 驱动本次加载会话随机非零值 |
+| x2 | 本会话递增序号，普通报告非零；0 仅版本查询 |
+| x3 | CPU basis points，0～10000 |
+| x4/x5/x6 | total/available/free，字节 |
+| x7 | 有效位：bit0=CPU，bit1=内存；至少一项有效 |
+| x0 输出 | 报告成功为 0，失败为 VMM 错误；版本查询返回 1 |
+
+HV 仅拦截匹配的 A64 HVC EC、immediate 和 magic；其他 HVC 仍走原路径。HVC 的返回 PC 不额外加 4。身份取自实际陷入的 `vcpu->guest`，报文没有可伪造的目标 Guest ID，也没有 Guest 指针/物理地址参数。
+
+HV 校验字段范围、valid 位和同会话序号；每 Guest 固定一个槽，原子替换报告。不同会话允许重新从序号 1 开始；这不是对恶意 Guest 自报告的真实性认证。每个 Guest 只能更新自己的槽。
+
+### 5.3 HV 命令和质量
+
+```text
+monitor start
+monitor guest
+monitor cpu
+monitor mem Linux
+monitor config cpu_bp 9000
+monitor events
+monitor stop
+```
+
+`monitor guest` 输出每个存在 VM 的 OS 报告；`monitor cpu` 先输出 OS 报告，再输出 vCPU 时延快照。`monitor mem <name>` 输出指定 Guest 报告及区域表。当前开源树仍使用 `guest region_list`；产品改成 `vm region_list` 时保留这一适配，并核对 Guest 查找 API 是否也改名。
+
+OS 报告质量：missing=没有报告；disabled=HV monitor 关闭；stale=距 HV 接收时间超过 3 秒或时间异常；valid=接收时间有效。另必须检查 valid 位决定 CPU/内存字段是否可用。**valid 不是 Guest 健康证明。**
+
+HV 接收时间使用 HV 单调时钟，不和 Guest 时钟直接相减。报告包含 session/seq/received_ns/age_ns；Guest 复位、监控重开清缓存。CPU 高负载事件 type=6，value=cpu_bp，detail=HV 门限，vcpu=UNKNOWN；只用新报告触发，每 Guest 最多 10 秒一条。
+
+## 6. 内存保护与私有路径接入
+
+原 stage-2 和 shmem 埋点保留。新增：
+
+```c
+u32 vmm_shmem_guest_read(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+    physical_addr_t gpa, physical_addr_t off, void *dst, u32 len, bool cacheable);
+u32 vmm_shmem_guest_write(struct vmm_vcpu *actor, struct vmm_shmem *shm,
+    physical_addr_t gpa, physical_addr_t off, void *src, u32 len, bool cacheable);
+```
+
+actor 必须来自真实调用上下文；shm 必须是已持有效引用的对象。接口先验证对象范围与地址加法溢出，再检查该 Guest 的 GPA 映射覆盖整个请求、真实 HPA 恰好等于 `shm->addr+off`、类型为真实 RAM/共享区，以及写入不为 readonly。任何拒绝返回 0，并记录对应 actor 的范围或权限事件；不会执行 backing 访问。
+
+第一版接口明确拒绝 alias 映射，避免绕过中间别名权限。产品要支持 alias，需补齐完整权限传播后再放行。调用者保证 Guest/shm 生命周期，并序列化映射配置变更；不能在授权检查和实际访问间撤销映射后释放对象。
+
+原 `vmm_shmem_read/write/set` 仍为宿主内部 API，不猜测当前 vCPU 就是请求者，也不擅自改变所有宿主访问语义。DM/CCM 中由 Guest 发起的共享访问，应改用新接口或在既有 ACL 拒绝点调用 `vmm_monitor_mem_fault()`。上游没有这些私有调用点，本包不能自动替换它们。
+
+对象内部已授权页上的错误访问、不同对象共用同一映射页、恶意 DMA 不会全部经过这些 API。不能把页级 MMU 边界监控宣称成字节级任意指针检测。
+
+## 7. GICv3 / LPI / fastpath 接入
+
+通用配对表按 vCPU 建表，virq 作为存储的 key，**不会使用 LPI ID 索引普通 IRQ 数组**。
+
+```c
+vmm_monitor_irq_pending_at(target_vcpu, guest_lpi, original_hv_timestamp);
+vmm_monitor_irq_injected(target_vcpu, guest_lpi); /* 成功写 LR 之后 */
+vmm_monitor_irq_cancel(target_vcpu, guest_lpi);   /* 取消，不产生成功样本 */
+vmm_monitor_irq_move(old_vcpu, new_vcpu, guest_lpi); /* 同域 MOVI，保留原起点 */
+```
+
+pending_at 用于异步 DM/CCM 或可显式携带时间戳的 LPI 路径；时间必须为与 HV timer 同源的原始事件时刻，不能在快路径末尾重新取一个“起点”。同步物理分发路径仍可用 `vmm_monitor_irq_pending(target, virq, hirq)` 自动校验来源。
+
+move 只允许同 Guest 的不同 vCPU，按 ID 顺序取得两把关联锁；目标同 virq 已存在时保留较早起点，目标满或跨 epoch 则作废并增加 untracked。调用者必须用实际路由锁同步 MOVI、pending 和注入，否则仅移动监控表不能使真实路由原子化。
+
+针对之前三份附件：
+
+| 产品函数 | 手工接入要求 |
+|---|---|
+| `__vgic_set_pending()` | 普通 pending 原置位必须保留；LPI 使用实际目标与 LPI 映射建立配对，不访问 `irq_state[lpi]` |
+| `__vgic_clear_pending()` | LPI 分支也取消关联 |
+| `__vgic_percpu_irq_fastpath()` | 在直接 queue 前补起点；成功 LR 后唯一结束，避免重复记两次 |
+| `__vgic_mov_lpi()` | 实际迁移的同一临界区调用 move，不调用会重建起点的普通 pending |
+| `vmm_host_generic_irq_exec()` | 成功 lookup 之后 enter；任何 enter 后的返回都恢复 old context |
+
+旧 trace 的 context-switch 执行时间可继续保留，不代替 READY 队列时间。旧 pending 统计若每次覆盖起点，与本版保留首次起点的口径不同，应区分报表。
+
+## 8. 本版验收与已执行验证
+
+| 测试 | 方法 | 本次证据 |
+|---|---|---|
+| ARM64 构建 | on/off/external，13/7/13 个修改相关 TU；另 7 个基线 TU | 已执行 -Os/-Oz；不是完整固件链接 |
+| READY 与调度区间 | 已知时间点，selected 前后分界、同一 vCPU 再选中、状态复位 | 主机模型已执行 |
+| IRQ/LPI/MOVI | 大 IRQ ID、首次起点、迁移、取消、epoch、嵌套/满表 | 通用 API 模型已执行；私有 ITS/VGIC 实际路径待板测 |
+| Guest 上报 | 超范围、重复序号、新会话、域隔离、RESET、stop/start、CPU 告警限频 | 主机模型已执行；Guest/HV HVC 联调待执行 |
+| 定时器上下文 | timer 回调中若睡眠/打印则测试立即失败；stop 后采样不增长；IPI 延迟及失败后回调 | 主机 API 模型已执行；不是硬件中断优先级证明 |
+| 共享内存授权 | 从生产文件提取函数原文；正常、跨 Guest backing、只读、别名、虚拟区、范围和回绕 | 已执行；完整 TU 也交叉编译 |
+| Guest 统计算法 | CPU 前八字段增量、不重复 guest 时间、计数倒退/零窗口、内存单位/缺失/溢出 | 主机测试已执行 |
+| Guest 程序/桥 | ARM64 Linux 用户程序编译；桥 HVC 汇编寄存器约束编译 | 已执行；**没有在真实 Guest 内核树构建完整 ko，也没有运行 ARM64 二进制** |
+| 指令陷入诊断 | 窗口边界、并发启动拒绝、次数/耗时/错误、表满、旧窗口样本 | 主机模型已执行；PMU 未采集 |
+| JSON | 输出逐行解析、v1/v2 区分、P99 上界、零样本 | 已执行基础解析；接收端必须按 kind 分派 |
+| ROM/CPU | 对象段 + hook 增量；目标板开关组同负载比较 | ROM FAIL；CPU <0.5% 尚无板端数据 |
+
+复现脚本：
+
+```sh
+python tests/monitor/run_host_tests.py --cc /path/to/zig --build-dir /tmp/monitor-host
+python tests/monitor/run_boundary_tests.py --cc /path/to/zig --build-dir /tmp/monitor-boundary
+python tests/monitor/cross_compile.py --cc /path/to/zig --build-dir /tmp/monitor-arm64 --baseline-ref <upstream-commit> --enforce-rom
+```
+
+`--enforce-rom` 在超出 5120 B 时必须失败。最终容量必须同一产品工具链、同一配置完整链接开/关版本比较，计入代码/常量/初始化数据/监控拉入的依赖。5 KB 若按 5000 B 解释，本次同样不满足。
+
+板端验收至少包含：双 Guest 满载与 idle；普通 SPI/PPI、LPI、MOVI、fastpath 分类正向样本；Guest 申请/触碰/释放内存而 region 不变；连续超限/恢复；auth 登录和前台切换长稳；日志输出阻塞；关闭和未 start 两组。
+
+CPU 开销统计所有埋点、锁竞争、IRQ 采样和后台输出的增量，不只计线程。单核等效 0.5%=每秒 5 ms，总 12 核归一 0.5%=每秒 60 ms，须先冻结分母。诊断命令单独报告成本，因为它是按需诊断，不是持续监控。
+
+确定性以最大采样迟到、最大关 IRQ 时间、计数缺口和最坏执行时间验收；优先级 3 暂未复现卡死不是原问题已修复的证据。
+
+## 9. 包内容与合入顺序
+
+1. 先看随包“需求覆盖与验证结果.txt”，了解未关闭项。
+2. 对新增文件，按 `新增文件/` 相对路径合入完整内容。
+3. 对原开源文件，按“开源原有文件_手动合入.txt”中的函数、原/新行号和上下文合入，保留产品 packed-state/GICv3/认证代码。
+4. 已合入第一版的项目再看“相对上一版_升级说明.txt”。monitor 自有文件在开源基线中属于新增文件；产品已经改过的 `guest`→`vm` 等适配应保留。
+5. 先验证编译关闭、未 start，再验证定时器采样；最后部署 Guest 桥和采集程序。
+
+本版选择 shell 输出分支，未新增未经配置的共享内存 GPA、设备树地址或 virtio 端口。资料包不是 patch，不应拿整个上游原文件覆盖产品文件。
+
+
+==============================================================================
+新增文件：tests/monitor/arm64_12cpu.config
+完整内容：
+# Fragment for the user's ARM64/12-core integration, not a full board defconfig.
+# Keep the product's own Guest memory map, vCPU count, and device topology.
+CONFIG_CPU_COUNT=12
+CONFIG_MONITOR_AGENT=y
+CONFIG_CMD_MONITOR=y
+CONFIG_MONITOR_HCPU=0
+CONFIG_MONITOR_PRIORITY=3
+CONFIG_MONITOR_IRQ_SLOTS=16
+# CONFIG_MONITOR_START_ENABLED is not set
+# CONFIG_MONITOR_EXTERNAL_EXECUTOR is not set
+
+
+==============================================================================
+新增文件：tests/monitor/cross_compile.py
+完整内容：
+"""Compile touched ARM64 units; no firmware link or hardware execution.
+Use a portable Zig compiler: --cc /path/to/zig --build-dir /tmp/monitor-build
+Optional --baseline-ref REF compares against that local Git revision.
+"""
+import argparse
+import os
+import json
+from pathlib import Path
+import subprocess
+import sys
+sys.dont_write_bytecode=True
+from elf_budget import totals
+
+p=argparse.ArgumentParser()
+p.add_argument('--cc',required=True)
+p.add_argument('--build-dir',required=True)
+p.add_argument('--baseline-ref')
+p.add_argument('--baseline-dir', help='Extracted upstream sources, for offline review builds')
+p.add_argument('--opt', default='s', choices=['s','z'])
+p.add_argument('--enforce-rom',action='store_true')
+args=p.parse_args()
+root=Path(__file__).resolve().parents[2]
+out=Path(args.build_dir).resolve()
+out.mkdir(parents=True,exist_ok=True)
+os.environ.setdefault('ZIG_GLOBAL_CACHE_DIR',str(out/'zig-cache'))
+defines=dict(CONFIG_64BIT=1,CONFIG_ARM64=1,CONFIG_ARM=1,CONFIG_ARMV8=1,
+    CONFIG_SMP=1,CONFIG_CPU_COUNT=12,CONFIG_MAX_VCPU_COUNT=64,
+    CONFIG_MAX_GUEST_COUNT=16,CONFIG_TSLICE_MS=10,CONFIG_ARM_MMU_LPAE=1,
+    CONFIG_ARM_GENERIC_TIMER=1,CONFIG_HOST_IRQ_COUNT=1024,
+    CONFIG_IRQ_STACK_SIZE=4096,CONFIG_THREAD_STACK_SIZE=8192,
+    CONFIG_IDLE_PERIOD_SECS=2,CONFIG_IDLE_TSLICE_SECS=1,
+    CONFIG_VGPA2REG_CACHE_SIZE=8,CONFIG_SCHEDALGO_PRR=1,
+    CONFIG_LOG_LEVEL=6,CONFIG_MONITOR_AGENT=1,CONFIG_MONITOR_PRIORITY=3,
+    CONFIG_MONITOR_HCPU=0,CONFIG_MONITOR_IRQ_SLOTS=16,
+    CONFIG_MAJOR=0,CONFIG_MINOR=3,CONFIG_RELEASE=0,
+    CONFIG_MAX_RAM_BANK_COUNT=16,CONFIG_MODULES=1,CONFIG_ARM_VGIC=1)
+includes=['arch/arm/cpu/arm64/include','arch/arm/cpu/common/include',
+    'arch/arm/board/generic/include','arch/arm/include','arch/include',
+    'arch/common/include','core/include','drivers/include','libs/include']
+new=['core/monitor/monitor_stats.c','core/monitor/monitor_agent.c',
+    'core/monitor/monitor_irq.c','core/monitor/monitor_guest.c',
+    'core/monitor/monitor_diag.c','commands/cmd_monitor.c']
+changed=['core/vmm_scheduler.c','core/vmm_shmem.c','core/vmm_main.c',
+    'core/vmm_host_irq.c','arch/arm/cpu/arm64/cpu_interrupts.c',
+    'arch/arm/cpu/arm64/cpu_vcpu_excep.c','arch/arm/cpu/common/vgic.c']
+results={}
+modes=['on','off','external']+(['baseline'] if args.baseline_ref or args.baseline_dir else [])
+for mode in modes:
+    config=defines.copy()
+    if mode=='off': config.pop('CONFIG_MONITOR_AGENT')
+    if mode=='external': config['CONFIG_MONITOR_EXTERNAL_EXECUTOR']=1
+    flags=[args.cc,'cc','-target','aarch64-freestanding-none','-std=gnu11',
+        '-O'+args.opt,'-ffreestanding','-fno-builtin','-fno-stack-protector',
+        '-mgeneral-regs-only','-D__VMM__','-Wall','-Werror',
+        '-ffile-prefix-map='+str(root)+'=xvisor',
+        '-ffile-prefix-map='+str(out/'baseline')+'=xvisor',
+        # These two warnings occur in unmodified upstream ARM headers.
+        '-Wno-duplicate-decl-specifier','-Wno-asm-operand-widths',
+        '-include',str(root/'core/include/vmm_openconf.h')]
+    flags += [f'-D{k}={v}' for k,v in config.items()]
+    flags += ['-I'+str(root/path) for path in includes]
+    results[mode]={}
+    for name in (changed if mode in ['off','baseline'] else new+changed):
+        source=root/name
+        if mode=='baseline':
+            source=out/'baseline'/name
+            source.parent.mkdir(parents=True,exist_ok=True)
+            source.write_bytes((Path(args.baseline_dir)/name).read_bytes() if args.baseline_dir else subprocess.check_output(
+                ['git','show',args.baseline_ref+':'+name],cwd=root))
+        dest=out/(mode+'_'+Path(name).stem+'.o')
+        run=subprocess.run(flags+['-DVMM_MODNAME='+Path(name).stem,
+            '-c',str(source),'-o',str(dest)],capture_output=True,text=True)
+        (out/(dest.stem+'.log')).write_text(run.stdout+run.stderr)
+        if run.returncode:
+            print(run.stdout+run.stderr)
+            raise SystemExit(run.returncode)
+        rom,bss=totals(dest)
+        results[mode][name]=dict(rom=rom,bss=bss)
+    print(f'PASS: {mode}: {len(results[mode])} ARM64 translation units')
+
+rom=sum(results['on'][f]['rom'] for f in new)
+bss=sum(results['on'][f]['bss'] for f in new)
+delta=None
+if 'baseline' in results:
+    delta=sum(results['on'][f]['rom']-results['baseline'][f]['rom'] for f in changed)
+report=dict(configuration=defines,objects=results,new_rom=rom,new_bss=bss,
+    hook_rom_delta=delta,total_rom_estimate=rom+(delta or 0),rom_limit=5120,
+    limitation='Object section estimate; product link and hardware performance not tested')
+(out/'report.json').write_text(json.dumps(report,indent=2))
+print(f'New ROM: {rom} bytes; static BSS: {bss} bytes; hook ROM delta: {delta}')
+print('ROM budget: '+('PASS' if report['total_rom_estimate']<=5120 else 'FAIL'))
+if args.enforce_rom and report['total_rom_estimate']>5120: raise SystemExit(1)
+
+
+==============================================================================
+新增文件：tests/monitor/elf_budget.py
+完整内容：
+"""Measure allocated ROM/RAM sections of ELF64 little-endian objects.
+Does not count ELF headers, debug info or relocation records as ROM.
+Usage: python elf_budget.py --limit 5120 obj1.o obj2.o ...
+Exit status 1 means measured objects exceed the budget.
+Final linked-image before/after comparison remains the release criterion.
+"""
+import argparse
+import struct
+from pathlib import Path
+
+def sections(path):
+    data=Path(path).read_bytes()
+    if data[:6]!=b'\x7fELF\x02\x01': raise ValueError('Expected ELF64 LE: '+str(path))
+    offset=struct.unpack_from('<Q',data,40)[0]
+    size,count,names=struct.unpack_from('<HHH',data,58)
+    headers=[struct.unpack_from('<IIQQQQIIQQ',data,offset+i*size) for i in range(count)]
+    shstr=headers[names]
+    strings=data[shstr[4]:shstr[4]+shstr[5]]
+    for h in headers:
+        name=strings[h[0]:].split(b'\0',1)[0].decode()
+        if h[2]&2: yield name, h[5], h[1]==8
+
+def totals(path):
+    rom=ram=0
+    for name,size,bss in sections(path):
+        if bss: ram+=size
+        else: rom+=size
+    return rom,ram
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser()
+    p.add_argument('--limit',type=int,default=5120)
+    p.add_argument('objects',nargs='+')
+    args=p.parse_args()
+    rom=ram=0
+    for path in args.objects:
+        r,b=totals(path); rom+=r; ram+=b
+        print(f'{Path(path).name}: ROM={r}, BSS={b}')
+    print(f'TOTAL ROM={rom}, BSS={ram}; budget={args.limit}: '+('PASS' if rom<=args.limit else 'FAIL'))
+    raise SystemExit(rom>args.limit)
+
+
+==============================================================================
+新增文件：tests/monitor/host.h
+完整内容：
+/* Host-only Xvisor API model. Production sources are compiled unchanged. */
+#ifndef MONITOR_TEST_HOST_H
+#define MONITOR_TEST_HOST_H
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <assert.h>
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef unsigned int bool;
+typedef unsigned int irq_flags_t;
+#define TRUE 1
+#define FALSE 0
+#define __weak __attribute__((weak))
+#define __init
+#define __exit
+#define arch_wmb() do { } while (0)
+typedef struct { long value; } atomic_t;
+typedef struct { u64 value; } atomic64_t;
+static inline u64 arch_atomic64_read(atomic64_t *a) { return a->value; }
+static inline void arch_atomic64_inc(atomic64_t *a) { a->value++; }
+static inline long arch_atomic_read(atomic_t *a) { return a->value; }
+static inline void arch_atomic_write(atomic_t *a, long n) { a->value = n; }
+static inline void arch_atomic_inc(atomic_t *a) { a->value++; }
+typedef struct { int held; } vmm_spinlock_t;
+#define DEFINE_SPINLOCK(n) vmm_spinlock_t n = { 0 }
+#define INIT_SPIN_LOCK(p) ((p)->held = 0)
+#define vmm_spin_lock_irqsave_lite(p,f) do { (f)=0; assert(!(p)->held); (p)->held=1; } while (0)
+#define vmm_spin_unlock_irqrestore_lite(p,f) do { (void)(f); assert((p)->held); (p)->held=0; } while (0)
+extern int fail_next_trylock;
+static inline int host_trylock(vmm_spinlock_t *p) {
+    if(fail_next_trylock) { fail_next_trylock=0; return 0; }
+    if(p->held) return 0;
+    p->held=1; return 1;
+}
+#define vmm_spin_trylock_irqsave(p,f) ((f)=0,host_trylock(p))
+#define vmm_spin_unlock_irqrestore(p,f) vmm_spin_unlock_irqrestore_lite(p,f)
+struct vmm_mutex { int held; };
+extern int fake_irq_context;
+#define INIT_MUTEX(p) ((p)->held=0)
+#define DEFINE_MUTEX(n) struct vmm_mutex n = {0}
+static inline void vmm_mutex_lock(struct vmm_mutex *m) { assert(!fake_irq_context && !m->held); m->held=1; }
+static inline void vmm_mutex_unlock(struct vmm_mutex *m) { assert(m->held); m->held=0; }
+struct vmm_guest { u32 id; };
+struct vmm_guest *vmm_manager_guest(u32 id);
+struct vmm_guest *vmm_manager_guest_find(const char *name);
+void vmm_msleep(unsigned long ms);
+void vmm_udelay(unsigned long us);
+struct vmm_vcpu { u32 id, hcpu; bool is_normal; struct vmm_guest *guest; };
+#define VMM_VCPU_STATE_UNKNOWN 1
+#define VMM_VCPU_STATE_RESET 2
+#define VMM_VCPU_STATE_READY 4
+#define VMM_VCPU_STATE_RUNNING 8
+#define VMM_VCPU_STATE_PAUSED 16
+#define VMM_VCPU_STATE_HALTED 32
+extern u64 fake_time;
+extern u32 fake_cpu;
+static inline u64 vmm_timer_timestamp(void) { return fake_time; }
+static inline u32 vmm_smp_processor_id(void) { return fake_cpu; }
+static inline u64 udiv64(u64 a, u64 b) { assert(b); return a/b; }
+#define vmm_snprintf snprintf
+int vmm_printf(const char *, ...);
+struct vmm_chardev { int unused; };
+int vmm_cprintf(struct vmm_chardev *, const char *, ...);
+struct vmm_cmd {
+    const char *name, *desc;
+    void (*usage)(struct vmm_chardev *);
+    int (*exec)(struct vmm_chardev *, int, char **);
+};
+int vmm_cmdmgr_register_cmd(struct vmm_cmd *);
+int vmm_cmdmgr_unregister_cmd(struct vmm_cmd *);
+int vmm_cmdmgr_execute_cmd(struct vmm_chardev *, int, char **);
+#define VMM_EXPORT_SYMBOL(x)
+#define VMM_DECLARE_MODULE(a,b,c,d,init,exit) int host_command_init(void) { (void)exit; return init(); }
+#if defined(CONFIG_MONITOR_AGENT) && !defined(CONFIG_MONITOR_EXTERNAL_EXECUTOR)
+struct vmm_thread { int unused; };
+struct vmm_workqueue { struct vmm_thread thread; };
+struct vmm_work { void (*func)(struct vmm_work *); };
+struct vmm_timer_event { void (*handler)(struct vmm_timer_event *); bool active; u64 expiry; };
+#define INIT_WORK(w,f) ((w)->func=(f))
+#define INIT_TIMER_EVENT(e,h,p) do { (e)->handler=(h); (e)->active=0; } while(0)
+static inline bool vmm_cpu_online(u32 cpu) { return cpu < CONFIG_CPU_COUNT; }
+static inline const void *vmm_cpumask_of(u32 cpu) { return (const void *)(uintptr_t)(cpu+1); }
+struct vmm_workqueue *vmm_workqueue_create(const char *,u32);
+struct vmm_thread *vmm_workqueue_get_thread(struct vmm_workqueue *);
+int vmm_threads_set_affinity(struct vmm_thread *,const void *);
+int vmm_workqueue_destroy(struct vmm_workqueue *);
+int vmm_workqueue_schedule_work(struct vmm_workqueue *,struct vmm_work *);
+int vmm_timer_event_start(struct vmm_timer_event *,u64);
+int vmm_smp_ipi_sync_call(const void *,u32,void (*)(void *,void *,void *),void *,void *,void *);
+#endif
+#endif
+
+
+==============================================================================
+新增文件：tests/monitor/run_boundary_tests.py
+完整内容：
+"""Compile production shmem access bodies against controlled mapping/backing APIs.
+Also build/run Guest parser tests and cross-compile the Linux/Android collector.
+No target kernel module or board execution is claimed.
+"""
+import argparse, os, subprocess
+from pathlib import Path
+p=argparse.ArgumentParser()
+p.add_argument('--cc',required=True)
+p.add_argument('--build-dir',required=True)
+a=p.parse_args()
+root=Path(__file__).resolve().parents[2]
+out=Path(a.build_dir).resolve(); out.mkdir(parents=True,exist_ok=True)
+os.environ.setdefault('ZIG_GLOBAL_CACHE_DIR',str(out/'zig-cache'))
+cc=[a.cc,'cc'] if Path(a.cc).stem=='zig' else [a.cc]
+flags=['-std=gnu11','-O2','-Wall','-Wextra','-Werror']
+source=(root/'core/vmm_shmem.c').read_text()
+body=source[source.index('static bool shmem_guest_allowed'):source.index('int vmm_shmem_iterate')]
+prefix=r'''
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <assert.h>
+typedef uint8_t u8;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef uint64_t physical_addr_t;
+typedef uint64_t physical_size_t;
+typedef unsigned bool;
+#define TRUE 1
+#define FALSE 0
+#define VMM_REGION_REAL 1
+#define VMM_REGION_VIRTUAL 2
+#define VMM_REGION_ALIAS 4
+#define VMM_REGION_MEMORY 8
+#define VMM_REGION_READONLY 128
+#define VMM_REGION_ISRAM 256
+#define VMM_REGION_ISSHARED 16384
+#define VMM_MONITOR_SHMEM_BOUNDS 1
+#define VMM_MONITOR_ACCESS_DENIED 3
+struct vmm_guest { unsigned id; };
+struct vmm_vcpu { bool is_normal; struct vmm_guest *guest; };
+struct vmm_region { u32 flags; };
+struct vmm_shmem { u64 addr,size; };
+static struct vmm_region reg={VMM_REGION_REAL|VMM_REGION_MEMORY|VMM_REGION_ISSHARED};
+static unsigned accesses,faults,last_kind,actor_id;
+static u64 last_address;
+static bool vmm_monitor_range_valid(u64 size,u64 offset,u64 length) { return offset<=size && length<=size-offset; }
+static void vmm_monitor_mem_fault(struct vmm_vcpu *v,u32 k,u64 address,u64 detail) { (void)detail; faults++; last_kind=k; actor_id=v?v->guest->id:~0U; last_address=address; }
+static struct vmm_region *vmm_guest_find_region(struct vmm_guest *g,u64 gpa,u32 flags,bool aliases) { (void)g; (void)flags; (void)aliases; return gpa>=100 && gpa<132?&reg:NULL; }
+static int vmm_guest_physical_map(struct vmm_guest *g,u64 gpa,u64 length,u64 *hpa,u64 *available,u32 *flags) { (void)length; *hpa=(g->id?2000:200)+gpa-100; *available=132-gpa; *flags=reg.flags; return 0; }
+static u32 vmm_host_memory_read(u64 addr,void *data,u32 len,bool cacheable) { (void)addr; (void)data; (void)cacheable; accesses++; return len; }
+static u32 vmm_host_memory_write(u64 addr,void *data,u32 len,bool cacheable) { return vmm_host_memory_read(addr,data,len,cacheable); }
+static u32 vmm_host_memory_set(u64 addr,u8 value,u32 len,bool cacheable) { return vmm_host_memory_read(addr,&value,len,cacheable); }
+u32 vmm_shmem_read(struct vmm_shmem *,u64,void *,u32,bool);
+u32 vmm_shmem_write(struct vmm_shmem *,u64,void *,u32,bool);
+'''
+suffix=r'''
+int main(void) {
+    struct vmm_guest guest={0},other={1};
+    struct vmm_vcpu v={TRUE,&guest},w={TRUE,&other};
+    struct vmm_shmem shm={200,32}; unsigned char data[32]; unsigned before;
+    assert(vmm_shmem_guest_read(&v,&shm,110,10,data,5,FALSE)==5 && accesses==1);
+    assert(vmm_shmem_guest_write(&v,&shm,110,10,data,5,FALSE)==5 && accesses==2);
+    before=accesses;
+    assert(!vmm_shmem_guest_write(&w,&shm,110,10,data,5,FALSE));
+    assert(accesses==before && actor_id==1 && last_kind==VMM_MONITOR_ACCESS_DENIED);
+    assert(!vmm_shmem_guest_read(&v,&shm,131,31,data,2,FALSE));
+    assert(last_kind==VMM_MONITOR_SHMEM_BOUNDS && last_address==131);
+    reg.flags|=VMM_REGION_READONLY;
+    assert(!vmm_shmem_guest_write(&v,&shm,110,10,data,5,FALSE));
+    assert(vmm_shmem_guest_read(&v,&shm,110,10,data,5,FALSE)==5);
+    reg.flags|=VMM_REGION_ALIAS;
+    assert(!vmm_shmem_guest_read(&v,&shm,110,10,data,5,FALSE));
+    reg.flags=VMM_REGION_VIRTUAL|VMM_REGION_MEMORY;
+    assert(!vmm_shmem_guest_read(&v,&shm,110,10,data,5,FALSE));
+    before=accesses;
+    assert(!vmm_shmem_guest_read(NULL,&shm,110,10,data,5,FALSE));
+    assert(!vmm_shmem_read(&shm,~0ULL-1,data,4,FALSE));
+    assert(!vmm_shmem_write(&shm,32,data,1,FALSE));
+    assert(!vmm_shmem_set(&shm,33,0,0,FALSE));
+    assert(accesses==before && faults>=7);
+    puts("PASS: production shmem ranges, mapping ownership, read-only, aliases, overflow, no rejected backing access"); return 0;
+}
+'''
+test=out/'shmem_test.c'; test.write_text(prefix+body+suffix)
+for name,src in [('shmem',test),('guest_parse',root/'tests/monitor/test_guest_parse.c')]:
+    exe=out/(name+'.exe')
+    subprocess.run(cc+flags+[str(src),'-o',str(exe)],check=True)
+    r=subprocess.run([str(exe)],capture_output=True,text=True,check=True)
+    print(r.stdout.strip()); (out/(name+'.txt')).write_text(r.stdout)
+if Path(a.cc).stem=='zig':
+    # Compile only: uses Linux target headers, does not run an ARM64 ELF on Windows.
+    subprocess.run(cc+flags+['-target','aarch64-linux-musl','-c',
+        str(root/'tools/monitor_guest/monitor_guest.c'),'-o',str(out/'guest_collector_arm64.o')],check=True)
+    print('PASS: ARM64 Linux userspace collector cross-compiled')
+    bridge=(root/'tools/monitor_guest/xvisor_monitor_bridge.c').read_text()
+    call=bridge[bridge.index('static long xm_call'):bridge.index('static ssize_t xm_write')]
+    abi=out/'bridge_asm.c'
+    abi.write_text('typedef unsigned long long u64;\n#define XM_HVC_MAGIC 0x584d4f4e00000001ULL\n'
+        'struct xm_report {u64 cpu_bp,total_bytes,available_bytes,free_bytes,valid;};\n'
+        'static u64 session,sequence;\n'+call+'\nlong test_call(const struct xm_report *r) {return xm_call(r);}\n')
+    subprocess.run(cc+flags+['-target','aarch64-freestanding-none','-ffreestanding','-c',str(abi),
+        '-o',str(out/'bridge_asm.o')],check=True)
+    print('PASS: ARM64 bridge HVC register assembly compiled (not a kernel module build)')
+
+
+==============================================================================
+新增文件：tests/monitor/run_host_tests.py
+完整内容：
+"""Run unchanged production sources against a small, deterministic host API model.
+Usage: python tests/monitor/run_host_tests.py --cc /path/to/zig --build-dir /tmp/mon-test
+Use --cc gcc or --cc clang for a conventional host compiler. No target execution.
+"""
+import argparse
+import os
+import json
+import re
+from pathlib import Path
+import subprocess
+
+p = argparse.ArgumentParser()
+p.add_argument('--cc', required=True)
+p.add_argument('--build-dir', required=True)
+args = p.parse_args()
+root = Path(__file__).resolve().parents[2]
+out = Path(args.build_dir).resolve()
+out.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault('ZIG_GLOBAL_CACHE_DIR',str(out/'zig-cache'))
+shim = out / 'include'
+for name in ['vmm_types.h','vmm_manager.h','vmm_timer.h','vmm_mutex.h',
+             'vmm_stdio.h','vmm_modules.h','vmm_smp.h','vmm_cmdmgr.h',
+             'vmm_delay.h',
+             'vmm_threads.h','vmm_workqueue.h',
+             'libs/stringlib.h','libs/mathlib.h','arch_barrier.h','arch_atomic64.h']:
+    path = shim / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('#include "host.h"\n')
+# Error-pointer helpers assume LP64; the host model only needs error numbers.
+errors=(root/'core/include/vmm_error.h').read_text()
+(shim/'vmm_error.h').write_text('\n'.join(line for line in errors.splitlines()
+    if re.match(r'#define\s+VMM_\w+\s+-?\d+\s*$',line))+'\n')
+cmd = [args.cc]
+if Path(args.cc).stem == 'zig': cmd += ['cc']
+cmd += ['-std=gnu11','-O2','-Wall','-Werror',
+        '-DCONFIG_MONITOR_AGENT=1','-DCONFIG_MONITOR_EXTERNAL_EXECUTOR=1',
+        '-DCONFIG_MAX_VCPU_COUNT=4','-DCONFIG_CPU_COUNT=12','-DCONFIG_MONITOR_IRQ_SLOTS=4',
+        '-DCONFIG_MAX_GUEST_COUNT=2',
+        '-I'+str(shim),'-I'+str(root/'tests/monitor'),'-I'+str(root/'core/include')]
+cmd += [str(root/n) for n in ['tests/monitor/test_monitor.c',
+    'core/monitor/monitor_agent.c','core/monitor/monitor_stats.c',
+    'core/monitor/monitor_guest.c','core/monitor/monitor_diag.c',
+    'core/monitor/monitor_irq.c','commands/cmd_monitor.c']]
+exe = out/'test_monitor.exe'
+subprocess.run(cmd+['-o',str(exe)],check=True)
+r = subprocess.run([str(exe)],capture_output=True,text=True,check=True)
+records = [json.loads(line) for line in r.stdout.splitlines() if line.startswith('{')]
+assert len(records) >= 10
+assert len([e for e in records if 'seq' in e]) == 8
+assert any(e.get('kind')=='diagnostic_summary' for e in records)
+(out/'results.txt').write_text(r.stdout)
+print(r.stdout.splitlines()[-1])
+print(f'PASS: {len(records)} JSON records parsed with the standard JSON parser')
+disabled=[args.cc]+(['cc'] if Path(args.cc).stem=='zig' else [])
+disabled += ['-std=gnu11','-O2','-Wall','-Werror','-I'+str(shim),
+    '-I'+str(root/'tests/monitor'),'-I'+str(root/'core/include'),
+    str(root/'tests/monitor/test_disabled.c'),'-o',str(out/'test_disabled.exe')]
+subprocess.run(disabled,check=True)
+subprocess.run([str(out/'test_disabled.exe')],check=True)
+print('PASS: disabled hooks evaluate no arguments')
+
+internal=[x for x in cmd if x!='-DCONFIG_MONITOR_EXTERNAL_EXECUTOR=1']
+internal+=['-DCONFIG_MONITOR_PRIORITY=3','-DCONFIG_MONITOR_HCPU=0']
+internal_exe=out/'test_monitor_timer.exe'
+subprocess.run(internal+['-o',str(internal_exe)],check=True)
+for mode in [[],['timer-fail'],['ipi-timeout'],['ipi-early']]:
+    run=subprocess.run([str(internal_exe)]+mode,capture_output=True,text=True,check=True)
+    (out/('timer_'+('normal' if not mode else mode[0])+'.txt')).write_text(run.stdout)
+    print(run.stdout.splitlines()[-1])
+
+
+==============================================================================
+新增文件：tests/monitor/test_disabled.c
+完整内容：
+#include "host.h"
+#include <vmm_monitor.h>
+#include <vmm_monitor_diag.h>
+static unsigned calls;
+static u64 side_effect(void) { calls++; return 1; }
+int main(void)
+{
+    /* Disabled hooks must not evaluate timestamps or other arguments. */
+    vmm_monitor_state(NULL,0,side_effect());
+    vmm_monitor_selected(NULL,side_effect());
+    vmm_monitor_dispatch(NULL,side_effect(),side_effect());
+    vmm_monitor_irq_pending_at(NULL,side_effect(),side_effect());
+    vmm_monitor_irq_move(NULL,NULL,side_effect());
+    vmm_monitor_diag_end(NULL,side_effect(),side_effect(),side_effect(),side_effect());
+    assert(!vmm_monitor_diag_begin());
+    vmm_monitor_exit(NULL,side_effect());
+    vmm_monitor_mem_fault(NULL,0,side_effect(),side_effect());
+    vmm_monitor_irq_sample(NULL,side_effect(),side_effect());
+    vmm_monitor_irq_pending(NULL,side_effect(),side_effect());
+    vmm_monitor_irq_injected(NULL,side_effect());
+    vmm_monitor_irq_cancel(NULL,side_effect());
+    assert(!calls && !vmm_monitor_enabled());
+    /* Refer to function without invoking it, to retain -Werror coverage. */
+    (void)side_effect;
+    return 0;
+}
+
+
+==============================================================================
+新增文件：tests/monitor/test_guest_parse.c
+完整内容：
+/* Guest telemetry arithmetic, independent from Hypervisor scheduling. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <assert.h>
+#include "../../tools/monitor_guest/monitor_parse.h"
+static FILE *input(const char *s) { FILE *f=tmpfile(); assert(f); fputs(s,f); rewind(f); return f; }
+int main(void)
+{
+    struct xm_cpu a,b; uint64_t bp,total,available,free_bytes; FILE *f;
+    f=input("cpu 10 0 10 80 0 0 0 0 9999 9999\n"); assert(!xm_cpu_read(f,&a)); fclose(f);
+    f=input("cpu 60 0 10 130 0 0 0 0 19999 19999\n"); assert(!xm_cpu_read(f,&b)); fclose(f);
+    assert(!xm_cpu_usage(&a,&b,&bp) && bp==5000); /* guest/guest_nice not double-counted */
+    assert(xm_cpu_usage(&a,&a,&bp));
+    b.field[4]=1; a.field[4]=2; assert(xm_cpu_usage(&a,&b,&bp)); /* reset/decreasing iowait */
+    f=input("MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 400 kB\n");
+    assert(!xm_mem_read(f,&total,&available,&free_bytes)); fclose(f);
+    assert(total==1024000 && available==409600 && free_bytes==102400);
+    f=input("MemTotal: 1000 kB\nMemFree: 100 kB\n"); assert(xm_mem_read(f,&total,&available,&free_bytes)); fclose(f);
+    f=input("MemTotal: 1 kB\nMemFree: 2 kB\nMemAvailable: 1 kB\n"); assert(xm_mem_read(f,&total,&available,&free_bytes)); fclose(f);
+    f=input("MemTotal: 18446744073709551615 kB\n"); assert(xm_mem_read(f,&total,&available,&free_bytes)); fclose(f);
+    puts("PASS: Guest CPU deltas, no double-count, rollback/zero windows, memory units/missing/overflow");
+    return 0;
+}
+
+
+==============================================================================
+新增文件：tests/monitor/test_monitor.c
+完整内容：
+#include "host.h"
+#include <vmm_monitor.h>
+#include <vmm_monitor_guest.h>
+#include <vmm_monitor_diag.h>
+
+u64 fake_time = 10 * VMM_MONITOR_NS;
+u32 fake_cpu;
+int fail_next_trylock;
+int fake_irq_context;
+static struct vmm_cmd *command;
+static unsigned log_count;
+static char output[32768];
+static size_t output_len;
+static struct vmm_guest guests[2] = {{0}, {1}};
+static struct vmm_vcpu vcpus[4] = {
+    {0,0,TRUE,&guests[0]}, {1,1,TRUE,&guests[1]},
+    {2,2,TRUE,&guests[1]}, {3,3,TRUE,&guests[1]}
+};
+struct vmm_guest *vmm_manager_guest(u32 id) { return id < 2 ? &guests[id] : NULL; }
+struct vmm_guest *vmm_manager_guest_find(const char *name) { (void)name; return &guests[0]; }
+void vmm_msleep(unsigned long ms) { assert(!fake_irq_context); fake_time += (u64)ms * 1000000; }
+
+int vmm_printf(const char *fmt, ...)
+{
+    assert(!fake_irq_context);
+    int n; va_list args; va_start(args,fmt);
+    n = vsnprintf(output+output_len,sizeof(output)-output_len,fmt,args);
+    va_end(args); assert(n>=0 && output_len+n<sizeof(output));
+    output_len+=n; log_count++; return n;
+}
+int vmm_cprintf(struct vmm_chardev *c, const char *fmt, ...)
+{
+    assert(!fake_irq_context);
+    int n; va_list args; (void)c; va_start(args,fmt);
+    n = vsnprintf(output+output_len,sizeof(output)-output_len,fmt,args);
+    va_end(args); assert(n>=0 && output_len+n<sizeof(output));
+    output_len+=n; return n;
+}
+int vmm_cmdmgr_register_cmd(struct vmm_cmd *c) { command=c; return 0; }
+int vmm_cmdmgr_unregister_cmd(struct vmm_cmd *c) { (void)c; return 0; }
+int vmm_cmdmgr_execute_cmd(struct vmm_chardev *c, int n, char **args)
+{
+    (void)c; assert(n==3 && !strcmp(args[0],"guest"));
+    assert(!strcmp(args[1],"region_list")); return 0;
+}
+int host_command_init(void);
+
+static void reset_run(void)
+{
+    assert(vmm_monitor_enable(FALSE)==0);
+    fake_time+=VMM_MONITOR_NS;
+    assert(vmm_monitor_enable(TRUE)==0);
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RESET,fake_time);
+}
+static void tick(void) { fake_time+=VMM_MONITOR_NS; vmm_monitor_sample(fake_time); }
+
+static void test_math(void)
+{
+    struct vmm_monitor_hist h={0};
+    struct vmm_monitor_latency s;
+    struct vmm_monitor_streak storm={0};
+    int i;
+    vmm_monitor_hist_read(&h,&s); assert(!s.count && !s.p99_upper_ns);
+    for(i=0;i<99;i++) vmm_monitor_hist_add(&h,1000);
+    vmm_monitor_hist_add(&h,2000000000ULL);
+    vmm_monitor_hist_read(&h,&s); assert(s.count==100 && s.p99_upper_ns==1000);
+    vmm_monitor_hist_add(&h,2000000000ULL);
+    vmm_monitor_hist_read(&h,&s); assert(s.p99_upper_ns==2000000000ULL);
+    for(i=0;i<4;i++) assert(!vmm_monitor_storm_step(&storm,50001,VMM_MONITOR_NS,50000,5,TRUE));
+    assert(vmm_monitor_storm_step(&storm,50001,VMM_MONITOR_NS,50000,5,TRUE)==1);
+    assert(!vmm_monitor_storm_step(&storm,50001,VMM_MONITOR_NS,50000,5,TRUE));
+    assert(vmm_monitor_storm_step(&storm,50000,VMM_MONITOR_NS,50000,5,TRUE)==-1);
+    for(i=0;i<4;i++) assert(!vmm_monitor_storm_step(&storm,50001,VMM_MONITOR_NS,50000,5,TRUE));
+    assert(!vmm_monitor_storm_step(&storm,900000,3*VMM_MONITOR_NS,50000,5,TRUE));
+    assert(storm.elapsed==0 && storm.windows==0);
+    for(i=0;i<6;i++) assert(!vmm_monitor_storm_step(&storm,50001,800000000,50000,5,TRUE));
+    assert(vmm_monitor_storm_step(&storm,50001,800000000,50000,5,TRUE)==1);
+    assert(vmm_monitor_range_valid(100,100,0));
+    assert(!vmm_monitor_range_valid(100,101,0));
+    assert(!vmm_monitor_range_valid(100,99,2));
+    assert(!vmm_monitor_range_valid(~0ULL,~0ULL-3,8));
+}
+
+static void test_scheduler(void)
+{
+    struct vmm_monitor_snapshot s;
+    u32 old_generation;
+    reset_run();
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_READY,fake_time);
+    fake_time+=2000;
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_READY,fake_time);
+    fake_time+=2000;
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RUNNING,fake_time);
+    tick(); assert(!vmm_monitor_snapshot(0,&s));
+    assert(s.ready.count==1 && s.ready.max_ns==4000 && !s.valid);
+    tick(); assert(!vmm_monitor_snapshot(0,&s) && s.valid && s.ready.count==0);
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_READY,fake_time);
+    fake_time+=1234; assert(!vmm_monitor_snapshot(0,&s) && s.ready_age_ns==1234);
+    old_generation=s.generation;
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RESET,fake_time);
+    assert(!vmm_monitor_snapshot(0,&s) && s.generation!=old_generation && !s.ready_age_ns);
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_UNKNOWN,fake_time);
+    assert(vmm_monitor_snapshot(0,&s)==VMM_ENOTAVAIL);
+    assert(!vmm_monitor_enable(FALSE));
+    vmm_monitor_exit(&vcpus[0],1);
+    assert(vmm_monitor_snapshot(0,&s)==VMM_ENOTAVAIL);
+}
+
+static void test_storm(void)
+{
+    struct vmm_monitor_status before, after;
+    struct vmm_monitor_event e;
+    int n,j;
+    reset_run(); tick(); vmm_monitor_status(&before);
+    for(n=0;n<5;n++) {
+        for(j=0;j<50001;j++) vmm_monitor_exit(&vcpus[0],0x16);
+        tick();
+    }
+    vmm_monitor_status(&after); assert(after.events==before.events+1);
+    assert(!vmm_monitor_event_get(after.events,&e));
+    assert(e.type==VMM_MONITOR_EXIT_STORM && e.value==50001 && e.code==0x16);
+    tick(); assert(!vmm_monitor_event_get(after.events+1,&e));
+    assert(e.type==VMM_MONITOR_EXIT_RECOVER);
+    vmm_monitor_status(&before);
+    fail_next_trylock=1; tick();
+    vmm_monitor_status(&after); assert(after.busy_snapshots==before.busy_snapshots+1);
+}
+
+static void test_irq(void)
+{
+    struct vmm_monitor_hirq_context old,nested;
+    struct vmm_monitor_snapshot s;
+    struct vmm_monitor_status status;
+    u64 drops;
+    unsigned i;
+    reset_run();
+    old=vmm_monitor_hirq_enter(55);
+    nested=vmm_monitor_hirq_enter(77);
+    vmm_monitor_hirq_exit(nested);
+    vmm_monitor_irq_pending(&vcpus[0],40,55);
+    fake_time+=200;
+    vmm_monitor_irq_pending(&vcpus[0],40,55); /* Coalescing preserves first. */
+    fake_time+=100;
+    vmm_monitor_irq_injected(&vcpus[0],40);
+    vmm_monitor_irq_injected(&vcpus[0],40); /* Must not double-count. */
+    vmm_monitor_hirq_exit(old);
+    tick(); assert(!vmm_monitor_snapshot(0,&s));
+    assert(s.irq.count==1 && s.irq.max_ns==300);
+    vmm_monitor_status(&status); drops=status.irq_untracked;
+    vmm_monitor_irq_pending(&vcpus[0],41,55); /* No matching host context. */
+    old=vmm_monitor_hirq_enter(55);
+    for(i=0;i<CONFIG_MONITOR_IRQ_SLOTS+1;i++) vmm_monitor_irq_pending(&vcpus[0],100+i,55);
+    vmm_monitor_hirq_exit(old);
+    vmm_monitor_status(&status); assert(status.irq_untracked==drops+2);
+    reset_run();
+    vmm_monitor_irq_injected(&vcpus[0],100);
+    tick(); assert(!vmm_monitor_snapshot(0,&s) && !s.irq.count);
+    old=vmm_monitor_hirq_enter(55);
+    vmm_monitor_irq_pending(&vcpus[0],40,55);
+    vmm_monitor_hirq_exit(old);
+    fake_time+=100;
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RESET,fake_time);
+    vmm_monitor_irq_injected(&vcpus[0],40);
+    tick(); assert(!vmm_monitor_snapshot(0,&s) && !s.irq.count);
+    old=vmm_monitor_hirq_enter(55);
+    vmm_monitor_irq_pending(&vcpus[0],40,55);
+    vmm_monitor_hirq_exit(old);
+    vmm_monitor_irq_cancel(&vcpus[0],40);
+    vmm_monitor_irq_injected(&vcpus[0],40);
+    tick(); assert(!vmm_monitor_snapshot(0,&s) && !s.irq.count);
+}
+
+static void test_events(void)
+{
+    struct vmm_monitor_status st;
+    struct vmm_monitor_snapshot s;
+    struct vmm_monitor_event e;
+    u64 before;
+    unsigned i,j;
+    reset_run();
+    vmm_monitor_mem_fault(NULL,VMM_MONITOR_SHMEM_BOUNDS,~0ULL-4,8);
+    tick(); assert(!vmm_monitor_snapshot(CONFIG_MAX_VCPU_COUNT,&s));
+    assert(s.guest_id==VMM_MONITOR_UNKNOWN && s.faults==1);
+    for(i=0;i<12;i++) {
+        for(j=0;j<4;j++) vmm_monitor_mem_fault(&vcpus[j],VMM_MONITOR_ACCESS_DENIED,j,0xf);
+        fake_time+=10*VMM_MONITOR_NS;
+        vmm_monitor_sample(fake_time);
+    }
+    vmm_monitor_status(&st); assert(st.events>VMM_MONITOR_EVENTS && st.overwritten);
+    assert(vmm_monitor_event_get(st.events-VMM_MONITOR_EVENTS,&e)==VMM_ENOTAVAIL);
+    assert(!vmm_monitor_event_get(st.events,&e));
+    st.config.publish=TRUE; assert(!vmm_monitor_configure(&st.config));
+    before=st.publish_errors;
+    output_len=0; log_count=0;
+    vmm_monitor_drain();
+    vmm_monitor_status(&st);
+    assert(log_count==VMM_MONITOR_BATCH && st.publish_errors==before+VMM_MONITOR_BATCH);
+    fputs(output,stdout); /* Python validates every emitted JSON record. */
+    output_len=0;
+}
+
+static void test_starvation(void)
+{
+    struct vmm_monitor_status st;
+    struct vmm_monitor_event e;
+    u64 before;
+    reset_run(); vmm_monitor_status(&st);
+    st.config.ready_limit_ns=1000;
+    assert(!vmm_monitor_configure(&st.config));
+    before=st.events;
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_READY,fake_time);
+    tick(); vmm_monitor_status(&st);
+    assert(st.events==before+1);
+    assert(!vmm_monitor_event_get(st.events,&e));
+    assert(e.type==VMM_MONITOR_READY_SLOW && e.code==1 && e.value==VMM_MONITOR_NS);
+    st.config.ready_limit_ns=0;
+    assert(!vmm_monitor_configure(&st.config));
+}
+
+static void test_commands(void)
+{
+    char *short_args[]={"monitor"};
+    char *bad[]={"monitor","config","exit_rate","18446744073709551616"};
+    char *status[]={"monitor","status"};
+    char *collect[]={"monitor","collect"};
+    char *mem[]={"monitor","mem","Linux"};
+    assert(!host_command_init());
+    assert(command->exec(NULL,1,short_args)==VMM_EINVALID);
+    assert(command->exec(NULL,4,bad)==VMM_EINVALID);
+    bad[3]="0"; assert(command->exec(NULL,4,bad)==VMM_EINVALID);
+    bad[3]="-1"; assert(command->exec(NULL,4,bad)==VMM_EINVALID);
+    bad[3]="50000"; assert(!command->exec(NULL,4,bad));
+    assert(!command->exec(NULL,3,mem));
+    output_len=0;
+    assert(!command->exec(NULL,2,status));
+    assert(!command->exec(NULL,2,collect));
+    fputs(output,stdout);
+}
+
+static void test_revision_two(void)
+{
+    struct vmm_monitor_snapshot snap;
+    struct vmm_monitor_guest guest;
+    struct vmm_monitor_status st;
+    struct vmm_monitor_event event;
+    struct vmm_monitor_diag_record diag;
+    u64 start, before;
+    unsigned i;
+    reset_run();
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_READY,fake_time);
+    fake_time+=5000;
+    vmm_monitor_selected(&vcpus[0],fake_time-700);
+    vmm_monitor_dispatch(&vcpus[0],fake_time-800,fake_time);
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RUNNING,fake_time);
+    tick(); assert(!vmm_monitor_snapshot(0,&snap));
+    assert(snap.ready.count==1 && snap.ready.max_ns==4300);
+    assert(snap.dispatch.count==1 && snap.dispatch.max_ns==800);
+
+    /* LPI-sized ID and same-Guest MOVI preserve the source timestamp. */
+    start=fake_time;
+    vmm_monitor_irq_pending_at(&vcpus[1],8192,start);
+    fake_time+=100;
+    vmm_monitor_irq_move(&vcpus[1],&vcpus[2],8192);
+    fake_time+=300;
+    vmm_monitor_irq_injected(&vcpus[1],8192);
+    vmm_monitor_irq_injected(&vcpus[2],8192);
+    tick(); assert(!vmm_monitor_snapshot(2,&snap));
+    assert(snap.irq.count==1 && snap.irq.max_ns==400);
+
+    assert(vmm_monitor_guest_report(&vcpus[0],1,1,10001,1000,300,100,3)==VMM_EINVALID);
+    assert(vmm_monitor_guest_report(&vcpus[0],1,1,9500,1000,1001,100,3)==VMM_EINVALID);
+    assert(!vmm_monitor_guest_report(&vcpus[0],1,1,9500,1000,300,100,3));
+    assert(vmm_monitor_guest_report(&vcpus[0],1,1,1,1000,300,100,3)==VMM_EINVALID);
+    assert(!vmm_monitor_guest_get(0,&guest) && guest.cpu_bp==9500 && guest.total_bytes==1000);
+    assert(vmm_monitor_guest_get(1,&guest)==VMM_ENOTAVAIL);
+    vmm_monitor_status(&st); before=st.events;
+    st.config.guest_cpu_limit_bp=9000;
+    assert(!vmm_monitor_configure(&st.config)); tick();
+    vmm_monitor_status(&st); assert(st.events==before+1);
+    assert(!vmm_monitor_event_get(st.events,&event));
+    assert(event.type==VMM_MONITOR_GUEST_CPU_HIGH && event.guest_id==0 && event.value==9500);
+    tick(); vmm_monitor_status(&st); assert(st.events==before+1);
+    assert(!vmm_monitor_guest_report(&vcpus[0],2,1,4000,1000,700,200,3));
+    assert(!vmm_monitor_guest_get(0,&guest) && guest.session==2 && guest.sequence==1);
+    vmm_monitor_state(&vcpus[0],VMM_VCPU_STATE_RESET,fake_time);
+    assert(vmm_monitor_guest_get(0,&guest)==VMM_ENOTAVAIL);
+    assert(!vmm_monitor_enable(FALSE));
+    assert(vmm_monitor_guest_report(&vcpus[0],2,2,1000,1000,700,200,3)==VMM_ENOTAVAIL);
+
+    /* On-demand diagnostics work even when periodic monitoring is stopped. */
+    assert(!vmm_monitor_diag_begin());
+    assert(vmm_monitor_diag_start(0)==VMM_EINVALID);
+    assert(!vmm_monitor_diag_start(100));
+    assert(vmm_monitor_diag_start(100)==VMM_EBUSY);
+    start=vmm_monitor_diag_begin(); fake_time+=1234;
+    vmm_monitor_diag_end(&vcpus[0],0x1234,0x16ULL<<26,start,0);
+    start=vmm_monitor_diag_begin(); fake_time+=2000;
+    vmm_monitor_diag_end(&vcpus[0],0x1234,0x16ULL<<26,start,-1);
+    assert(!vmm_monitor_diag_get(0,&diag));
+    assert(diag.count==2 && diag.sum_ns==3234 && diag.max_ns==2000 && diag.errors==1);
+    for(i=1;i<VMM_MONITOR_DIAG_SLOTS+2;i++) {
+        start=vmm_monitor_diag_begin(); fake_time+=10;
+        vmm_monitor_diag_end(&vcpus[0],0x2000+i*4,1ULL<<26,start,0);
+    }
+    assert(vmm_monitor_diag_overflow()==2);
+    fake_time+=VMM_MONITOR_NS;
+    start=vmm_monitor_diag_begin(); fake_time+=10;
+    vmm_monitor_diag_end(&vcpus[0],0x1234,0x16ULL<<26,start,0);
+    assert(!vmm_monitor_diag_get(0,&diag) && diag.count==2);
+    vmm_monitor_diag_stop(); assert(!vmm_monitor_diag_begin());
+    assert(!vmm_monitor_diag_start(1));
+    vmm_monitor_diag_end(&vcpus[0],0x1234,0,start,0); /* prior window rejected */
+    assert(vmm_monitor_diag_get(0,&diag)==VMM_ENOTAVAIL);
+    vmm_monitor_diag_stop();
+}
+
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+static struct vmm_workqueue queue;
+static struct vmm_work *queued;
+static struct vmm_timer_event *timer;
+static int destroyed, start_error, ipi_timeout;
+static void (*delayed_ipi)(void *,void *,void *);
+struct vmm_workqueue *vmm_workqueue_create(const char *name,u32 priority) { (void)name; assert(priority==3); return &queue; }
+struct vmm_thread *vmm_workqueue_get_thread(struct vmm_workqueue *q) { return &q->thread; }
+int vmm_threads_set_affinity(struct vmm_thread *t,const void *mask) { (void)t; (void)mask; return 0; }
+int vmm_workqueue_destroy(struct vmm_workqueue *q) { (void)q; destroyed++; return 0; }
+int vmm_workqueue_schedule_work(struct vmm_workqueue *q,struct vmm_work *w) { assert(!destroyed && q==&queue); queued=w; return 0; }
+int vmm_timer_event_start(struct vmm_timer_event *e,u64 duration) { timer=e; if(start_error) return start_error; e->active=1; e->expiry=fake_time+duration; return 0; }
+int vmm_smp_ipi_sync_call(const void *mask,u32 timeout,void (*fn)(void *,void *,void *),void *a,void *b,void *c)
+{ (void)mask; (void)timeout; if(ipi_timeout) {delayed_ipi=fn; return ipi_timeout==1?VMM_ETIMEDOUT:0;} fn(a,b,c); return 0; }
+void vmm_udelay(unsigned long us) { fake_time+=(u64)us*1000; if(delayed_ipi) {void (*fn)(void *,void *,void *)=delayed_ipi; delayed_ipi=NULL; fn(NULL,NULL,NULL);} }
+static void test_timer(void)
+{
+    struct vmm_monitor_status before,after;
+    assert(timer && timer->active);
+    vmm_monitor_enable(TRUE); vmm_monitor_status(&before);
+    fake_time=timer->expiry;
+    fake_irq_context=1; timer->handler(timer); fake_irq_context=0;
+    vmm_monitor_status(&after); assert(after.samples==before.samples+1);
+    assert(queued && timer->expiry>fake_time);
+    queued->func(queued); queued=NULL;
+    vmm_monitor_enable(FALSE); vmm_monitor_status(&before);
+    fake_time=timer->expiry;
+    fake_irq_context=1; timer->handler(timer); fake_irq_context=0;
+    vmm_monitor_status(&after); assert(after.samples==before.samples);
+    if(queued) queued->func(queued);
+}
+#endif
+
+int main(int argc,char **argv)
+{
+    test_math();
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+    if(argc>1) {
+        if(!strcmp(argv[1],"ipi-early")) { ipi_timeout=2; goto normal_init; }
+        if(!strcmp(argv[1],"timer-fail")) start_error=VMM_EFAIL;
+        else ipi_timeout=1;
+        assert(vmm_monitor_init()!=0 && destroyed==1);
+        if(delayed_ipi) delayed_ipi(NULL,NULL,NULL);
+        if(timer) {fake_irq_context=1; timer->handler(timer); fake_irq_context=0;}
+        puts("PASS: initialization failure and delayed callback cannot use destroyed queue"); return 0;
+    }
+normal_init:
+#else
+    (void)argc; (void)argv;
+#endif
+    assert(!vmm_monitor_init());
+    assert(!vmm_monitor_enabled());
+#ifndef CONFIG_MONITOR_EXTERNAL_EXECUTOR
+    test_timer();
+#endif
+    test_scheduler(); test_storm(); test_irq(); test_starvation(); test_events(); test_commands();
+    test_revision_two();
+    puts("PASS: arithmetic, lifecycle, IRQ/LPI/MOVI, distinct dispatch/ready, Guest telemetry, diagnostics, commands");
+    return 0;
+}
+
+
+==============================================================================
+新增文件：tools/monitor_guest/Makefile
+完整内容：
+obj-m += xvisor_monitor_bridge.o
+KDIR ?= /lib/modules/$(shell uname -r)/build
+CC ?= cc
+
+.PHONY: all bridge clean
+all: monitor_guest
+monitor_guest: monitor_guest.c monitor_parse.h monitor_uapi.h
+	$(CC) $(CFLAGS) -std=c11 -O2 -Wall -Wextra -Werror -o $@ monitor_guest.c
+bridge:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
+clean:
+	$(RM) monitor_guest
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+
+
+==============================================================================
+新增文件：tools/monitor_guest/monitor_guest.c
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <signal.h>
+#include "monitor_uapi.h"
+#include "monitor_parse.h"
+
+static volatile sig_atomic_t stopping;
+static void stop_handler(int signal_number) { (void)signal_number; stopping = 1; }
+static FILE *open_proc(const char *root, const char *name)
+{
+	char path[1024];
+	int n = snprintf(path, sizeof(path), "%s/%s", root, name);
+	return n < 0 || (size_t)n >= sizeof(path) ? NULL : fopen(path, "r");
+}
+static int number(const char *s, unsigned *value)
+{
+	char *end; unsigned long n;
+	if (!*s || *s == '-') return -1;
+	errno = 0; n = strtoul(s, &end, 10);
+	if (errno || *end || n > UINT_MAX) return -1;
+	*value = (unsigned)n; return 0;
+}
+int main(int argc, char **argv)
+{
+	const char *root = "/proc", *device = "/dev/xvisor_monitor";
+	unsigned interval_ms = 1000, limit = 9000;
+	int once = 0, stdout_only = 0, fd = -1, i, baseline = 0, cpu_ok;
+	struct xm_cpu previous = {{0}}, current;
+	struct xm_report report;
+	struct timespec next, stamp;
+	uint64_t cpu = 0, total, available, free_bytes;
+	FILE *f;
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--once")) once = 1;
+		else if (!strcmp(argv[i], "--stdout-only")) stdout_only = 1;
+		else if (i + 1 < argc && !strcmp(argv[i], "--device")) device = argv[++i];
+		else if (i + 1 < argc && !strcmp(argv[i], "--proc-root")) root = argv[++i];
+		else if (i + 1 < argc && !strcmp(argv[i], "--interval-ms")) { if (number(argv[++i], &interval_ms)) return 2; }
+		else if (i + 1 < argc && !strcmp(argv[i], "--cpu-limit-bp")) { if (number(argv[++i], &limit)) return 2; }
+		else { fprintf(stderr, "monitor_guest [--once] [--stdout-only] [--device PATH] [--proc-root PATH] [--interval-ms 100..2000] [--cpu-limit-bp 0..10000]\n"); return 2; }
+	}
+	if (interval_ms < 100 || interval_ms > 2000 || limit > 10000) return 2;
+	if (!stdout_only && (fd = open(device, O_WRONLY | O_CLOEXEC)) < 0) { perror(device); return 1; }
+	signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
+	f = open_proc(root, "stat");
+	if (f) { baseline = !xm_cpu_read(f, &previous); fclose(f); }
+	if (clock_gettime(CLOCK_MONOTONIC, &next)) return 1;
+	while (!stopping) {
+		next.tv_nsec += (long)interval_ms * 1000000L;
+		next.tv_sec += next.tv_nsec / 1000000000L; next.tv_nsec %= 1000000000L;
+		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR && !stopping) { }
+		if (stopping) break;
+		memset(&report, 0, sizeof(report)); cpu_ok = 0;
+		f = open_proc(root, "stat");
+		if (f) { if (!xm_cpu_read(f, &current)) { cpu_ok = baseline && !xm_cpu_usage(&previous, &current, &cpu); previous = current; baseline = 1; } else baseline = 0; fclose(f); } else baseline = 0;
+		if (cpu_ok) { report.cpu_bp = cpu; report.valid |= 1; }
+		f = open_proc(root, "meminfo");
+		if (f) { if (!xm_mem_read(f, &total, &available, &free_bytes)) { report.total_bytes = total; report.available_bytes = available; report.free_bytes = free_bytes; report.valid |= 2; } fclose(f); }
+		if (clock_gettime(CLOCK_MONOTONIC, &stamp)) break;
+		printf("{\"schema\":1,\"kind\":\"guest_sample\",\"time_ns\":%"PRIu64",\"valid\":%"PRIu64",\"cpu_bp\":%"PRIu64",\"cpu_high\":%u,\"total_bytes\":%"PRIu64",\"available_bytes\":%"PRIu64",\"used_estimate_bytes\":%"PRIu64"}\n",
+			(uint64_t)stamp.tv_sec * 1000000000 + (uint64_t)stamp.tv_nsec, (uint64_t)report.valid,
+			(uint64_t)report.cpu_bp, (unsigned)(cpu_ok && limit && cpu > limit),
+			(uint64_t)report.total_bytes, (uint64_t)report.available_bytes,
+			(uint64_t)(report.total_bytes - report.available_bytes));
+		fflush(stdout);
+		if (fd >= 0 && report.valid && write(fd, &report, sizeof(report)) != sizeof(report)) perror("monitor report");
+		if (once) break;
+		/* Skip missed periods, do not burst old measurements after a stall. */
+		if (stamp.tv_sec > next.tv_sec || (stamp.tv_sec == next.tv_sec && stamp.tv_nsec > next.tv_nsec)) next = stamp;
+	}
+	if (fd >= 0) close(fd);
+	return 0;
+}
+
+
+==============================================================================
+新增文件：tools/monitor_guest/monitor_parse.h
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef XM_PARSE_H
+#define XM_PARSE_H
+#include <stdint.h>
+#include <stdio.h>
+#include <inttypes.h>
+#include <string.h>
+#include <limits.h>
+struct xm_cpu { uint64_t field[8]; };
+static int xm_cpu_read(FILE *f, struct xm_cpu *c)
+{
+	char line[512];
+	return !fgets(line, sizeof(line), f) || sscanf(line,
+		"cpu %"SCNu64" %"SCNu64" %"SCNu64" %"SCNu64" %"SCNu64" %"SCNu64" %"SCNu64" %"SCNu64,
+		&c->field[0], &c->field[1], &c->field[2], &c->field[3],
+		&c->field[4], &c->field[5], &c->field[6], &c->field[7]) != 8 ? -1 : 0;
+}
+static int xm_cpu_usage(const struct xm_cpu *a, const struct xm_cpu *b, uint64_t *bp)
+{
+	uint64_t total = 0, idle = 0, delta;
+	unsigned i;
+	for (i = 0; i < 8; i++) {
+		if (b->field[i] < a->field[i]) return -1;
+		delta = b->field[i] - a->field[i];
+		if (UINT64_MAX - total < delta) return -1;
+		total += delta;
+		if (i == 3 || i == 4) idle += delta;
+	}
+	if (!total) return -1;
+	*bp = (uint64_t)(((__uint128_t)(total - idle) * 10000) / total);
+	return 0;
+}
+static int xm_mem_read(FILE *f, uint64_t *total, uint64_t *available, uint64_t *free_bytes)
+{
+	char line[256], key[64], unit[8];
+	uint64_t value;
+	unsigned present = 0;
+	*total = *available = *free_bytes = 0;
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "%63s %"SCNu64" %7s", key, &value, unit) != 3) continue;
+		if (strcmp(key, "MemTotal:") && strcmp(key, "MemAvailable:") && strcmp(key, "MemFree:")) continue;
+		if (strcmp(unit, "kB") || value > UINT64_MAX / 1024) return -1;
+		value *= 1024;
+		if (!strcmp(key, "MemTotal:")) { *total = value; present |= 1; }
+		if (!strcmp(key, "MemAvailable:")) { *available = value; present |= 2; }
+		if (!strcmp(key, "MemFree:")) { *free_bytes = value; present |= 4; }
+	}
+	return present != 7 || !*total || *available > *total || *free_bytes > *total ? -1 : 0;
+}
+#endif
+
+
+==============================================================================
+新增文件：tools/monitor_guest/monitor_uapi.h
+完整内容：
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef XVISOR_MONITOR_UAPI_H
+#define XVISOR_MONITOR_UAPI_H
+#include <linux/types.h>
+#define XM_HVC_IMM 0x4d4f
+#define XM_HVC_MAGIC 0x584d4f4e00000001ULL
+/* Native Linux ABI: five u64 values, 40 bytes; no pointers. */
+struct xm_report {
+	__u64 cpu_bp, total_bytes, available_bytes, free_bytes, valid;
+};
+#endif
+
+
+==============================================================================
+新增文件：tools/monitor_guest/parse_monitor_jsonl.py
+完整内容：
+"""Read pure monitor JSONL with Python integer precision.
+
+Usage: python parse_monitor_jsonl.py qemu_monitor_sample_20261021.jsonl --output analysis.json
+This validates exported fields, not actual hardware behavior or full IRQ coverage.
+"""
+import argparse
+import json
+from pathlib import Path
+
+NS = 1_000_000_000
+QUALITIES = {"disabled", "warmup", "stale", "valid", "warmup_or_gap"}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate field: " + key)
+        result[key] = value
+    return result
+
+
+def uint(record, key):
+    value = record[key]
+    if type(value) is not int or not 0 <= value <= (1 << 64) - 1:
+        raise ValueError(key + " must be an unsigned integer")
+    return value
+
+
+def reject_constant(value):
+    raise ValueError("non-JSON number: " + value)
+
+
+def classify(record):
+    if "instruction_cycles" in record:
+        return "diagnostic"
+    if type(record.get("schema")) is not int or record["schema"] not in (1, 2):
+        raise ValueError("unsupported schema")
+    if record.get("kind") in {"guest_os", "trap_diagnostic", "diagnostic_summary"}:
+        return record["kind"]
+    if "seq" in record and "type" in record:
+        return "event"
+    if "enabled" in record and "samples" in record:
+        return "status"
+    if "ready" in record and "host_irq_to_lr" in record:
+        return "snapshot"
+    raise ValueError("unrecognized record type")
+
+
+def latency(record):
+    n = uint(record, "count")
+    mean = uint(record, "mean_ns")
+    p99 = uint(record, "p99_upper_ns")
+    maximum = uint(record, "max_ns")
+    jitter = uint(record, "jitter_range_ns")
+    if not n:
+        if any([mean, p99, maximum, jitter]):
+            raise ValueError("zero count has nonzero statistics")
+        return dict(count=0, mean_us=None, p99_upper_us=None,
+                    max_us=None, min_us=None, jitter_range_us=None)
+    if jitter > maximum or not maximum - jitter <= mean <= maximum:
+        raise ValueError("latency mean/min/max/jitter are inconsistent")
+    # A bucket upper bound can exceed the observed maximum. Do not reject it.
+    return dict(count=n, mean_us=mean / 1000, p99_upper_us=p99 / 1000,
+                max_us=maximum / 1000, min_us=(maximum - jitter) / 1000,
+                jitter_range_us=jitter / 1000)
+
+
+def analyze(path):
+    snapshots, other, errors = [], [], []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line, object_pairs_hook=unique_object,
+                                parse_constant=reject_constant)
+            if not isinstance(record, dict):
+                raise ValueError("record must be an object")
+            kind = classify(record)
+            if kind != "snapshot":
+                other.append(dict(line=line_number, kind=kind, record=record))
+                continue
+            for key in ["guest", "vcpu", "generation", "hcpu", "state", "time_ns",
+                        "interval_ns", "exits", "exit_rate", "last_exit", "ready_age_ns",
+                        "faults_pending_summary", "last_address", "last_fault", "last_detail"]:
+                uint(record, key)
+            if record["quality"] not in QUALITIES:
+                raise ValueError("unknown quality")
+            dt = record["interval_ns"]
+            if record["quality"] == "valid" and not NS * 3 // 4 <= dt <= NS * 5 // 4:
+                raise ValueError("valid quality with invalid interval")
+            # The first warmup reports interval_ns=0; its rate is not meaningful.
+            expected_rate = record["exits"] * NS // dt if dt else None
+            if expected_rate is not None and record["exit_rate"] != expected_rate:
+                raise ValueError("exit_rate does not match floor(exits * 1e9 / interval_ns)")
+            snapshots.append(dict(line=line_number, guest=record["guest"], vcpu=record["vcpu"],
+                schema=record["schema"], generation=record["generation"], hcpu=record["hcpu"], state_raw=record["state"],
+                quality=record["quality"], time_ns=record["time_ns"], interval_ns=dt,
+                exits=record["exits"], exit_rate=record["exit_rate"],
+                last_exit_raw=record["last_exit"], ready=latency(record["ready"]),
+                host_irq_to_lr=latency(record["host_irq_to_lr"]),
+                dispatch=latency(record["dispatch"]) if "dispatch" in record else None))
+        except (ValueError, KeyError, TypeError) as error:
+            errors.append(dict(line=line_number, error=str(error)))
+    return dict(snapshot_count=len(snapshots),
+                guest_ids=sorted({r["guest"] for r in snapshots}),
+                observed_hcpus=sorted({r["hcpu"] for r in snapshots}),
+                irq_sample_count=sum(r["host_irq_to_lr"]["count"] for r in snapshots),
+                errors=errors, snapshots=snapshots, other_records=other,
+                note="valid denotes window quality, not system health; null latency means no samples")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    result = analyze(args.input)
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output:
+        args.output.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return bool(result["errors"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+==============================================================================
+新增文件：tools/monitor_guest/xvisor_monitor_bridge.c
+完整内容：
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* ARM64 Guest kernel bridge. Load only with the matching monitor HVC firmware. */
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/miscdevice.h>
+#include <linux/uaccess.h>
+#include <linux/mutex.h>
+#include <linux/random.h>
+#include <linux/capability.h>
+#include "monitor_uapi.h"
+#ifndef CONFIG_ARM64
+#error "xvisor_monitor_bridge requires an ARM64 Guest"
+#endif
+
+static DEFINE_MUTEX(report_lock);
+static u64 session, sequence;
+
+static long xm_call(const struct xm_report *r)
+{
+	register u64 x0 asm("x0") = XM_HVC_MAGIC;
+	register u64 x1 asm("x1") = session;
+	register u64 x2 asm("x2") = ++sequence;
+	register u64 x3 asm("x3") = r->cpu_bp;
+	register u64 x4 asm("x4") = r->total_bytes;
+	register u64 x5 asm("x5") = r->available_bytes;
+	register u64 x6 asm("x6") = r->free_bytes;
+	register u64 x7 asm("x7") = r->valid;
+	/* The private ABI preserves x1..x7. Declare them read/write conservatively. */
+	asm volatile("hvc #0x4d4f" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+		"+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) : : "memory");
+	return (long)x0;
+}
+
+static ssize_t xm_write(struct file *file, const char __user *buffer,
+			size_t length, loff_t *position)
+{
+	struct xm_report r;
+	long rc;
+	if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+	if (length != sizeof(r)) return -EINVAL;
+	if (copy_from_user(&r, buffer, sizeof(r))) return -EFAULT;
+	if (!r.valid || r.valid > 3 || r.cpu_bp > 10000 ||
+	    r.available_bytes > r.total_bytes || r.free_bytes > r.total_bytes ||
+	    ((r.valid & 2) && !r.total_bytes)) return -EINVAL;
+	if (mutex_lock_interruptible(&report_lock)) return -ERESTARTSYS;
+	rc = xm_call(&r);
+	mutex_unlock(&report_lock);
+	/* HV error numbers are not Linux errno; do not pass them through. */
+	return rc ? -EAGAIN : sizeof(r);
+}
+
+static const struct file_operations xm_fops = {
+	.owner = THIS_MODULE, .write = xm_write, .open = nonseekable_open,
+};
+static struct miscdevice xm_device = {
+	.minor = MISC_DYNAMIC_MINOR, .name = "xvisor_monitor",
+	.fops = &xm_fops, .mode = 0600,
+};
+static int __init xm_init(void)
+{
+	get_random_bytes(&session, sizeof(session));
+	if (!session) session = 1;
+	return misc_register(&xm_device);
+}
+static void __exit xm_exit(void) { misc_deregister(&xm_device); }
+module_init(xm_init);
+module_exit(xm_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Xvisor monitor ARM64 Guest telemetry bridge");
