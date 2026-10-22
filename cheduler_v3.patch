@@ -1,0 +1,70 @@
+--- a/core/vmm_scheduler.c
++++ b/core/vmm_scheduler.c
+@@ -19,10 +19,11 @@
+  * @file vmm_scheduler.c
+  * @author Anup Patel (anup@brainfault.org)
+  * @brief source file for hypervisor scheduler
+  */
+ #include <vmm_error.h>
++#include <vmm_monitor.h>
+ #include <vmm_smp.h>
+ #include <vmm_percpu.h>
+ #include <vmm_cpumask.h>
+ #include <vmm_cpuhp.h>
+ #include <vmm_stdio.h>
+@@ -167,11 +168,13 @@
+     if (rc) {
+         /* This should never happen !!! */
+         vmm_panic("%s: dequeue error %d\n", __func__, rc);
+     }
+     vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
++    vmm_monitor_selected(next, vmm_timer_timestamp());
+     arch_vcpu_switch(NULL, next, regs);
++    vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+     next->state_ready_nsecs += tstamp - next->state_tstamp;
+     vmm_scheduler_set_state_raw(next, VMM_VCPU_STATE_RUNNING);
+     next->resumed = FALSE;
+     next->state_tstamp = tstamp;
+     schedp->current_vcpu = next;
+@@ -211,10 +214,11 @@
+             __vmm_scheduler_sync_system_time(schedp, current);
+             current->state_running_nsecs +=
+                 tstamp - current->state_tstamp;
+             vmm_scheduler_set_state_raw(current, VMM_VCPU_STATE_READY);
+             current->state_tstamp = tstamp;
++            vmm_monitor_state(current, VMM_VCPU_STATE_READY, tstamp);
+             rq_enqueue(schedp, current);
+         }
+         tcurrent = current;
+     }
+ dequeue_again:
+@@ -237,12 +241,16 @@
+         BUG_ON(vmm_scheduler_get_state(next, &next_state) != VMM_OK);
+         if (next_state != VMM_VCPU_STATE_READY) {
+             vmm_write_unlock_irqrestore_lite(&next->sched_lock, nf);
+             goto dequeue_again;
+         }
++        vmm_monitor_selected(next, vmm_timer_timestamp());
+         arch_vcpu_switch(tcurrent, next, regs);
+-    }
++    } else {
++        vmm_monitor_selected(next, vmm_timer_timestamp());
++    }
++    vmm_monitor_dispatch(next, tstamp, vmm_timer_timestamp());
+     next->state_ready_nsecs += tstamp - next->state_tstamp;
+     vmm_scheduler_set_state_raw(next, VMM_VCPU_STATE_RUNNING);
+     next->resumed = FALSE;
+     next->state_tstamp = tstamp;
+     schedp->current_vcpu = next;
+@@ -670,10 +678,11 @@
+             vcpu->state_paused_nsecs = 0;
+             vcpu->state_halted_nsecs = 0;
+             vcpu->system_nsecs = 0;
+             vcpu->reset_tstamp = tstamp;
+         }
++        vmm_monitor_state(vcpu, new_state, tstamp);
+         state_packed = VCPU_STATE_PACK(vhcpu, new_state);
+         vmm_scheduler_set_state_packed(vcpu, state_packed);
+         vcpu->state_tstamp = tstamp;
+     }
+ skip_state_change:
