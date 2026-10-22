@@ -1,0 +1,148 @@
+--- a/core/vmm_scheduler.c
++++ b/core/vmm_scheduler.c
+@@ -19,10 +19,11 @@
+  * @file vmm_scheduler.c
+  * @author Anup Patel (anup@brainfault.org)
+  * @brief source file for hypervisor scheduler
+  */
+ #include <vmm_error.h>
++#include <vmm_monitor.h>
+ #include <vmm_smp.h>
+ #include <vmm_percpu.h>
+ #include <vmm_cpumask.h>
+ #include <vmm_cpuhp.h>
+ #include <vmm_stdio.h>
+@@ -392,10 +393,11 @@
+                 /* This should never happen !!! */
+                 vmm_panic("%s: dequeue error %d\n", __func__, rc);
+         }
+         vmm_write_lock_irqsave_lite(&next->sched_lock, nf);
+         tstamp = vmm_timer_timestamp();
++        vmm_monitor_selected(next, tstamp);
+ #ifdef CONFIG_SCHED_HISTORY
+         sched_in_tstamp = tstamp;
+ #endif
+         arch_vcpu_switch(NULL, next, regs);
+         next->state_ready_nsecs += tstamp - next->state_tstamp;
+@@ -473,10 +475,11 @@
+                                 current->state_running_max_nsecs =
+                                         tstamp - current->state_tstamp;
+                         }
+                         vmm_scheduler_set_state_raw(current, VMM_VCPU_STATE_READY);
+                         current->state_tstamp = tstamp;
++                        vmm_monitor_state(current, VMM_VCPU_STATE_READY, tstamp);
+                         rq_enqueue(schedp, current);
+                 }
+                 tcurrent = current;
+         }
+ dequeue_again:
+@@ -505,14 +508,22 @@
+                  * The old tstamp is fetched before we acquiring
+                  * next->sched_lock, which means next->state_tstamp may be
+                  * after tstamp. So we need to update tstamp at this point.
+                  */
+                 tstamp = vmm_timer_timestamp();
++                vmm_monitor_selected(next, tstamp);
+                 arch_vcpu_switch(tcurrent, next, regs);
+         }
+ #ifdef CONFIG_SCHED_HISTORY
+         sched_out_tstamp = sched_in_tstamp = vmm_timer_timestamp();
++        if (next == current) {
++                vmm_monitor_selected(next, sched_in_tstamp);
++        }
++#else
++        if (next == current) {
++                vmm_monitor_selected(next, vmm_timer_timestamp());
++        }
+ #endif
+         next->state_ready_nsecs += tstamp - next->state_tstamp;
+         if (tstamp - next->state_tstamp > next->state_ready_max_nsecs) {
+                 next->state_ready_max_nsecs = tstamp - next->state_tstamp;
+         }
+@@ -573,25 +584,31 @@
+                                  arch_regs_t *regs)
+ {
+         u32 preempt_min;
+         struct vmm_vcpu *next;
+         struct vmm_vcpu *current = schedp->current_vcpu;
+-#ifdef CONFIG_CMD_LAT_CTX
++#if defined(CONFIG_CMD_LAT_CTX) || defined(CONFIG_MONITOR_AGENT)
+         u64 t1=0, t2=0;
++#endif
++#ifdef CONFIG_MONITOR_AGENT
++        bool scheduled = FALSE;
+ #endif
+         if (!regs) {
+                 /* This should never happen !!! */
+                 vmm_panic("%s: null pointer to regs.\n", __func__);
+         }
+         if (current) {
+                 preempt_min = (current->wq_lock) ? 1 : 0;
+                 if (current->preempt_count == preempt_min) {
+                         irq_flags_t cf;
+                         vmm_write_lock_irqsave_lite(&current->sched_lock, cf);
+-#ifdef CONFIG_CMD_LAT_CTX
+-                        /* 点位1 */
++#if defined(CONFIG_CMD_LAT_CTX) || defined(CONFIG_MONITOR_AGENT)
++                        /* 点位1: shared by trace and monitor. */
+                         t1 = vmm_timer_timestamp();
++#endif
++#ifdef CONFIG_MONITOR_AGENT
++                        scheduled = TRUE;
+ #endif
+                         next = __vmm_scheduler_next2(schedp, current, regs);
+                         vmm_write_unlock_irqrestore_lite(&current->sched_lock,
+                                                          cf);
+                         if (next != current) {
+@@ -607,22 +624,37 @@
+                 } else {
+                         vmm_timer_event_restart(&schedp->ev);
+                         next = NULL;
+                 }
+         } else {
++#ifdef CONFIG_MONITOR_AGENT
++                t1 = vmm_timer_timestamp();
++                scheduled = TRUE;
++#endif
+                 next = __vmm_scheduler_next1(schedp, regs);
+         }
+         if (next) {
+                 arch_vcpu_post_switch(next, regs);
++#if defined(CONFIG_CMD_LAT_CTX) || defined(CONFIG_MONITOR_AGENT)
++                /* 点位2: capture once, before either consumer runs. */
++                t2 = vmm_timer_timestamp();
++#endif
+ #ifdef CONFIG_CMD_LAT_CTX
+-                /* 点位2 */
+-                t2 = vmm_timer_timestamp();
+                 if(current && next != current){
+                         trace_ctx_switch(t2 - t1, current, next);
+                 }
+ #endif
+         }
++#ifdef CONFIG_MONITOR_AGENT
++        if (scheduled) {
++                /* NULL also denotes current selected again, not only deferral. */
++                if (!next) {
++                        t2 = vmm_timer_timestamp();
++                }
++                vmm_monitor_dispatch(next ? next : current, t1, t2);
++        }
++#endif
+ }
+ static void scheduler_timer_event(struct vmm_timer_event *ev)
+ {
+         struct vmm_scheduler_ctrl *schedp = &this_cpu(sched);
+         if (schedp->irq_regs) {
+@@ -1195,10 +1227,11 @@
+                         vcpu->state_halted_max_nsecs = 0;
+                         vcpu->irq_process_max_nsecs = 0;
+                         vcpu->exp_process_max_nsecs = 0;
+                         vcpu->reset_tstamp = tstamp;
+                 }
++                vmm_monitor_state(vcpu, new_state, tstamp);
+                 state_packed = VCPU_STATE_PACK(vhcpu, new_state);
+                 vmm_scheduler_set_state_packed(vcpu, state_packed);
+                 vcpu->state_tstamp = tstamp;
+         }
+ skip_state_change:
