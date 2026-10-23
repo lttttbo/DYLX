@@ -1,0 +1,14 @@
+diff --git a/libs/wboxtest/monitor/memory.c b/libs/wboxtest/monitor/memory.c
+--- a/libs/wboxtest/monitor/memory.c
++++ b/libs/wboxtest/monitor/memory.c
+@@ -1,6 +1,10 @@
+ /* SPDX-License-Identifier: GPL-2.0-or-later */
++/* Product trees may add this entry point. Rename before headers so its
++ * declaration and the included implementation use the same private symbol. */
++#define vmm_shmem_reserve wb_shmem_reserve
++
+ #include "common.h"
+ #include <vmm_shmem.h>
+ #include <vmm_guest_aspace.h>
+ #include <vmm_host_aspace.h>
+ #include <vmm_host_ram.h>
