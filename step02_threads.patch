@@ -1,0 +1,78 @@
+diff --git a/arch/arm/cpu/common/optee.c b/arch/arm/cpu/common/optee.c
+--- a/arch/arm/cpu/common/optee.c
++++ b/arch/arm/cpu/common/optee.c
+@@ -79,11 +79,11 @@
+  
+  /*
+   * This should match the number of OP-TEE SMC function IDs explicitly handled
+   * by the mediator.
+   */
+- #define OPTEE_MEDIATOR_SMC_COUNT   11U
++ #define OPTEE_MEDIATOR_SMC_COUNT   12U
+  
+  /*
+   * Local resource limits. These are hypervisor-side limits, independent from
+   * secure world thread count.
+   */
+@@ -1422,10 +1422,46 @@
+          cpu_vcpu_reg_write(vcpu, regs, 1, sec_caps);
+          cpu_vcpu_reg_write(vcpu, regs, 2, res.a2);
+          cpu_vcpu_reg_write(vcpu, regs, 3, res.a3);
+  }
+  
++ static void optee_handle_get_thread_count(struct optee_ctx *ctx,
++                                           struct vmm_vcpu *vcpu,
++                                           arch_regs_t *regs)
++ {
++         struct arm_smccc_res res;
++         u32 secure_threads, max_calls, guest_threads;
++
++         /* Query with this Guest's client ID, never a Guest-supplied a7. */
++         optee_smc_call(ctx->client_id, OPTEE_SMC_GET_THREAD_COUNT,
++                        0, 0, 0, 0, 0, 0, &res);
++         if ((u32)res.a0 != OPTEE_SMC_RETURN_OK) {
++                 /* On failure the ABI preserves a1-a7. */
++                 cpu_vcpu_reg_write(vcpu, regs, 0, res.a0);
++                 return;
++         }
++
++         secure_threads = (u32)res.a1;
++         vmm_spin_lock(&ctx->lock);
++         max_calls = ctx->max_calls;
++         vmm_spin_unlock(&ctx->lock);
++
++         /* Report total capacity, not max_calls minus active calls. */
++         guest_threads = secure_threads < max_calls ? secure_threads : max_calls;
++         if (!guest_threads) {
++                 cpu_vcpu_reg_write(vcpu, regs, 0,
++                                    OPTEE_SMC_RETURN_UNKNOWN_FUNCTION);
++                 return;
++         }
++
++         OPTEE_FLOW_DBG("get_thread_count: client_id=%u secure=%u limit=%u exposed=%u",
++                        ctx->client_id, secure_threads, max_calls, guest_threads);
++         /* The successful query only changes a0 and a1; preserve a2-a7. */
++         cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_OK);
++         cpu_vcpu_reg_write(vcpu, regs, 1, guest_threads);
++ }
++
+  static void optee_handle_get_shm_config(struct vmm_vcpu *vcpu, arch_regs_t *regs)
+  {
+          /* multi-VM mediator forbids global static SHM for guests */
+          cpu_vcpu_reg_write(vcpu, regs, 0, OPTEE_SMC_RETURN_ENOTAVAIL);
+  }
+@@ -1840,10 +1876,14 @@
+  
+          case OPTEE_SMC_EXCHANGE_CAPABILITIES:
+                  optee_handle_exchange_caps(ctx, vcpu, regs);
+                  return true;
+  
++         case OPTEE_SMC_GET_THREAD_COUNT:
++                 optee_handle_get_thread_count(ctx, vcpu, regs);
++                 return true;
++
+          case OPTEE_SMC_GET_SHM_CONFIG:
+                  optee_handle_get_shm_config(vcpu, regs);
+                  return true;
+  
+          case OPTEE_SMC_CALL_WITH_ARG:
